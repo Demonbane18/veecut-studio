@@ -893,7 +893,11 @@ fn cut(
         ),
         json!({"kept": ka})
     );
-    let removed = subtract(&kb, &ka);
+    // Re-saved timelines leave zero-length slivers such as 26.169999999999998..26.17; they aren't cuts.
+    let removed: Vec<_> = subtract(&kb, &ka)
+        .into_iter()
+        .filter(|&(s, e)| e - s > 0.001)
+        .collect();
     let gone = total(&removed);
     need!(
         gone <= max_removed + LENGTH_TOL,
@@ -2837,6 +2841,22 @@ mod tests {
             ),
             "far",
         );
+    }
+
+    #[test]
+    fn cut_ignores_float_slivers_left_by_resaving() {
+        // A re-saved timeline can drop a zero-length sliver such as 60.169999999999998..60.17
+        // far from the phrase; only the real cut counts.
+        let before = talk();
+        ok(&go(
+            cut_check(),
+            &[before.clone()],
+            &[split(&[
+                (0.0, 30.0),
+                (34.0, 60.169999999999998),
+                (60.17, 100.0),
+            ])],
+        ));
     }
 
     #[test]

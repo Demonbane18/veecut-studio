@@ -2,6 +2,16 @@
 
 Open-source AI video editor in Rust: coding agents and a desktop editor share one timeline, with workflows for each video type and a skills catalog synced from awesome-claude-video-skills.
 
+## Working on the code
+
+- Read `docs/architecture.md` first: it is the contract for modules, the CLI, MCP tools and the workspace layout. Change it together with the code.
+- Crates: `crates/veecut-engine` (everything but UI and CLI), `crates/veecut-studio` (egui editor), `crates/veecut` (CLI and MCP server). Build with `cargo build --workspace`, test with `cargo test --workspace`, format with `cargo fmt --all`. Run `. "$HOME/.cargo/env"` first in a fresh shell.
+- Rust draws every picture; ffmpeg only decodes, encodes and filters audio. Never depend on libass, freetype or `drawtext`.
+- Every project change goes through `ops::apply`/`apply_all` (atomic and validated). Main-track edits ripple through every track.
+- The agent skill lives in `crates/veecut-engine/skill/` and is embedded with `include_str!`; rebuild after editing it.
+- Credit borrowed rules and ideas in `CREDITS.md` (free247editor, Herk Edit Kit, OpenCut ideas only, catalog skills with their licenses). Never use OpenCut's name or logo, or AI Automation Society brand assets.
+- Test media is synthetic and stays out of git.
+
 ## Context and closeout
 
 - `developer-vault/` holds this project's private notes and Graphify map. It is an Obsidian vault with its own private GitHub repository, and this repository ignores it. In a linked worktree, use the main checkout's `developer-vault/`.

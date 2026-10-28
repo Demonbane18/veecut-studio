@@ -50,7 +50,7 @@ impl Out {
 #[serde(default)]
 pub struct ProjectArg {
     /// Project slug, folder or project.json path. Default: the most recently changed project.
-    #[arg(short, long, value_name = "P")]
+    #[arg(from_global)]
     pub project: Option<String>,
 }
 
@@ -124,6 +124,27 @@ pub struct TranscriptArgs {
 }
 
 #[derive(Args, Deserialize, JsonSchema, Default)]
+pub struct TranscriptSearchArgs {
+    /// Exact spoken phrase; ignores case and punctuation, never uses fuzzy matching.
+    pub phrase: String,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub project: ProjectArg,
+}
+
+#[derive(Args, Deserialize, JsonSchema, Default)]
+pub struct CutPhraseArgs {
+    /// Exact spoken phrase to remove from the kept timeline.
+    pub phrase: String,
+    /// One-based match number from transcript-search, required when the phrase repeats.
+    #[arg(long)]
+    pub occurrence: Option<usize>,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub project: ProjectArg,
+}
+
+#[derive(Args, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct OpsArgs {
     /// One op, a JSON array of ops, or JSON lines. `-` reads standard input.
@@ -159,8 +180,8 @@ pub struct RenderArgs {
 #[derive(Args, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct FrameArgs {
-    /// Timeline time in seconds.
-    #[arg(long)]
+    /// Timeline time in seconds. Default: 0.
+    #[arg(long, default_value_t = 0.0)]
     pub at: f64,
     /// Width in pixels (default 540).
     #[arg(long)]
@@ -202,7 +223,6 @@ pub struct CaptionsArgs {
 }
 
 #[derive(Args, Deserialize, JsonSchema, Default)]
-#[serde(default)]
 pub struct NoteArgs {
     /// The note, in the user's words.
     pub note: String,
@@ -211,6 +231,7 @@ pub struct NoteArgs {
     pub at: Option<f64>,
     /// Also save it as a lasting rule in my-rules.md.
     #[arg(long)]
+    #[serde(default)]
     pub rule: bool,
     #[command(flatten)]
     #[serde(flatten)]
@@ -273,17 +294,16 @@ pub enum SkillsCommand {
 }
 
 #[derive(Args, Deserialize, JsonSchema, Default)]
-#[serde(default)]
 pub struct SkillsSearchArgs {
     pub query: String,
     pub category: Option<String>,
 }
 
 #[derive(Args, Deserialize, JsonSchema, Default)]
-#[serde(default)]
 pub struct SkillsInstallArgs {
     /// owner/name of a repo in the catalog.
     pub repo: String,
+    #[serde(default)]
     pub force: bool,
 }
 
@@ -366,6 +386,23 @@ fn time(t: f64) -> String {
     format!("{}:{:04.1}", (t / 60.0) as u64, t % 60.0)
 }
 
+fn time_ms(t: f64) -> String {
+    let ms = (t.max(0.0) * 1000.0).round() as u64;
+    format!("{}:{:02}.{:03}", ms / 60_000, ms / 1000 % 60, ms % 1000)
+}
+
+fn project_transcript(dir: &Path, project: &Project) -> Result<Transcript> {
+    let transcript = Transcript::load(&dir.join("transcript.json"))
+        .context("cannot read transcript.json; select a speech project, for example --project projects/my-edit/project.json")?;
+    if project.asset(&transcript.asset).is_none() {
+        bail!(
+            "transcript asset {:?} is not in this project; use a transcript recorded for this project's assets",
+            transcript.asset
+        );
+    }
+    Ok(transcript)
+}
+
 /// A workspace plus project lookup.
 pub struct Ctx {
     pub ws: Workspace,
@@ -384,30 +421,18 @@ impl Ctx {
         Ok(Ctx { ws })
     }
 
-    pub fn project(&self, arg: &ProjectArg) -> Result<(PathBuf, Project)> {
-        let dir = match arg.project.as_deref() {
-            Some(sel) => {
-                let path = Path::new(sel);
-                if path.is_file() {
-                    path.parent().unwrap_or(Path::new(".")).to_path_buf()
-                } else if path.join(PROJECT_FILE).is_file() {
-                    path.to_path_buf()
-                } else if self.ws.projects().join(sel).join(PROJECT_FILE).is_file() {
-                    self.ws.projects().join(sel)
-                } else {
-                    bail!(
-                        "no project {sel:?}; `veecut status --json` and the projects/ folder list them"
-                    );
-                }
+    /// CLI project paths establish their owning workspace unless --workspace was explicit.
+    pub fn open_project(workspace: Option<&Path>, project: Option<&str>) -> Result<Ctx> {
+        if workspace.is_none() {
+            if let Some(path) = project.map(Path::new).filter(|path| path.exists()) {
+                return Self::open(Some(path));
             }
-            None => self
-                .ws
-                .list_projects()?
-                .into_iter()
-                .next()
-                .map(|(_, dir)| dir)
-                .context("no projects yet; run `veecut edit` first")?,
-        };
+        }
+        Self::open(workspace)
+    }
+
+    pub fn project(&self, arg: &ProjectArg) -> Result<(PathBuf, Project)> {
+        let dir = self.ws.resolve_project(arg.project.as_deref())?;
         let project = Project::load(&dir.join(PROJECT_FILE))?;
         Ok((dir, project))
     }
@@ -641,22 +666,79 @@ impl Ctx {
                 serde_json::to_value(&t)?,
             ));
         }
-        let mut text = String::from("timeline  source  sentence\n");
+        let mut mapped = vec![None; t.words.len()];
+        for word in t.placed_words(&p) {
+            if let Some(slot) = word
+                .id
+                .strip_prefix('w')
+                .and_then(|id| id.parse::<usize>().ok())
+                .and_then(|index| mapped.get_mut(index))
+            {
+                slot.get_or_insert((word.timeline_start, word.timeline_end));
+            }
+        }
+        let mut text =
+            String::from("timeline_start  timeline_end  source_start  source_end  sentence\n");
         let mut rows = Vec::new();
         for s in t.sentences() {
-            let at = p.source_to_timeline(&t.asset, s.start);
+            let start = mapped[s.first].map(|(start, _)| start);
+            let end = mapped[s.end_word - 1].map(|(_, end)| end);
             let _ = writeln!(
                 text,
-                "{:>8}  {:>6}  {}",
-                at.map(time).unwrap_or_else(|| "(cut)".into()),
-                time(s.start),
+                "{:>14}  {:>12}  {:>12}  {:>10}  {}",
+                start.map(time_ms).unwrap_or_else(|| "(cut)".into()),
+                end.map(time_ms).unwrap_or_else(|| "(cut)".into()),
+                time_ms(s.start),
+                time_ms(s.end),
                 s.text
             );
-            rows.push(json!({ "timeline": at, "source": s.start, "end": s.end, "text": s.text }));
+            rows.push(json!({
+                "timeline_start": start, "timeline_end": end,
+                "source_start": (s.start * 1000.0).round() / 1000.0,
+                "source_end": (s.end * 1000.0).round() / 1000.0,
+                "text": s.text
+            }));
         }
         Ok(Out::new(
             text,
             json!({ "asset": t.asset, "language": t.language, "sentences": rows }),
+        ))
+    }
+
+    pub fn transcript_search(&self, args: TranscriptSearchArgs) -> Result<Out> {
+        let (dir, p) = self.project(&args.project)?;
+        let transcript = project_transcript(&dir, &p)?;
+        let matches = transcript.find_phrase(&p, &args.phrase)?;
+        let mut text = format!("{} exact phrase matches.\n", matches.len());
+        for found in &matches {
+            let _ = writeln!(
+                text,
+                "{}: timeline {}-{}, source {}-{}: {}",
+                found.occurrence,
+                time_ms(found.timeline_start),
+                time_ms(found.timeline_end),
+                time_ms(found.source_start),
+                time_ms(found.source_end),
+                found.sentence
+            );
+        }
+        Ok(Out::new(
+            text,
+            json!({ "phrase": args.phrase, "matches": matches }),
+        ))
+    }
+
+    pub fn cut_phrase(&self, args: CutPhraseArgs) -> Result<Out> {
+        let (dir, mut p) = self.project(&args.project)?;
+        let transcript = project_transcript(&dir, &p)?;
+        let cut = transcript.cut_phrase(&mut p, &args.phrase, args.occurrence)?;
+        self.ws.save_project(&dir, &p)?;
+        Ok(Out::new(
+            format!(
+                "Cut phrase occurrence {}. Saved; `veecut undo` restores this change.",
+                cut.cut.occurrence
+            ),
+            serde_json::to_value(&cut)?,
         ))
     }
 
@@ -1597,8 +1679,88 @@ fn describe_models(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) fn speech_project() -> (tempfile::TempDir, Ctx, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            root: temp.path().to_path_buf(),
+        };
+        std::fs::create_dir_all(ws.root.join(".veecut")).unwrap();
+        std::fs::write(ws.root.join(".veecut/workspace.toml"), "version = 1\n").unwrap();
+        let dir = ws.projects().join("my-edit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut project = Project::new("My edit", VideoKind::default(), Canvas::new(1080, 1920));
+        project.assets.push(
+            serde_json::from_value(json!({
+                "id": "speech", "path": "speech.mp4", "kind": "video", "role": "source",
+                "duration": 10.0, "width": 1080, "height": 1920, "fps": 30.0, "has_audio": true
+            }))
+            .unwrap(),
+        );
+        let clip: Op = serde_json::from_value(json!({
+            "op": "add_clip", "asset": "speech", "duration": 10.0
+        }))
+        .unwrap();
+        ops::apply(&mut project, &clip).unwrap();
+        project.save(&dir.join(PROJECT_FILE)).unwrap();
+        let transcript: Transcript = serde_json::from_value(json!({
+            "asset": "speech", "provider": "test", "duration": 10.0,
+            "words": [
+                {"text": "Hello,", "start": 1.123, "end": 1.456},
+                {"text": "there.", "start": 1.5, "end": 2.789},
+                {"text": "Keep.", "start": 3.0, "end": 3.5},
+                {"text": "Hello", "start": 5.123, "end": 5.456},
+                {"text": "there!", "start": 5.5, "end": 6.789},
+                {"text": "End.", "start": 8.0, "end": 8.5}
+            ]
+        }))
+        .unwrap();
+        transcript.save(&dir.join("transcript.json")).unwrap();
+        (temp, Ctx { ws }, dir)
+    }
+
+    #[test]
+    fn transcript_reports_both_sentence_edges_at_millisecond_precision() {
+        let (_temp, ctx, _) = speech_project();
+        let out = ctx.transcript(TranscriptArgs::default()).unwrap();
+        assert_eq!(out.json["sentences"][0]["source_start"], 1.123);
+        assert_eq!(out.json["sentences"][0]["source_end"], 2.789);
+        assert_eq!(out.json["sentences"][0]["timeline_start"], 1.123);
+        assert_eq!(out.json["sentences"][0]["timeline_end"], 2.789);
+        assert!(out.text.contains("0:01.123") && out.text.contains("0:02.789"));
+        assert_eq!(time_ms(59.9999), "1:00.000");
+    }
+
+    #[test]
+    fn phrase_commands_reject_missing_or_unrelated_transcripts_without_saving() {
+        let (_temp, ctx, dir) = speech_project();
+        let mut transcript = Transcript::load(&dir.join("transcript.json")).unwrap();
+        transcript.asset = "another-recording".into();
+        transcript.save(&dir.join("transcript.json")).unwrap();
+        let before = std::fs::read(dir.join(PROJECT_FILE)).unwrap();
+        let error = ctx
+            .cut_phrase(CutPhraseArgs {
+                phrase: "hello there".into(),
+                occurrence: Some(1),
+                ..Default::default()
+            })
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("transcript asset"));
+        assert_eq!(before, std::fs::read(dir.join(PROJECT_FILE)).unwrap());
+        let error = project_transcript(
+            &dir.join("missing"),
+            &Project::load(&dir.join(PROJECT_FILE)).unwrap(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("--project projects/my-edit/project.json"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn model_and_effort_flags_override_saved_choices() {

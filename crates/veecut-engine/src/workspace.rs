@@ -289,6 +289,59 @@ impl Workspace {
             .collect())
     }
 
+    /// Resolves a slug, project folder or `project.json` path. Relative paths may start at the
+    /// current folder or workspace root. Without a selector, uses the most recently saved project.
+    pub fn resolve_project(&self, selector: Option<&str>) -> Result<PathBuf> {
+        let Some(selector) = selector else {
+            return self
+                .list_projects()?
+                .into_iter()
+                .next()
+                .map(|(_, dir)| dir)
+                .context("no projects yet; run `veecut edit` first")
+                .and_then(|dir| self.checked_project_dir(dir));
+        };
+        let path = Path::new(selector);
+        if !selector.trim().is_empty() {
+            for candidate in [
+                self.projects().join(path),
+                self.root.join(path),
+                path.to_path_buf(),
+            ] {
+                let dir = if candidate
+                    .file_name()
+                    .is_some_and(|name| name == PROJECT_FILE)
+                {
+                    candidate.parent().unwrap_or(Path::new(".")).to_path_buf()
+                } else {
+                    candidate
+                };
+                if dir.join(PROJECT_FILE).is_file() {
+                    return self.checked_project_dir(dir);
+                }
+            }
+        }
+        bail!(
+            "no project {selector:?}; use a slug, project folder or project.json path, for example `veecut status -p my-edit`, `veecut status -p projects/my-edit` or `veecut status -p projects/my-edit/project.json`. Available projects are in {}",
+            self.projects().display()
+        )
+    }
+
+    fn checked_project_dir(&self, dir: PathBuf) -> Result<PathBuf> {
+        let dir = dir
+            .canonicalize()
+            .with_context(|| format!("resolving project {}", dir.display()))?;
+        let owner = Workspace::open(&dir)?;
+        if owner.root.canonicalize()? != self.root.canonicalize()? {
+            bail!(
+                "project {} belongs to another workspace ({}); select that workspace with --workspace, or omit --workspace and pass its project.json path with -p",
+                dir.display(),
+                owner.root.display()
+            );
+        }
+        Ok(dir)
+    }
+
     /// The most recently modified video file directly in `inbox/`.
     pub fn newest_inbox_video(&self) -> Option<PathBuf> {
         read_dir_or_empty(&self.inbox())
@@ -509,6 +562,47 @@ fn relative(from: &Path, to: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_selectors_accept_slugs_folders_and_project_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            root: tmp.path().to_path_buf(),
+        };
+        fs::create_dir_all(ws.root.join(".veecut")).unwrap();
+        fs::write(ws.root.join(MARKER), "version = 1\n").unwrap();
+        let dir = ws.projects().join("my-edit");
+        fs::create_dir_all(&dir).unwrap();
+        Project::new("My edit", VideoKind::default(), Canvas::new(1080, 1920))
+            .save(&dir.join(PROJECT_FILE))
+            .unwrap();
+        let expected = dir.canonicalize().unwrap();
+        for selector in [
+            "my-edit".to_string(),
+            "projects/my-edit".into(),
+            "projects/my-edit/project.json".into(),
+            dir.display().to_string(),
+            dir.join(PROJECT_FILE).display().to_string(),
+        ] {
+            assert_eq!(
+                ws.resolve_project(Some(&selector)).unwrap(),
+                expected,
+                "{selector}"
+            );
+        }
+        assert_eq!(
+            ws.resolve_project(None).unwrap().canonicalize().unwrap(),
+            expected
+        );
+        fs::write(dir.join("other.json"), "{}").unwrap();
+        for selector in ["", "missing", "projects/my-edit/other.json"] {
+            let error = ws.resolve_project(Some(selector)).unwrap_err().to_string();
+            assert!(
+                error.contains("veecut status -p projects/my-edit/project.json"),
+                "{error}"
+            );
+        }
+    }
 
     #[test]
     fn init_is_idempotent_and_keeps_user_files() {

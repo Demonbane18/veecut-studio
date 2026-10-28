@@ -26,6 +26,9 @@ struct Cli {
     /// The workspace folder. Default: the workspace holding the current folder.
     #[arg(long, global = true, value_name = "DIR")]
     workspace: Option<PathBuf>,
+    /// Project slug, folder or project.json path. Paths also select their workspace unless --workspace is set.
+    #[arg(short, long, global = true, value_name = "P")]
+    project: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -47,6 +50,10 @@ enum Command {
     Add(AddArgs),
     /// The transcript, or the captions as SRT or VTT.
     Transcript(TranscriptArgs),
+    /// Find exact spoken words and their source/timeline ranges.
+    TranscriptSearch(TranscriptSearchArgs),
+    /// Cut an exact spoken phrase; choose --occurrence when it repeats.
+    CutPhrase(CutPhraseArgs),
     /// Apply Editor API operations (JSON) atomically.
     Ops(OpsArgs),
     /// JSON schema of the Editor API operations.
@@ -95,6 +102,7 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let ws = cli.workspace.as_deref();
+    let open_project = || Ctx::open_project(ws, cli.project.as_deref());
     let mut progress = |msg: &str| {
         let _ = writeln!(std::io::stderr(), "  {msg}");
     };
@@ -102,25 +110,27 @@ fn main() -> ExitCode {
         Command::Init { dir } => init(dir.as_deref()),
         Command::Doctor => doctor(ws),
         Command::Edit(args) => Ctx::open(ws).and_then(|c| c.edit(args, &mut progress)),
-        Command::Status(args) => Ctx::open(ws).and_then(|c| c.status(args)),
-        Command::Transcript(args) => Ctx::open(ws).and_then(|c| c.transcript(args)),
-        Command::Ops(args) => Ctx::open(ws).and_then(|c| c.ops(args)),
+        Command::Status(args) => open_project().and_then(|c| c.status(args)),
+        Command::Transcript(args) => open_project().and_then(|c| c.transcript(args)),
+        Command::TranscriptSearch(args) => open_project().and_then(|c| c.transcript_search(args)),
+        Command::CutPhrase(args) => open_project().and_then(|c| c.cut_phrase(args)),
+        Command::Ops(args) => open_project().and_then(|c| c.ops(args)),
         Command::Schema => schema(),
-        Command::Undo(args) => Ctx::open(ws).and_then(|c| c.undo(args, false)),
-        Command::Add(args) => Ctx::open(ws).and_then(|c| c.add(args)),
-        Command::Redo(args) => Ctx::open(ws).and_then(|c| c.undo(args, true)),
-        Command::Render(args) => Ctx::open(ws).and_then(|c| c.render(args, &mut progress)),
-        Command::Frame(args) => Ctx::open(ws).and_then(|c| c.frame(args)),
-        Command::Frames(args) => Ctx::open(ws).and_then(|c| c.frames(args)),
-        Command::Captions(args) => Ctx::open(ws).and_then(|c| c.captions(args)),
-        Command::Note(args) => Ctx::open(ws).and_then(|c| c.note(args)),
+        Command::Undo(args) => open_project().and_then(|c| c.undo(args, false)),
+        Command::Add(args) => open_project().and_then(|c| c.add(args)),
+        Command::Redo(args) => open_project().and_then(|c| c.undo(args, true)),
+        Command::Render(args) => open_project().and_then(|c| c.render(args, &mut progress)),
+        Command::Frame(args) => open_project().and_then(|c| c.frame(args)),
+        Command::Frames(args) => open_project().and_then(|c| c.frames(args)),
+        Command::Captions(args) => open_project().and_then(|c| c.captions(args)),
+        Command::Note(args) => open_project().and_then(|c| c.note(args)),
         Command::Rules { command } => Ctx::open(ws).and_then(|c| c.rules(command)),
         Command::Style { command } => Ctx::open(ws).and_then(|c| c.style(command)),
         Command::Skills { command } => skills(ws, command, &mut progress),
         Command::Qa { file } => qa(&file),
         Command::Agent(args) => agent_command(ws, args),
         Command::Mcp => mcp::serve(cli.workspace.clone()).map(|()| Out::quiet()),
-        Command::Studio(args) => Ctx::open(ws).and_then(|c| c.studio(args)),
+        Command::Studio(args) => open_project().and_then(|c| c.studio(args)),
         Command::Fonts => fonts(),
     };
     match result {
@@ -149,6 +159,184 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_paths_establish_workspace_but_explicit_workspace_cannot_cross_roots() {
+        let (_temp, ctx, dir) = commands::tests::speech_project();
+        for selector in [
+            dir.display().to_string(),
+            dir.join("project.json").display().to_string(),
+        ] {
+            for argv in [
+                vec!["veecut", "-p", &selector, "status"],
+                vec!["veecut", "status", "-p", &selector],
+            ] {
+                let cli = Cli::try_parse_from(argv).unwrap();
+                let selected =
+                    Ctx::open_project(cli.workspace.as_deref(), cli.project.as_deref()).unwrap();
+                assert_eq!(
+                    selected.ws.root.canonicalize().unwrap(),
+                    ctx.ws.root.canonicalize().unwrap()
+                );
+                let Command::Status(args) = cli.command else {
+                    panic!("expected status")
+                };
+                assert_eq!(selected.status(args).unwrap().json["name"], "My edit");
+            }
+        }
+        let (_other_temp, other, other_dir) = commands::tests::speech_project();
+        let before = std::fs::read(other_dir.join("project.json")).unwrap();
+        let selected =
+            Ctx::open_project(Some(&ctx.ws.root), Some(&other_dir.display().to_string())).unwrap();
+        let error = selected
+            .cut_phrase(CutPhraseArgs {
+                phrase: "keep".into(),
+                project: ProjectArg {
+                    project: Some(other_dir.display().to_string()),
+                },
+                ..Default::default()
+            })
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("another workspace"), "{error}");
+        assert_eq!(
+            before,
+            std::fs::read(other_dir.join("project.json")).unwrap()
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&other_dir, ctx.ws.projects().join("foreign")).unwrap();
+            let error = ctx
+                .status(ProjectArg {
+                    project: Some("foreign".into()),
+                })
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains("another workspace"), "{error}");
+        }
+        assert_ne!(other.ws.root, ctx.ws.root);
+    }
+
+    #[test]
+    fn cli_project_paths_and_phrase_commands_reach_shared_handlers() {
+        let (_temp, ctx, dir) = commands::tests::speech_project();
+        for selector in [
+            "my-edit".to_string(),
+            "projects/my-edit".into(),
+            "projects/my-edit/project.json".into(),
+            dir.display().to_string(),
+            dir.join("project.json").display().to_string(),
+        ] {
+            let cli = Cli::try_parse_from(["veecut", "status", "-p", &selector]).unwrap();
+            let Command::Status(args) = cli.command else {
+                panic!("expected status")
+            };
+            assert_eq!(ctx.status(args).unwrap().json["name"], "My edit");
+        }
+        let cli = Cli::try_parse_from([
+            "veecut",
+            "transcript-search",
+            "HELLO THERE",
+            "-p",
+            "projects/my-edit",
+        ])
+        .unwrap();
+        let Command::TranscriptSearch(args) = cli.command else {
+            panic!("expected transcript-search")
+        };
+        let found = ctx.transcript_search(args).unwrap();
+        assert_eq!(found.json["matches"].as_array().unwrap().len(), 2);
+        let before = std::fs::read(dir.join("project.json")).unwrap();
+        let cli = Cli::try_parse_from([
+            "veecut",
+            "cut-phrase",
+            "Keep",
+            "-p",
+            "projects/my-edit/project.json",
+        ])
+        .unwrap();
+        let Command::CutPhrase(args) = cli.command else {
+            panic!("expected cut-phrase")
+        };
+        let cut = ctx.cut_phrase(args).unwrap();
+        assert_eq!(cut.json["cut"]["occurrence"], 1);
+        assert_ne!(before, std::fs::read(dir.join("project.json")).unwrap());
+        assert_eq!(std::fs::read_dir(dir.join(".history")).unwrap().count(), 1);
+        ctx.undo(ProjectArg::default(), false).unwrap();
+        assert_eq!(before, std::fs::read(dir.join("project.json")).unwrap());
+        let cli = Cli::try_parse_from(["veecut", "status", "-p", "missing"]).unwrap();
+        let Command::Status(args) = cli.command else {
+            panic!("expected status")
+        };
+        let error = ctx.status(args).err().unwrap().to_string();
+        assert!(
+            error.contains("veecut status -p projects/my-edit/project.json"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn frame_defaults_and_project_selectors_match_mcp() {
+        for selector in [
+            "my-edit",
+            "projects/my-edit",
+            "projects/my-edit/project.json",
+        ] {
+            let cli = Cli::try_parse_from(["veecut", "frame", "-p", selector]).unwrap();
+            let Command::Frame(cli) = cli.command else {
+                panic!("expected frame")
+            };
+            let mcp: FrameArgs =
+                serde_json::from_value(serde_json::json!({ "project": selector })).unwrap();
+            assert_eq!(cli.project.project, mcp.project.project);
+            assert_eq!(cli.at, mcp.at);
+            assert_eq!(cli.at, 0.0);
+            assert_eq!(cli.width, mcp.width);
+        }
+    }
+
+    #[test]
+    fn phrase_commands_use_shared_argument_names_and_defaults() {
+        let cli = Cli::try_parse_from([
+            "veecut",
+            "transcript-search",
+            "hello there",
+            "-p",
+            "my-edit",
+        ])
+        .unwrap();
+        let Command::TranscriptSearch(cli) = cli.command else {
+            panic!("expected transcript-search")
+        };
+        let mcp: TranscriptSearchArgs = serde_json::from_value(serde_json::json!({
+            "phrase": "hello there", "project": "my-edit"
+        }))
+        .unwrap();
+        assert_eq!(cli.phrase, mcp.phrase);
+        assert_eq!(cli.project.project, mcp.project.project);
+        let cli = Cli::try_parse_from(["veecut", "cut-phrase", "hello there", "--occurrence", "2"])
+            .unwrap();
+        let Command::CutPhrase(cli) = cli.command else {
+            panic!("expected cut-phrase")
+        };
+        let mcp: CutPhraseArgs = serde_json::from_value(serde_json::json!({
+            "phrase": "hello there", "occurrence": 2
+        }))
+        .unwrap();
+        assert_eq!(cli.phrase, mcp.phrase);
+        assert_eq!(cli.occurrence, mcp.occurrence);
+        let cli = Cli::try_parse_from(["veecut", "cut-phrase", "hello there"]).unwrap();
+        let Command::CutPhrase(cli) = cli.command else {
+            panic!("expected cut-phrase")
+        };
+        let mcp: CutPhraseArgs =
+            serde_json::from_value(serde_json::json!({ "phrase": "hello there" })).unwrap();
+        assert_eq!(cli.occurrence, mcp.occurrence);
+        assert_eq!(cli.occurrence, None);
+        assert!(Cli::try_parse_from(["veecut", "transcript-search"]).is_err());
+    }
 
     fn agent_args(args: &[&str]) -> Result<AgentArgs, clap::Error> {
         let argv = ["veecut", "agent"].into_iter().chain(args.iter().copied());

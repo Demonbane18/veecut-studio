@@ -988,6 +988,11 @@ fn build_command(
 /// `selection`. Assistant replies and raw logs stay separate; custom commands keep plain stdout
 /// as the reply without assuming a JSON format. [`Output::Usage`] reports tokens and cost as the
 /// agent gives them. Blocks until exit or Stop; call from a worker thread in a UI.
+///
+/// The default OpenCode command also stops at once with an error when OpenCode says its free
+/// allowance is used up or the model is unavailable. Only messages OpenCode prints on stdout or
+/// stderr are caught; a provider error it keeps in its own log leaves the run going, so a run
+/// that ends without edits or an answer can still be a refused model.
 pub fn run(
     ws: &Workspace,
     kind: AgentKind,
@@ -1007,10 +1012,80 @@ pub fn run(
             kind.install_hint()
         )
     })?;
+    // Only the command VeeCut builds is known to speak OpenCode's output.
+    let opencode_model = (kind == AgentKind::OpenCode && custom.is_none()).then(|| {
+        selection
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .unwrap_or(OPENCODE_DEFAULT_MODEL)
+    });
+    drive(
+        &program,
+        &argv[1..],
+        &ws.root,
+        stop,
+        format,
+        opencode_model,
+        on_output,
+    )
+}
+
+/// Launches the agent and decodes its output. With `opencode_model` set, a failure OpenCode
+/// reports stops the run and becomes the error, after the output and usage seen so far.
+fn drive(
+    program: &Path,
+    args: &[String],
+    root: &Path,
+    stop: &Stop,
+    format: OutputFormat,
+    opencode_model: Option<&str>,
+    on_output: &mut dyn FnMut(Output),
+) -> Result<Outcome> {
     let mut decoder = Decoder::new(format);
-    launch(&program, &argv[1..], &ws.root, stop, &mut |stream, line| {
+    let mut failure: Option<String> = None;
+    let outcome = launch(program, args, root, stop, &mut |stream, line| {
+        let found = match opencode_model {
+            Some(model) if failure.is_none() => opencode_failure(stream, &line, model),
+            _ => None,
+        };
         decoder.decode(stream, line, on_output);
-    })
+        if found.is_some() {
+            failure = found;
+            stop.stop();
+        }
+    });
+    match failure {
+        Some(message) => Err(anyhow!(message)),
+        None => outcome,
+    }
+}
+
+/// The error for a line in which OpenCode reports that the free allowance is used up or the
+/// model is unavailable. On stdout only OpenCode's own `error` events and non-JSON lines count,
+/// so a reply or tool result that merely quotes the words does not stop the run.
+fn opencode_failure(stream: Stream, line: &str, model: &str) -> Option<String> {
+    if stream == Stream::Stdout
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(line)
+        && json.is_object()
+        && json["type"] != "error"
+    {
+        return None;
+    }
+    let line = line.to_ascii_lowercase();
+    if line.contains("free usage limit reached") || line.contains("freeusagelimiterror") {
+        Some(
+            "OpenCode's free allowance is used up. It can take a day or more to come back; pick another agent or model."
+                .into(),
+        )
+    } else if line.contains("model is unavailable") {
+        Some(format!(
+            "OpenCode says the model {model} is unavailable. Pick another model or agent."
+        ))
+    } else {
+        None
+    }
 }
 
 /// What the threads around one agent tell [`launch`].
@@ -1458,6 +1533,73 @@ mod tests {
         assert_gone(pid.load(Ordering::SeqCst));
     }
 
+    #[test]
+    fn opencode_free_limit_stops_the_run_and_keeps_earlier_usage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = r#"echo '{"type":"step_finish","part":{"cost":0,"tokens":{"input":5,"output":2,"reasoning":0,"cache":{"read":0,"write":0}}}}'; echo 'Error: FreeUsageLimitError' >&2; sleep 300"#;
+        let mut seen = Vec::new();
+        let started = Instant::now();
+        let error = drive(
+            Path::new("/bin/sh"),
+            &["-c".into(), script.into()],
+            tmp.path(),
+            &Stop::default(),
+            OutputFormat::OpenCode,
+            Some(OPENCODE_DEFAULT_MODEL),
+            &mut |output| seen.push(output),
+        )
+        .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the run was not stopped"
+        );
+        assert_eq!(
+            error.to_string(),
+            "OpenCode's free allowance is used up. It can take a day or more to come back; pick another agent or model."
+        );
+        assert!(
+            seen.iter()
+                .any(|o| matches!(o, Output::Usage(u) if u.total_tokens() == 7))
+        );
+        assert!(seen.contains(&Output::Log("Error: FreeUsageLimitError".into())));
+
+        // The same text from a custom command (no OpenCode watch) is only output.
+        let outcome = drive(
+            Path::new("/bin/sh"),
+            &["-c".into(), "echo 'Free usage limit reached'".into()],
+            tmp.path(),
+            &Stop::default(),
+            OutputFormat::Plain,
+            None,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Finished(status) if status.success()));
+    }
+
+    #[test]
+    fn opencode_unavailable_model_stops_the_run_with_its_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = drive(
+            Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                r#"echo '{"type":"error","error":{"data":{"message":"Model is unavailable"}}}'; sleep 300"#
+                    .into(),
+            ],
+            tmp.path(),
+            &Stop::default(),
+            OutputFormat::OpenCode,
+            Some("opencode/big-pickle"),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "OpenCode says the model opencode/big-pickle is unavailable. Pick another model or agent."
+        );
+    }
+
     /// Kills a helper that escaped the group on purpose, even when the test fails.
     struct KillOnDrop(Arc<AtomicU32>);
 
@@ -1484,6 +1626,26 @@ mod tests {
             move |line| note_helper(&seen, line),
         );
         assert!(matches!(outcome, Outcome::Finished(status) if status.success()));
+    }
+}
+
+#[cfg(test)]
+mod opencode_failure_tests {
+    use super::*;
+
+    #[test]
+    fn only_opencode_errors_and_plain_lines_count_not_quoted_text() {
+        let m = OPENCODE_DEFAULT_MODEL;
+        let text =
+            r#"{"type":"text","part":{"text":"The Free usage limit reached message means..."}}"#;
+        let tool = r#"{"type":"tool_use","part":{"state":{"output":"FreeUsageLimitError"}}}"#;
+        let error = r#"{"type":"error","error":{"name":"FreeUsageLimitError"}}"#;
+        assert_eq!(opencode_failure(Stream::Stdout, text, m), None);
+        assert_eq!(opencode_failure(Stream::Stdout, tool, m), None);
+        assert!(opencode_failure(Stream::Stdout, error, m).is_some());
+        assert!(opencode_failure(Stream::Stdout, "Free usage limit reached", m).is_some());
+        assert!(opencode_failure(Stream::Stderr, tool, m).is_some());
+        assert_eq!(opencode_failure(Stream::Stdout, "all good", m), None);
     }
 }
 

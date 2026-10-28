@@ -3,6 +3,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
@@ -289,11 +290,24 @@ pub struct SkillsInstallArgs {
 #[derive(Args, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct AgentArgs {
-    pub prompt: String,
+    /// What to ask the agent. Not needed with --models.
+    #[arg(required_unless_present = "models")]
+    pub prompt: Option<String>,
     /// opencode (default), claude, codex or gemini.
     #[arg(long = "with")]
     #[serde(rename = "with")]
     pub with: Option<String>,
+    /// Model for this run: an id from --models, any id the agent accepts, or `default` for
+    /// VeeCut's default (the free GLM model for OpenCode, the agent's own choice for the rest).
+    /// Without it, the model saved in config.toml.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Effort for this run: see --models, or `default` for the agent's own effort.
+    #[arg(long)]
+    pub effort: Option<String>,
+    /// List the models and efforts known for the agent (all agents without --with), then stop.
+    #[arg(long)]
+    pub models: bool,
 }
 
 fn kind_of(s: &str) -> Result<VideoKind> {
@@ -1030,21 +1044,61 @@ impl Ctx {
     }
 
     pub fn agent(&self, args: AgentArgs) -> Result<Out> {
-        let kind = match &args.with {
-            Some(w) => AgentKind::from_name(w).ok_or_else(|| {
-                anyhow!("unknown agent {w:?}; use opencode, claude, codex or gemini")
-            })?,
-            None => Config::load()?.default_agent(),
+        let config = Config::load()?;
+        let named = args
+            .with
+            .as_deref()
+            .map(|w| {
+                AgentKind::from_name(w).ok_or_else(|| {
+                    anyhow!("unknown agent {w:?}; use opencode, claude, codex or gemini")
+                })
+            })
+            .transpose()?;
+        if args.models {
+            return agent_models(&named.map_or(AgentKind::ALL.to_vec(), |kind| vec![kind]));
+        }
+        let kind = named.unwrap_or_else(|| config.default_agent());
+        let Some(prompt) = args.prompt.as_deref() else {
+            bail!("say what the agent should do, or use --models");
         };
+        let saved = config.agent_selection(kind);
+        let selection = agent::Selection {
+            model: pick(saved.model, args.model.as_deref(), "--model")?,
+            effort: pick(saved.effort, args.effort.as_deref(), "--effort")?,
+        };
+        let custom = config.agent.command(kind).is_some_and(|c| !c.is_empty());
+        if custom && (args.model.is_some() || args.effort.is_some()) {
+            eprintln!(
+                "note: config.toml has a custom command for {}; it runs as written and --model/--effort are ignored.",
+                kind.label()
+            );
+        }
         let stop = agent::Stop::default();
         let signal_stop = stop.clone();
         ctrlc::set_handler(move || signal_stop.stop()).context("installing agent stop handler")?;
-        match agent::run(&self.ws, kind, &args.prompt, &stop, &mut |output| {
-            println!("{}", output.text())
-        })? {
-            agent::Outcome::Finished(status) if status.success() => Ok(Out::quiet()),
-            agent::Outcome::Finished(status) => bail!("{} exited with {status}", kind.label()),
-            agent::Outcome::Stopped => Ok(Out::new("Stopped.", json!({ "stopped": true }))),
+        let started = Instant::now();
+        let mut usage = None;
+        let outcome = agent::run(&self.ws, kind, prompt, &selection, &stop, &mut |output| {
+            match output {
+                agent::Output::Answer(text) | agent::Output::Log(text) => println!("{text}"),
+                // Cumulative: the last snapshot is the run's total.
+                agent::Output::Usage(total) => usage = Some(total),
+            }
+        })?;
+        let seconds = started.elapsed().as_secs_f64();
+        let line = usage_line(usage.as_ref(), seconds);
+        let usage = usage_json(usage.as_ref(), seconds);
+        match outcome {
+            agent::Outcome::Finished(status) if status.success() => {
+                Ok(Out::new(line, json!({ "usage": usage })))
+            }
+            agent::Outcome::Finished(status) => {
+                bail!("{} exited with {status} ({line})", kind.label())
+            }
+            agent::Outcome::Stopped => Ok(Out::new(
+                format!("Stopped. {line}"),
+                json!({ "stopped": true, "usage": usage }),
+            )),
         }
     }
 
@@ -1440,9 +1494,132 @@ pub fn skills(
     }
 }
 
+/// A flag overrides the saved value; `default` clears it to VeeCut's default for the agent.
+fn pick(saved: Option<String>, flag: Option<&str>, name: &str) -> Result<Option<String>> {
+    match flag.map(str::trim) {
+        None => Ok(saved),
+        Some("") => bail!("{name} needs a value, or `default`"),
+        Some("default") => Ok(None),
+        Some(value) => Ok(Some(value.to_string())),
+    }
+}
+
+/// "42 s, 61k tokens, free"; just the time when the agent reported no usage.
+fn usage_line(usage: Option<&agent::Usage>, seconds: f64) -> String {
+    match usage {
+        Some(usage) => usage.summary(seconds),
+        None => format!("{seconds:.0} s"),
+    }
+}
+
+fn usage_json(usage: Option<&agent::Usage>, seconds: f64) -> Value {
+    match usage {
+        Some(u) => json!({
+            "seconds": seconds,
+            "input_tokens": u.input_tokens,
+            "output_tokens": u.output_tokens,
+            "cached_tokens": u.cached_tokens,
+            "total_tokens": u.total_tokens(),
+            "cost_usd": u.cost_usd,
+            "turns": u.turns,
+        }),
+        None => json!({ "seconds": seconds }),
+    }
+}
+
+/// The built-in models, plus what OpenCode lists on this machine, and the efforts per agent.
+fn agent_models(kinds: &[AgentKind]) -> Result<Out> {
+    let mut text = String::new();
+    let mut all = Vec::new();
+    for &kind in kinds {
+        let (models, problem) = match agent::models(kind) {
+            Ok(models) => (models, None),
+            Err(error) => (agent::known_models(kind), Some(format!("{error:#}"))),
+        };
+        let efforts = agent::efforts(kind, None);
+        text.push_str(&describe_models(
+            kind,
+            &models,
+            &efforts,
+            problem.as_deref(),
+        ));
+        all.push(json!({
+            "agent": kind.name(),
+            "models": models.iter().map(|m| json!({ "id": m.id, "note": m.note })).collect::<Vec<_>>(),
+            "efforts": efforts.iter().map(|e| json!({ "id": e.id, "note": e.note })).collect::<Vec<_>>(),
+            "models_error": problem,
+        }));
+    }
+    Ok(Out::new(text, json!({ "agents": all })))
+}
+
+fn describe_models(
+    kind: AgentKind,
+    models: &[agent::ModelChoice],
+    efforts: &[agent::EffortChoice],
+    problem: Option<&str>,
+) -> String {
+    let mut text = format!("{} ({})\n  models:\n", kind.label(), kind.name());
+    for model in models {
+        let _ = writeln!(text, "    {}  {}", model.id, model.note);
+    }
+    if let Some(problem) = problem {
+        let _ = writeln!(text, "    (built-in list only: {problem})");
+    }
+    if efforts.is_empty() {
+        text.push_str("  efforts: none\n");
+    } else {
+        text.push_str("  efforts:\n");
+        for effort in efforts {
+            let _ = writeln!(text, "    {}  {}", effort.id, effort.note);
+        }
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_and_effort_flags_override_saved_choices() {
+        let saved = Some("opus".to_string());
+        assert_eq!(pick(saved.clone(), None, "--model").unwrap(), saved);
+        assert_eq!(
+            pick(saved.clone(), Some(" sonnet "), "--model").unwrap(),
+            Some("sonnet".into())
+        );
+        assert_eq!(
+            pick(saved.clone(), Some("default"), "--model").unwrap(),
+            None
+        );
+        assert!(pick(saved, Some("  "), "--effort").is_err());
+    }
+
+    #[test]
+    fn model_list_shows_models_and_efforts_per_agent() {
+        let claude = describe_models(
+            AgentKind::Claude,
+            &agent::known_models(AgentKind::Claude),
+            &agent::efforts(AgentKind::Claude, None),
+            None,
+        );
+        assert!(claude.starts_with("Claude Code (claude)\n  models:\n"));
+        assert!(claude.contains(agent::ULTRACODE), "{claude}");
+        let gemini = describe_models(
+            AgentKind::Gemini,
+            &agent::known_models(AgentKind::Gemini),
+            &agent::efforts(AgentKind::Gemini, None),
+            Some("offline"),
+        );
+        assert!(gemini.contains("efforts: none") && gemini.contains("built-in list only: offline"));
+    }
+
+    #[test]
+    fn usage_line_without_report_is_only_the_time() {
+        assert_eq!(usage_line(None, 41.6), "42 s");
+        assert_eq!(usage_json(None, 2.0), json!({ "seconds": 2.0 }));
+    }
 
     #[test]
     fn check_frames_reject_protected_folders_and_symlink_aliases() {

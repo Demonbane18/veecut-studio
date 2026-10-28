@@ -14,6 +14,8 @@ use eframe::egui;
 pub(crate) enum Action {
     None,
     Play,
+    /// Open the Agent tab, which shows the model and effort pickers.
+    ShowAgent,
     Close,
 }
 enum Stage {
@@ -23,6 +25,8 @@ enum Stage {
     AwaitFirst(f64),
     Second(f64),
     AwaitLast,
+    Agent,
+    AwaitAgent,
     Done,
 }
 
@@ -65,6 +69,7 @@ impl Capture {
         ctx: &egui::Context,
         preview_ready: bool,
         position: Option<f64>,
+        agent_ready: bool,
     ) -> Result<Action> {
         if matches!(self.stage, Stage::Done) {
             return Ok(Action::None);
@@ -82,6 +87,10 @@ impl Capture {
                 }
                 Stage::AwaitFirst(at) => self.stage = Stage::Second(at + 1.0),
                 Stage::AwaitLast => {
+                    self.stage = Stage::Agent;
+                    return Ok(Action::ShowAgent);
+                }
+                Stage::AwaitAgent => {
                     self.stage = Stage::Done;
                     return Ok(Action::Close);
                 }
@@ -101,6 +110,10 @@ impl Capture {
             Stage::Second(at) if position.is_some_and(|position| position >= at) => {
                 self.request(ctx, "02-playback.png", position.unwrap_or(at));
                 self.stage = Stage::AwaitLast;
+            }
+            Stage::Agent if agent_ready => {
+                self.request(ctx, "03-agent.png", position.unwrap_or_default());
+                self.stage = Stage::AwaitAgent;
             }
             _ => {}
         }

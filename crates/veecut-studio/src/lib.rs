@@ -19,8 +19,9 @@ pub struct StudioOptions {
 ///
 /// For documentation, set `VEECUT_STUDIO_SHOTS` to an empty directory and open a project
 /// at least three seconds long. The app saves `00-paused.png`, `01-playback.png` and
-/// `02-playback.png` from its own framebuffer, then closes. Playback captures are one second
-/// apart. The hook is inactive when the variable is unset and never captures other windows.
+/// `02-playback.png` from its own framebuffer, then opens the Agent tab and saves
+/// `03-agent.png` (agent, model and effort pickers), then closes. Playback captures are one
+/// second apart. The hook is inactive when the variable is unset and never captures other windows.
 pub fn run(opts: StudioOptions) -> anyhow::Result<()> {
     let app = app::Studio::new(opts)?;
     let native = eframe::NativeOptions {

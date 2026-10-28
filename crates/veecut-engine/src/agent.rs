@@ -1,5 +1,6 @@
 //! Runs a coding agent (OpenCode, Claude Code, Codex, Gemini CLI) headless inside a workspace.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read};
@@ -43,6 +44,95 @@ pub enum AgentKind {
 
 /// Stands for the prompt in agent commands, including overrides in config.toml.
 const PROMPT: &str = "{prompt}";
+
+/// OpenCode's free model, used when no model is chosen so a run never spends money by accident.
+pub const OPENCODE_DEFAULT_MODEL: &str = "opencode/glm-5.3-flash-free";
+
+/// The Claude Code effort choice that turns on ultracode: `--effort max`, the `ultracode`
+/// setting, and `Workflow` among the allowed tools.
+pub const ULTRACODE: &str = "ultracode";
+
+/// Which model and effort an agent runs with. `None` leaves the choice to the agent's CLI
+/// (except OpenCode, whose model falls back to [`OPENCODE_DEFAULT_MODEL`]). Callers resolve it
+/// (usually `Config::agent_selection`) and pass it to [`run`]; [`run`] never reads it from the
+/// config. A custom command override ignores it. Gemini has no effort control.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Selection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+/// A model an agent accepts: `id` goes after `--model`/`-m`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelChoice {
+    pub id: String,
+    /// One line for a picker; empty for models found only by discovery.
+    pub note: String,
+}
+
+/// An effort level an agent accepts for a model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffortChoice {
+    pub id: &'static str,
+    pub note: &'static str,
+}
+
+/// Tokens and cost one run reported. `input_tokens` leaves out cached tokens, so
+/// [`Usage::total_tokens`] counts every token once. [`Output::Usage`] carries running totals
+/// for the run so far.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Usage {
+    /// Fresh input tokens (not read from or written to the prompt cache).
+    pub input_tokens: u64,
+    /// Output tokens, including reasoning tokens.
+    pub output_tokens: u64,
+    /// Prompt tokens read from or written to the cache.
+    pub cached_tokens: u64,
+    /// Reported or API-equivalent cost in US dollars; `Some(0.0)` is free, `None` unreported.
+    pub cost_usd: Option<f64>,
+    /// Model turns (OpenCode steps, Codex turns, Claude `num_turns`) when reported.
+    pub turns: Option<u64>,
+}
+
+impl Usage {
+    /// Input, output and cached tokens, each counted once.
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens + self.cached_tokens
+    }
+
+    /// One line for a person, such as `42 s, 61k tokens, free`. Cost shows only when reported;
+    /// tokens only when counted.
+    pub fn summary(&self, seconds: f64) -> String {
+        let seconds = seconds.max(0.0).round() as u64;
+        let mut parts = vec![if seconds < 60 {
+            format!("{seconds} s")
+        } else {
+            format!("{} min {} s", seconds / 60, seconds % 60)
+        }];
+        let tokens = self.total_tokens();
+        if tokens > 0 {
+            parts.push(format!(
+                "{} tokens",
+                match tokens {
+                    0..1_000 => tokens.to_string(),
+                    1_000..10_000 => format!("{:.1}k", tokens as f64 / 1e3),
+                    10_000..999_500 => format!("{}k", (tokens + 500) / 1_000),
+                    _ => format!("{:.1}M", tokens as f64 / 1e6),
+                }
+            ));
+        }
+        match self.cost_usd {
+            Some(cost) if cost <= 0.0 => parts.push("free".into()),
+            Some(cost) if cost < 0.01 => parts.push(format!("${cost:.3}")),
+            Some(cost) => parts.push(format!("${cost:.2}")),
+            None => {}
+        }
+        parts.join(", ")
+    }
+}
 
 impl AgentKind {
     pub const ALL: [AgentKind; 4] = [
@@ -91,53 +181,97 @@ impl AgentKind {
         }
     }
 
-    /// The headless command, checked against each CLI's `--help`. `{prompt}` marks the prompt.
-    fn default_command(self) -> &'static [&'static str] {
+    /// The headless command for `selection`, checked against each CLI's `--help`. `{prompt}`
+    /// marks the prompt.
+    fn default_command(self, selection: &Selection) -> Vec<String> {
+        let clean = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        let (model, effort) = (clean(&selection.model), clean(&selection.effort));
+        let mut argv: Vec<String> = Vec::new();
+        let mut add = |args: &[&str]| argv.extend(args.iter().map(|arg| arg.to_string()));
         match self {
             // The free model needs no account.
-            AgentKind::OpenCode => &[
-                "opencode",
-                "run",
-                "--format",
-                "json",
-                "--model",
-                "opencode/glm-5.3-flash-free",
-                PROMPT,
-            ],
+            AgentKind::OpenCode => {
+                add(&["opencode", "run", "--format", "json", "--model"]);
+                add(&[model.as_deref().unwrap_or(OPENCODE_DEFAULT_MODEL)]);
+                if let Some(effort) = &effort {
+                    add(&["--variant", effort]);
+                }
+                add(&[PROMPT]);
+            }
             // Edits are accepted; the only shell command allowed without asking is veecut.
-            AgentKind::Claude => &[
-                "claude",
-                "-p",
-                "--permission-mode",
-                "acceptEdits",
-                "--allowedTools",
-                "Bash(veecut),Bash(veecut *)",
-                "--",
-                PROMPT,
-            ],
-            AgentKind::Codex => &[
-                "codex",
-                "exec",
-                "--json",
-                "--sandbox",
-                "workspace-write",
-                "--skip-git-repo-check",
-                "--",
-                PROMPT,
-            ],
+            // stream-json with --verbose reports usage; ultracode also needs Workflow allowed,
+            // because a -p run never prompts for the workflow launch.
+            AgentKind::Claude => {
+                let ultracode = effort.as_deref() == Some(ULTRACODE);
+                add(&[
+                    "claude",
+                    "-p",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--permission-mode",
+                    "acceptEdits",
+                    "--allowedTools",
+                    if ultracode {
+                        "Bash(veecut),Bash(veecut *),Workflow"
+                    } else {
+                        "Bash(veecut),Bash(veecut *)"
+                    },
+                ]);
+                if let Some(model) = &model {
+                    add(&["--model", model]);
+                }
+                if ultracode {
+                    add(&["--effort", "max", "--settings", r#"{"ultracode":true}"#]);
+                } else if let Some(effort) = &effort {
+                    add(&["--effort", effort]);
+                }
+                add(&["--", PROMPT]);
+            }
+            AgentKind::Codex => {
+                add(&[
+                    "codex",
+                    "exec",
+                    "--json",
+                    "--sandbox",
+                    "workspace-write",
+                    "--skip-git-repo-check",
+                ]);
+                if let Some(model) = &model {
+                    add(&["-m", model]);
+                }
+                if let Some(effort) = &effort {
+                    // A TOML string, so the value stays one value whatever it contains.
+                    let value = serde_json::to_string(effort).expect("a string serializes");
+                    add(&["-c", &format!("model_reasoning_effort={value}")]);
+                }
+                add(&["--", PROMPT]);
+            }
             // --skip-trust: Gemini resets the approval mode in folders it has not been told to trust.
             // ponytail: --allowed-tools is deprecated for policy files (--policy); switch before Gemini CLI 1.0 drops it.
-            AgentKind::Gemini => &[
-                "gemini",
-                "--skip-trust",
-                "--approval-mode",
-                "auto_edit",
-                "--allowed-tools",
-                "run_shell_command(veecut)",
-                "-p",
-                PROMPT,
-            ],
+            // Gemini has no effort setting; the effort is ignored.
+            AgentKind::Gemini => {
+                add(&[
+                    "gemini",
+                    "--skip-trust",
+                    "--approval-mode",
+                    "auto_edit",
+                    "--allowed-tools",
+                    "run_shell_command(veecut)",
+                ]);
+                if let Some(model) = &model {
+                    add(&["-m", model]);
+                }
+                add(&["-p", PROMPT]);
+            }
         }
+        argv
     }
 }
 
@@ -145,6 +279,192 @@ impl fmt::Display for AgentKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.label())
     }
+}
+
+/// Models VeeCut knows for `kind`, best starting point first. Instant and offline; for the full
+/// OpenCode list use [`models`].
+pub fn known_models(kind: AgentKind) -> Vec<ModelChoice> {
+    let list: &[(&str, &str)] = match kind {
+        AgentKind::OpenCode => &[
+            (
+                OPENCODE_DEFAULT_MODEL,
+                "Free, 200k context, reads images (default)",
+            ),
+            (
+                "opencode/deepseek-v4.1-flash-free",
+                "Free, 200k context, reads images",
+            ),
+            (
+                "opencode/mimo-v2.6-flash-free",
+                "Free, 200k context, reads images",
+            ),
+            (
+                "opencode/nemotron-3.5-super-vl-free",
+                "Free, 1M context, reads images",
+            ),
+            (
+                "opencode/nemotron-3-ultra-free",
+                "Free, 1M context, text only",
+            ),
+            (
+                "opencode/nemotron-3.5-lightning-free",
+                "Free, 262k context, text only",
+            ),
+            ("opencode/flint-40b-free", "Free, 262k context, text only"),
+            ("opencode/beam-free", "Free, 1M context, text only"),
+            ("opencode/big-pickle", "Free, 200k context, text only"),
+        ],
+        AgentKind::Claude => &[
+            ("sonnet", "Balanced (claude-sonnet-5-5)"),
+            ("haiku", "Fastest and cheapest (claude-haiku-5-5)"),
+            ("opus", "Strongest everyday model (claude-opus-5-5)"),
+            (
+                "fable",
+                "Most capable and most expensive (claude-fable-5-1)",
+            ),
+        ],
+        AgentKind::Codex => &[
+            ("gpt-5.6-terra", "Balanced"),
+            ("gpt-5.6-luna", "Fast and efficient"),
+            ("gpt-reserve", "Fast and affordable"),
+            ("gpt-5.6-sol", "Workhorse"),
+            ("gpt-6-astra", "Frontier"),
+        ],
+        AgentKind::Gemini => &[
+            ("gemini-2.5-pro", "Most capable"),
+            ("gemini-2.5-flash", "Fast"),
+            ("gemini-2.5-flash-lite", "Fastest and cheapest"),
+        ],
+    };
+    list.iter()
+        .map(|(id, note)| ModelChoice {
+            id: (*id).into(),
+            note: (*note).into(),
+        })
+        .collect()
+}
+
+/// [`known_models`] plus, for OpenCode, every model `opencode models` lists. Runs the CLI for
+/// up to 15 seconds, so call it off the UI thread; fall back to [`known_models`] on error.
+pub fn models(kind: AgentKind) -> Result<Vec<ModelChoice>> {
+    let mut list = known_models(kind);
+    if kind == AgentKind::OpenCode {
+        for id in opencode_models()? {
+            if !list.iter().any(|model| model.id == id) {
+                list.push(ModelChoice {
+                    id,
+                    note: String::new(),
+                });
+            }
+        }
+    }
+    Ok(list)
+}
+
+/// The `provider/model` ids `opencode models` prints.
+pub fn opencode_models() -> Result<Vec<String>> {
+    let program = find_program("opencode").ok_or_else(|| {
+        anyhow!(
+            "OpenCode is not installed. Install it with: {}",
+            AgentKind::OpenCode.install_hint()
+        )
+    })?;
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let output = check_command(
+        &program,
+        &["models".into()],
+        &root,
+        Duration::from_secs(15),
+        1 << 20,
+    )?;
+    if !output.success {
+        let error = output.stderr.trim();
+        anyhow::bail!(
+            "opencode models failed: {}",
+            if error.is_empty() {
+                "no diagnostic output"
+            } else {
+                error
+            }
+        );
+    }
+    Ok(output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains('/') && !line.contains(char::is_whitespace))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Effort levels `kind` accepts for `model` (`None` is the agent's own pick), lowest first.
+/// Empty means no effort control. Claude ends with [`ULTRACODE`], the most expensive choice.
+/// Any effort can still be passed to [`run`]; this list only drives pickers.
+pub fn efforts(kind: AgentKind, model: Option<&str>) -> Vec<EffortChoice> {
+    fn level(id: &'static str) -> EffortChoice {
+        EffortChoice {
+            id,
+            note: match id {
+                "none" => "No extra thinking",
+                "low" => "Least thinking, fastest",
+                "medium" => "Balanced",
+                "high" => "More thinking",
+                "xhigh" => "Much more thinking",
+                "max" => "Most thinking",
+                "ultra" => "Even more thinking than max",
+                _ => "",
+            },
+        }
+    }
+    let levels = |ids: &[&'static str]| ids.iter().copied().map(level).collect::<Vec<_>>();
+    match kind {
+        AgentKind::Gemini => Vec::new(),
+        AgentKind::Claude => {
+            // The plan lists these levels for every Claude model; a model that rejects one makes
+            // the CLI say so. Ultracode needs a model that supports xhigh.
+            let mut list = levels(&["low", "medium", "high", "xhigh", "max"]);
+            list.push(EffortChoice {
+                id: ULTRACODE,
+                note: "Most expensive: about 5x the tokens. Claude plans a workflow with its own subagents. Needs a model that supports xhigh.",
+            });
+            list
+        }
+        AgentKind::Codex => {
+            let mut list = levels(&["low", "medium", "high", "xhigh", "max"]);
+            // ponytail: only gpt-6-astra is known to take ultra.
+            if model == Some("gpt-6-astra") {
+                list.push(level("ultra"));
+            }
+            list
+        }
+        // Variants differ by model; this is what the free models report. Other OpenCode models
+        // list none here, and --effort still passes any variant through.
+        AgentKind::OpenCode => match model.unwrap_or(OPENCODE_DEFAULT_MODEL) {
+            "opencode/glm-5.3-flash-free" | "opencode/deepseek-v4.1-flash-free" => {
+                levels(&["low", "high", "max"])
+            }
+            "opencode/nemotron-3.5-super-vl-free" => {
+                levels(&["none", "low", "medium", "high", "xhigh"])
+            }
+            "opencode/flint-40b-free" | "opencode/beam-free" => {
+                levels(&["low", "medium", "high", "xhigh", "max"])
+            }
+            _ => Vec::new(),
+        },
+    }
+}
+
+/// The prompt for a note typed in Studio. The editor previews every change as it lands, so the
+/// agent has no reason to render or open a video unless the note asks for one.
+pub fn studio_prompt(project: &Path, note: &str) -> String {
+    format!(
+        "This note comes from VeeCut Studio. The editor is open on this project and previews every change as soon as you apply it.\n\
+         Apply the note with veecut ops. To check the result you may run veecut frame, which saves a PNG in the project's .cache folder.\n\
+         Do not run veecut render and do not open any file unless the note asks for a video.\n\
+         Answer in one or two lines, then stop.\n\
+         Project: {}\n{note}",
+        project.display()
+    )
 }
 
 /// Read-only readiness, separate from whether a CLI can print a version.
@@ -264,7 +584,7 @@ fn detect_kind(kind: AgentKind, config: std::result::Result<&Config, &str>) -> A
     };
     let args: Vec<_> = args.iter().map(|arg| (*arg).to_owned()).collect();
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match check_command(&program, &args, &root, Duration::from_secs(5)) {
+    match check_command(&program, &args, &root, Duration::from_secs(5), 64 * 1024) {
         Ok(output) => auth_status(kind, &output),
         Err(error) => {
             let mut status = AgentStatus::new(
@@ -365,6 +685,7 @@ fn check_command(
     args: &[String],
     root: &Path,
     timeout: Duration,
+    max_output: usize,
 ) -> Result<CheckOutput> {
     let stop = Stop::default();
     let timer_stop = stop.clone();
@@ -384,7 +705,7 @@ fn check_command(
     };
     let mut too_large = false;
     let result = launch(program, args, root, &stop, &mut |stream, line| {
-        if output.stdout.len() + output.stderr.len() + line.len() + 1 > 64 * 1024 {
+        if output.stdout.len() + output.stderr.len() + line.len() + 1 > max_output {
             too_large = true;
             stop.stop();
             return;
@@ -398,7 +719,7 @@ fn check_command(
     });
     let _ = done.send(());
     if too_large {
-        anyhow::bail!("sign-in status exceeded 64 KiB");
+        anyhow::bail!("command output exceeded {} KiB", max_output / 1024);
     }
     match result? {
         Outcome::Finished(status) => output.success = status.success(),
@@ -411,16 +732,21 @@ fn check_command(
 }
 
 /// Assistant text is kept separately from tool output and diagnostics.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Output {
     Answer(String),
     Log(String),
+    /// Running totals for this run so far, sent after each line that reports usage. The last
+    /// one is the run's usage.
+    Usage(Usage),
 }
 
 impl Output {
+    /// The text of an answer or log line; empty for [`Output::Usage`].
     pub fn text(&self) -> &str {
         match self {
             Self::Answer(text) | Self::Log(text) => text,
+            Self::Usage(_) => "",
         }
     }
 }
@@ -431,37 +757,162 @@ enum Stream {
     Stderr,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OutputFormat {
     Plain,
     Codex,
     OpenCode,
+    Claude,
 }
 
-impl OutputFormat {
-    fn decode(self, stream: Stream, line: String) -> Output {
-        if stream == Stream::Stderr {
-            return Output::Log(line);
+/// Turns an agent's output lines into [`Output`] and keeps the run's running usage.
+struct Decoder {
+    format: OutputFormat,
+    usage: Usage,
+    /// Claude: the latest usage per assistant message id, so a stopped run still counts.
+    claude_messages: HashMap<String, Usage>,
+    /// Claude: the `result` event has set the final totals.
+    claude_done: bool,
+}
+
+fn count(value: &serde_json::Value) -> u64 {
+    value.as_u64().unwrap_or(0)
+}
+
+/// Claude's `usage` object (also the shape inside each assistant message).
+fn claude_usage(usage: &serde_json::Value) -> Usage {
+    Usage {
+        input_tokens: count(&usage["input_tokens"]),
+        output_tokens: count(&usage["output_tokens"]),
+        cached_tokens: count(&usage["cache_creation_input_tokens"])
+            + count(&usage["cache_read_input_tokens"]),
+        ..Usage::default()
+    }
+}
+
+impl Decoder {
+    fn new(format: OutputFormat) -> Self {
+        Decoder {
+            format,
+            usage: Usage::default(),
+            claude_messages: HashMap::new(),
+            claude_done: false,
         }
-        if matches!(self, Self::Plain) {
-            return Output::Answer(line);
+    }
+
+    /// Sends what `line` means: its answer or else the line as a log, then the running usage
+    /// when the line reported any.
+    fn decode(&mut self, stream: Stream, line: String, emit: &mut dyn FnMut(Output)) {
+        if stream == Stream::Stderr {
+            return emit(Output::Log(line));
+        }
+        if self.format == OutputFormat::Plain {
+            return emit(Output::Answer(line));
         }
         let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&line) else {
-            return Output::Log(line);
+            return emit(Output::Log(line));
         };
-        let path = match self {
-            Self::Codex
+        let reported = self.record(&json);
+        let answer = match self.format {
+            OutputFormat::Codex
                 if json["type"] == "item.completed" && json["item"]["type"] == "agent_message" =>
             {
-                "/item/text"
+                json.pointer_mut("/item/text").map(serde_json::Value::take)
             }
-            Self::OpenCode if json["type"] == "text" => "/part/text",
-            _ => return Output::Log(line),
+            OutputFormat::OpenCode if json["type"] == "text" => {
+                json.pointer_mut("/part/text").map(serde_json::Value::take)
+            }
+            // Subagent (sidechain) text stays in the log.
+            OutputFormat::Claude
+                if json["type"] == "assistant" && json["parent_tool_use_id"].is_null() =>
+            {
+                let text: Vec<&str> = json["message"]["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| block["type"] == "text")
+                    .filter_map(|block| block["text"].as_str())
+                    .filter(|text| !text.is_empty())
+                    .collect();
+                (!text.is_empty()).then(|| text.join("\n\n").into())
+            }
+            _ => None,
         };
-        match json.pointer_mut(path).map(serde_json::Value::take) {
+        emit(match answer {
             Some(serde_json::Value::String(text)) => Output::Answer(text),
             _ => Output::Log(line),
+        });
+        if reported {
+            emit(Output::Usage(self.usage.clone()));
         }
+    }
+
+    /// Adds the usage `json` reports to the running totals; false when it reports none.
+    fn record(&mut self, json: &serde_json::Value) -> bool {
+        let usage = &mut self.usage;
+        match (self.format, json["type"].as_str().unwrap_or("")) {
+            (OutputFormat::OpenCode, "step_finish") => {
+                let tokens = &json["part"]["tokens"];
+                usage.input_tokens += count(&tokens["input"]);
+                usage.output_tokens += count(&tokens["output"]) + count(&tokens["reasoning"]);
+                usage.cached_tokens +=
+                    count(&tokens["cache"]["read"]) + count(&tokens["cache"]["write"]);
+                if let Some(cost) = json["part"]["cost"].as_f64() {
+                    *usage.cost_usd.get_or_insert(0.0) += cost;
+                }
+                *usage.turns.get_or_insert(0) += 1;
+            }
+            (OutputFormat::Codex, "turn.completed") => {
+                // Codex counts cached tokens inside input_tokens.
+                let reported = &json["usage"];
+                let cached = count(&reported["cached_input_tokens"]);
+                usage.input_tokens += count(&reported["input_tokens"]).saturating_sub(cached);
+                usage.output_tokens += count(&reported["output_tokens"]);
+                usage.cached_tokens += cached;
+                *usage.turns.get_or_insert(0) += 1;
+            }
+            (OutputFormat::Claude, "assistant") if !self.claude_done => {
+                let message = &json["message"];
+                let Some(id) = message["id"]
+                    .as_str()
+                    .filter(|_| message["usage"].is_object())
+                else {
+                    return false;
+                };
+                self.claude_messages
+                    .insert(id.to_owned(), claude_usage(&message["usage"]));
+                usage.input_tokens = self.claude_messages.values().map(|u| u.input_tokens).sum();
+                usage.output_tokens = self.claude_messages.values().map(|u| u.output_tokens).sum();
+                usage.cached_tokens = self.claude_messages.values().map(|u| u.cached_tokens).sum();
+            }
+            (OutputFormat::Claude, "result") => {
+                // modelUsage covers subagents too (ultracode); usage is the main thread.
+                let mut total = Usage::default();
+                for model in json["modelUsage"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|m| m.values())
+                {
+                    total.input_tokens += count(&model["inputTokens"]);
+                    total.output_tokens += count(&model["outputTokens"]);
+                    total.cached_tokens += count(&model["cacheReadInputTokens"])
+                        + count(&model["cacheCreationInputTokens"]);
+                }
+                if total.total_tokens() == 0 {
+                    total = claude_usage(&json["usage"]);
+                }
+                if total.total_tokens() > 0 {
+                    usage.input_tokens = total.input_tokens;
+                    usage.output_tokens = total.output_tokens;
+                    usage.cached_tokens = total.cached_tokens;
+                }
+                usage.cost_usd = json["total_cost_usd"].as_f64().or(usage.cost_usd);
+                usage.turns = json["num_turns"].as_u64().or(usage.turns);
+                self.claude_done = true;
+            }
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -505,39 +956,49 @@ impl Stop {
     }
 }
 
-/// Runs the agent with `prompt` in the workspace root. Assistant replies and raw logs stay
-/// separate; custom commands keep plain stdout as the reply without assuming a JSON format.
-/// Blocks until exit or Stop; call from a worker thread in a UI.
+/// The command for a run: the user's override as written (the selection is ignored and stdout
+/// is the reply), else the default command for `selection`. `{prompt}` is replaced with
+/// `prompt`, which is appended when absent.
+fn build_command(
+    kind: AgentKind,
+    custom: Option<&[String]>,
+    selection: &Selection,
+    prompt: &str,
+) -> (Vec<String>, OutputFormat) {
+    let (mut argv, format) = match custom {
+        Some(command) => (command.to_vec(), OutputFormat::Plain),
+        None => (
+            kind.default_command(selection),
+            match kind {
+                AgentKind::Codex => OutputFormat::Codex,
+                AgentKind::OpenCode => OutputFormat::OpenCode,
+                AgentKind::Claude => OutputFormat::Claude,
+                AgentKind::Gemini => OutputFormat::Plain,
+            },
+        ),
+    };
+    match argv.iter().position(|arg| arg == PROMPT) {
+        Some(i) => argv[i] = prompt.to_string(),
+        None => argv.push(prompt.to_string()),
+    }
+    (argv, format)
+}
+
+/// Runs the agent with `prompt` in the workspace root, with the model and effort in
+/// `selection`. Assistant replies and raw logs stay separate; custom commands keep plain stdout
+/// as the reply without assuming a JSON format. [`Output::Usage`] reports tokens and cost as the
+/// agent gives them. Blocks until exit or Stop; call from a worker thread in a UI.
 pub fn run(
     ws: &Workspace,
     kind: AgentKind,
     prompt: &str,
+    selection: &Selection,
     stop: &Stop,
     on_output: &mut dyn FnMut(Output),
 ) -> Result<Outcome> {
     let config = Config::load()?;
-    let command = config.agent.command(kind).filter(|cmd| !cmd.is_empty());
-    let format = if command.is_some() {
-        OutputFormat::Plain
-    } else {
-        match kind {
-            AgentKind::Codex => OutputFormat::Codex,
-            AgentKind::OpenCode => OutputFormat::OpenCode,
-            _ => OutputFormat::Plain,
-        }
-    };
-    let mut argv: Vec<String> = match command {
-        Some(cmd) => cmd.to_vec(),
-        _ => kind
-            .default_command()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    };
-    match argv.iter().position(|a| a == PROMPT) {
-        Some(i) => argv[i] = prompt.to_string(),
-        None => argv.push(prompt.to_string()),
-    }
+    let custom = config.agent.command(kind).filter(|cmd| !cmd.is_empty());
+    let (argv, format) = build_command(kind, custom, selection, prompt);
     let program = find_program(&argv[0]).ok_or_else(|| {
         anyhow!(
             "{} ({}) is not installed. Install it with: {}",
@@ -546,8 +1007,9 @@ pub fn run(
             kind.install_hint()
         )
     })?;
+    let mut decoder = Decoder::new(format);
     launch(&program, &argv[1..], &ws.root, stop, &mut |stream, line| {
-        on_output(format.decode(stream, line));
+        decoder.decode(stream, line, on_output);
     })
 }
 
@@ -1029,9 +1491,28 @@ mod tests {
 mod output_tests {
     use super::*;
 
+    /// Decodes every line as stdout, in order.
+    fn decode_all(format: OutputFormat, lines: &[&str]) -> Vec<Output> {
+        let mut decoder = Decoder::new(format);
+        let mut out = Vec::new();
+        for line in lines {
+            decoder.decode(Stream::Stdout, (*line).into(), &mut |o| out.push(o));
+        }
+        out
+    }
+
+    fn last_usage(out: &[Output]) -> Usage {
+        out.iter()
+            .rev()
+            .find_map(|o| match o {
+                Output::Usage(usage) => Some(usage.clone()),
+                _ => None,
+            })
+            .expect("a usage snapshot")
+    }
+
     #[test]
     fn codex_tool_records_and_noise_are_not_assistant_answers() {
-        let format = OutputFormat::Codex;
         let records = [
             r#"{"type":"thread.started","thread_id":"thread-1"}"#,
             r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"veecut status --json","aggregated_output":"{\"duration\":124.5}","exit_code":0,"status":"completed"}}"#,
@@ -1039,65 +1520,404 @@ mod output_tests {
             r#"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Captions are bigger. Review them in Studio."}}"#,
             r#"{"type":"turn.completed","usage":{"input_tokens":1200,"cached_input_tokens":1000,"output_tokens":20}}"#,
         ];
-        let output: Vec<_> = records
-            .iter()
-            .map(|line| format.decode(Stream::Stdout, (*line).into()))
-            .collect();
+        let output = decode_all(OutputFormat::Codex, &records);
+        assert_eq!(output.len(), 6);
         assert_eq!(
             output[3],
             Output::Answer("Captions are bigger. Review them in Studio.".into())
         );
         assert!(output[..3].iter().all(|out| matches!(out, Output::Log(_))));
         assert!(matches!(&output[4], Output::Log(_)));
-        assert!(matches!(
-            format.decode(Stream::Stderr, records[3].into()),
-            Output::Log(_)
-        ));
+        // Codex counts cached tokens inside input_tokens; the total counts them once.
+        let usage = last_usage(&output);
+        assert_eq!(
+            usage,
+            Usage {
+                input_tokens: 200,
+                output_tokens: 20,
+                cached_tokens: 1000,
+                cost_usd: None,
+                turns: Some(1),
+            }
+        );
+        assert_eq!(usage.total_tokens(), 1220);
+        let mut stderr = Vec::new();
+        Decoder::new(OutputFormat::Codex)
+            .decode(Stream::Stderr, records[3].into(), &mut |o| stderr.push(o));
+        assert!(matches!(stderr.as_slice(), [Output::Log(_)]));
     }
 
     #[test]
     fn opencode_text_parts_survive_tool_output_and_malformed_records() {
-        let format = OutputFormat::OpenCode;
         let records = [
             r#"{"type":"tool_use","timestamp":1793200000000,"sessionID":"ses_1","part":{"type":"tool","tool":"veecut_ops","state":{"status":"completed","output":"{\"ok\":true}"}}}"#,
             "{broken json",
             r#"{"type":"text","timestamp":1793200000001,"sessionID":"ses_1","part":{"id":"prt_1","type":"text","text":"Applied the note."}}"#,
             r#"{"type":"step_finish","part":{"type":"step-finish","reason":"stop","cost":0}}"#,
         ];
-        assert!(matches!(
-            format.decode(Stream::Stdout, records[0].into()),
-            Output::Log(_)
-        ));
-        assert!(matches!(
-            format.decode(Stream::Stdout, records[1].into()),
-            Output::Log(_)
-        ));
+        let output = decode_all(OutputFormat::OpenCode, &records);
+        assert!(matches!(output[0], Output::Log(_)));
+        assert!(matches!(output[1], Output::Log(_)));
+        assert_eq!(output[2], Output::Answer("Applied the note.".into()));
+        assert!(matches!(output[3], Output::Log(_)));
+        // A free step: cost reported as zero, no tokens in the record.
+        let usage = last_usage(&output);
+        assert_eq!(usage.cost_usd, Some(0.0));
+        assert_eq!(usage.turns, Some(1));
+    }
+
+    #[test]
+    fn opencode_steps_add_up_run_by_run() {
+        let records = [
+            r#"{"type":"step_finish","part":{"type":"step-finish","cost":0,"tokens":{"input":100,"output":10,"reasoning":5,"cache":{"read":50,"write":0}}}}"#,
+            r#"{"type":"step_finish","part":{"type":"step-finish","cost":0.25,"tokens":{"input":20,"output":3,"reasoning":0,"cache":{"read":70,"write":5}}}}"#,
+        ];
+        let output = decode_all(OutputFormat::OpenCode, &records);
+        let snapshots: Vec<_> = output
+            .iter()
+            .filter_map(|o| match o {
+                Output::Usage(usage) => Some(usage.total_tokens()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(snapshots, [165, 263]);
         assert_eq!(
-            format.decode(Stream::Stdout, records[2].into()),
-            Output::Answer("Applied the note.".into())
+            last_usage(&output),
+            Usage {
+                input_tokens: 120,
+                output_tokens: 18,
+                cached_tokens: 125,
+                cost_usd: Some(0.25),
+                turns: Some(2),
+            }
         );
-        assert!(matches!(
-            format.decode(Stream::Stdout, records[3].into()),
-            Output::Log(_)
-        ));
+    }
+
+    #[test]
+    fn claude_stream_json_gives_answers_and_usage_that_survives_a_stop() {
+        let init = r#"{"type":"system","subtype":"init","session_id":"s1","tools":["Bash"]}"#;
+        let text = r#"{"type":"assistant","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Working."}],"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":5}},"parent_tool_use_id":null}"#;
+        // The same message id again (one event per content block) with its final output count.
+        let tool = r#"{"type":"assistant","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}],"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":8}},"parent_tool_use_id":null}"#;
+        let sub = r#"{"type":"assistant","message":{"id":"s9","role":"assistant","content":[{"type":"text","text":"subagent chatter"}],"usage":{"input_tokens":1,"output_tokens":1}},"parent_tool_use_id":"toolu_1"}"#;
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","total_cost_usd":0.2,"num_turns":2,"usage":{"input_tokens":15,"cache_creation_input_tokens":20,"cache_read_input_tokens":80,"output_tokens":20}}"#;
+
+        let output = decode_all(OutputFormat::Claude, &[init, text, tool, sub]);
+        assert!(matches!(output[0], Output::Log(_)));
+        assert_eq!(output[1], Output::Answer("Working.".into()));
+        // A stop here still has the tokens spent so far, counted once per message.
+        assert_eq!(
+            output[2],
+            Output::Usage(Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cached_tokens: 50,
+                ..Usage::default()
+            })
+        );
+        assert!(matches!(output[3], Output::Log(_)));
+        assert_eq!(last_usage(&output[..5]).output_tokens, 8);
+        assert!(
+            matches!(output[5], Output::Log(_)),
+            "subagent text is a log"
+        );
+        assert_eq!(last_usage(&output).output_tokens, 9);
+
+        let output = decode_all(OutputFormat::Claude, &[text, tool, result]);
+        assert_eq!(
+            last_usage(&output),
+            Usage {
+                input_tokens: 15,
+                output_tokens: 20,
+                cached_tokens: 100,
+                cost_usd: Some(0.2),
+                turns: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn claude_result_counts_subagents_through_model_usage() {
+        let result = r#"{"type":"result","subtype":"success","total_cost_usd":1.5,"num_turns":9,"usage":{"input_tokens":1,"output_tokens":1},"modelUsage":{"claude-opus-5-5":{"inputTokens":7,"outputTokens":3,"cacheReadInputTokens":10,"cacheCreationInputTokens":2,"costUSD":1.0},"claude-haiku-5-5":{"inputTokens":1,"outputTokens":2,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.5}}}"#;
+        let usage = last_usage(&decode_all(OutputFormat::Claude, &[result]));
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.cached_tokens),
+            (8, 5, 12)
+        );
+        assert_eq!(usage.cost_usd, Some(1.5));
     }
 
     #[test]
     fn plain_stdout_is_reply_without_json_guessing_and_stderr_is_log() {
-        let format = OutputFormat::Plain;
         for line in [
             "Applied the note.",
             r#"{"type":"text","part":{"text":"literal JSON"}}"#,
         ] {
             assert_eq!(
-                format.decode(Stream::Stdout, line.into()),
-                Output::Answer(line.into())
+                decode_all(OutputFormat::Plain, &[line]),
+                [Output::Answer(line.into())]
             );
-            assert_eq!(
-                format.decode(Stream::Stderr, line.into()),
-                Output::Log(line.into())
-            );
+            let mut out = Vec::new();
+            Decoder::new(OutputFormat::Plain)
+                .decode(Stream::Stderr, line.into(), &mut |o| out.push(o));
+            assert_eq!(out, [Output::Log(line.into())]);
         }
+    }
+
+    #[test]
+    fn usage_summary_reads_like_a_receipt() {
+        let usage = |input, cost| Usage {
+            input_tokens: input,
+            cost_usd: cost,
+            ..Usage::default()
+        };
+        assert_eq!(
+            usage(61_000, Some(0.0)).summary(42.0),
+            "42 s, 61k tokens, free"
+        );
+        assert_eq!(
+            usage(1_234, Some(0.2)).summary(125.0),
+            "2 min 5 s, 1.2k tokens, $0.20"
+        );
+        assert_eq!(
+            usage(500, Some(0.009)).summary(3.0),
+            "3 s, 500 tokens, $0.009"
+        );
+        assert_eq!(usage(2_500_000, None).summary(0.0), "0 s, 2.5M tokens");
+        assert_eq!(Usage::default().summary(9.4), "9 s");
+    }
+
+    fn argv(kind: AgentKind, model: Option<&str>, effort: Option<&str>) -> Vec<String> {
+        let selection = Selection {
+            model: model.map(Into::into),
+            effort: effort.map(Into::into),
+        };
+        build_command(kind, None, &selection, "go").0
+    }
+
+    #[test]
+    fn opencode_command_pins_the_free_model_and_passes_the_variant() {
+        assert_eq!(
+            argv(AgentKind::OpenCode, None, None),
+            [
+                "opencode",
+                "run",
+                "--format",
+                "json",
+                "--model",
+                "opencode/glm-5.3-flash-free",
+                "go"
+            ]
+        );
+        assert_eq!(
+            argv(AgentKind::OpenCode, Some("opencode/beam-free"), Some("max")),
+            [
+                "opencode",
+                "run",
+                "--format",
+                "json",
+                "--model",
+                "opencode/beam-free",
+                "--variant",
+                "max",
+                "go"
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_command_streams_json_and_takes_model_and_effort() {
+        assert_eq!(
+            argv(AgentKind::Claude, None, None),
+            [
+                "claude",
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--permission-mode",
+                "acceptEdits",
+                "--allowedTools",
+                "Bash(veecut),Bash(veecut *)",
+                "--",
+                "go"
+            ]
+        );
+        assert_eq!(
+            argv(AgentKind::Claude, Some("sonnet"), Some("high")),
+            [
+                "claude",
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--permission-mode",
+                "acceptEdits",
+                "--allowedTools",
+                "Bash(veecut),Bash(veecut *)",
+                "--model",
+                "sonnet",
+                "--effort",
+                "high",
+                "--",
+                "go"
+            ]
+        );
+    }
+
+    #[test]
+    fn ultracode_is_max_effort_with_the_setting_and_the_workflow_rule() {
+        assert_eq!(
+            argv(AgentKind::Claude, Some("opus"), Some(ULTRACODE)),
+            [
+                "claude",
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--permission-mode",
+                "acceptEdits",
+                "--allowedTools",
+                "Bash(veecut),Bash(veecut *),Workflow",
+                "--model",
+                "opus",
+                "--effort",
+                "max",
+                "--settings",
+                r#"{"ultracode":true}"#,
+                "--",
+                "go"
+            ]
+        );
+        // Only Claude knows the word.
+        assert!(
+            argv(AgentKind::Codex, None, Some(ULTRACODE))
+                .contains(&"model_reasoning_effort=\"ultracode\"".to_string())
+        );
+    }
+
+    #[test]
+    fn codex_command_takes_model_and_reasoning_effort() {
+        assert_eq!(
+            argv(AgentKind::Codex, None, None),
+            [
+                "codex",
+                "exec",
+                "--json",
+                "--sandbox",
+                "workspace-write",
+                "--skip-git-repo-check",
+                "--",
+                "go"
+            ]
+        );
+        assert_eq!(
+            argv(AgentKind::Codex, Some("gpt-5.6-terra"), Some("high")),
+            [
+                "codex",
+                "exec",
+                "--json",
+                "--sandbox",
+                "workspace-write",
+                "--skip-git-repo-check",
+                "-m",
+                "gpt-5.6-terra",
+                "-c",
+                "model_reasoning_effort=\"high\"",
+                "--",
+                "go"
+            ]
+        );
+    }
+
+    #[test]
+    fn gemini_command_takes_a_model_and_ignores_effort() {
+        let expected = [
+            "gemini",
+            "--skip-trust",
+            "--approval-mode",
+            "auto_edit",
+            "--allowed-tools",
+            "run_shell_command(veecut)",
+            "-m",
+            "gemini-2.5-pro",
+            "-p",
+            "go",
+        ];
+        assert_eq!(
+            argv(AgentKind::Gemini, Some("gemini-2.5-pro"), None),
+            expected
+        );
+        assert_eq!(
+            argv(AgentKind::Gemini, Some("gemini-2.5-pro"), Some("high")),
+            expected
+        );
+        assert_eq!(
+            argv(AgentKind::Gemini, Some("  "), Some("")),
+            [
+                "gemini",
+                "--skip-trust",
+                "--approval-mode",
+                "auto_edit",
+                "--allowed-tools",
+                "run_shell_command(veecut)",
+                "-p",
+                "go"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_custom_command_is_used_as_written_whatever_the_selection() {
+        let selection = Selection {
+            model: Some("opus".into()),
+            effort: Some(ULTRACODE.into()),
+        };
+        let with_marker = ["my-agent".to_string(), "--x".into(), PROMPT.into()];
+        let (argv, format) = build_command(AgentKind::Claude, Some(&with_marker), &selection, "go");
+        assert_eq!(argv, ["my-agent", "--x", "go"]);
+        assert_eq!(format, OutputFormat::Plain);
+        let without_marker = ["my-agent".to_string()];
+        let (argv, format) =
+            build_command(AgentKind::Codex, Some(&without_marker), &selection, "go");
+        assert_eq!(argv, ["my-agent", "go"]);
+        assert_eq!(format, OutputFormat::Plain);
+        assert_eq!(
+            build_command(AgentKind::Claude, None, &selection, "go").1,
+            OutputFormat::Claude
+        );
+    }
+
+    #[test]
+    fn model_and_effort_lists_follow_the_agent_and_model() {
+        let ids = |kind, model| -> Vec<&'static str> {
+            efforts(kind, model).iter().map(|e| e.id).collect()
+        };
+        for kind in AgentKind::ALL {
+            assert!(!known_models(kind).is_empty());
+        }
+        assert_eq!(
+            known_models(AgentKind::OpenCode)[0].id,
+            OPENCODE_DEFAULT_MODEL
+        );
+        assert_eq!(ids(AgentKind::Gemini, None), Vec::<&str>::new());
+        assert_eq!(
+            ids(AgentKind::Claude, Some("opus")),
+            ["low", "medium", "high", "xhigh", "max", ULTRACODE]
+        );
+        assert!(ids(AgentKind::Claude, Some("haiku")).contains(&ULTRACODE));
+        let ultracode = efforts(AgentKind::Claude, None).pop().unwrap();
+        assert!(ultracode.note.contains("Most expensive") && ultracode.note.contains("5x"));
+        assert_eq!(
+            ids(AgentKind::Codex, Some("gpt-5.6-sol")).last(),
+            Some(&"max")
+        );
+        assert_eq!(
+            ids(AgentKind::Codex, Some("gpt-6-astra")).last(),
+            Some(&"ultra")
+        );
+        assert_eq!(ids(AgentKind::OpenCode, None), ["low", "high", "max"]);
+        assert!(ids(AgentKind::OpenCode, Some("opencode/big-pickle")).is_empty());
     }
 
     #[test]
@@ -1196,6 +2016,7 @@ mod output_tests {
             &["-c".into(), "sleep 30 & wait".into()],
             tmp.path(),
             Duration::from_millis(100),
+            64 * 1024,
         );
         assert!(result.unwrap_err().to_string().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(5));

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::mpsc,
     thread,
@@ -8,7 +8,7 @@ use std::{
 
 use eframe::egui;
 use veecut_engine::{
-    agent::{self, AgentKind, AgentStatus},
+    agent::{self, AgentKind, AgentStatus, ModelChoice, Selection, Usage},
     config::Config,
     project::VideoKind,
     skills,
@@ -19,6 +19,8 @@ pub(crate) enum Event {
     Catalog(Result<Option<skills::Catalog>, String>, HashSet<String>),
     Agents(Vec<AgentStatus>, Option<AgentKind>),
     Output(agent::Output),
+    Models(AgentKind, Result<Vec<ModelChoice>, String>),
+    Picks(Picks),
     AgentDone(Result<(), String>),
     AgentStopped,
     SkillsDone(Result<(), String>),
@@ -29,6 +31,10 @@ struct AgentTranscript {
     note: String,
     answer: String,
     result: Option<String>,
+    /// The latest cumulative usage the agent reported during this run.
+    usage: Option<Usage>,
+    /// Time, tokens and cost of the finished run.
+    summary: Option<String>,
     log: VecDeque<String>,
 }
 
@@ -48,13 +54,59 @@ impl AgentTranscript {
                 }
                 self.log.push_back(line);
             }
+            agent::Output::Usage(usage) => self.usage = Some(usage),
         }
+    }
+}
+
+/// The model and effort chosen for each agent, as kept in config.toml.
+#[derive(Default)]
+pub(crate) struct Picks(HashMap<AgentKind, Selection>);
+
+impl Picks {
+    fn from_config(config: &Config) -> Self {
+        Self(
+            AgentKind::ALL
+                .into_iter()
+                .map(|kind| (kind, config.agent_selection(kind)))
+                .collect(),
+        )
+    }
+
+    fn get(&self, kind: AgentKind) -> Selection {
+        self.0.get(&kind).cloned().unwrap_or_default()
+    }
+
+    /// Remembers `new` for `kind`. A new model drops an effort it does not offer.
+    fn set(&mut self, kind: AgentKind, mut new: Selection) -> Selection {
+        if new.model != self.get(kind).model
+            && let Some(effort) = &new.effort
+            && !agent::efforts(kind, new.model.as_deref())
+                .iter()
+                .any(|choice| choice.id == effort)
+        {
+            new.effort = None;
+        }
+        self.0.insert(kind, new.clone());
+        new
+    }
+
+    fn save(&self, kind: AgentKind) -> anyhow::Result<()> {
+        let mut config = Config::load()?;
+        config.set_agent_selection(kind, self.get(kind));
+        config.save()
     }
 }
 
 pub(crate) struct Services {
     pub prompt: String,
     pub agent: AgentKind,
+    picks: Picks,
+    /// Known and discovered models per agent.
+    models: HashMap<AgentKind, Vec<ModelChoice>>,
+    model_errors: HashMap<AgentKind, String>,
+    custom_model: String,
+    custom_error: Option<&'static str>,
     agents: Vec<AgentStatus>,
     agents_busy: bool,
     pub agent_busy: bool,
@@ -83,6 +135,9 @@ impl Services {
                 .as_ref()
                 .map(Config::default_agent)
                 .unwrap_or(AgentKind::OpenCode);
+            if let Ok(config) = &config {
+                let _ = worker.send(Event::Picks(Picks::from_config(config)));
+            }
             let _ = worker.send(Event::Agents(agent::detect(), Some(agent)));
             send_catalog(&worker, &Workspace { root: root.clone() });
             let result = match config {
@@ -93,9 +148,20 @@ impl Services {
             send_catalog(&worker, &Workspace { root });
             let _ = worker.send(Event::SkillsDone(result));
         });
+        for kind in AgentKind::ALL {
+            fetch_models(&tx, kind);
+        }
         Self {
             prompt: String::new(),
             agent: AgentKind::OpenCode,
+            picks: Picks::default(),
+            models: AgentKind::ALL
+                .into_iter()
+                .map(|kind| (kind, agent::known_models(kind)))
+                .collect(),
+            model_errors: HashMap::new(),
+            custom_model: String::new(),
+            custom_error: None,
             agents: Vec::new(),
             agents_busy: true,
             agent_busy: false,
@@ -131,22 +197,32 @@ impl Services {
                         self.agent = selected;
                     }
                 }
+                Event::Picks(picks) => self.picks = picks,
+                Event::Models(kind, result) => match result {
+                    Ok(models) => {
+                        self.models.insert(kind, models);
+                        self.model_errors.remove(&kind);
+                    }
+                    Err(error) => {
+                        self.model_errors.insert(kind, error);
+                    }
+                },
                 Event::Output(output) => self.transcript.record(output),
                 Event::AgentDone(result) => {
-                    self.agent_finished();
+                    let usage = self.agent_finished();
                     reload = true;
                     let result = match result {
                         Ok(()) => "Agent finished.".into(),
                         Err(error) => error,
                     };
                     self.transcript.result = Some(result.clone());
-                    self.notice = Some(result);
+                    self.notice = Some(format!("{result} {usage}"));
                 }
                 Event::AgentStopped => {
-                    self.agent_finished();
+                    let usage = self.agent_finished();
                     reload = true;
                     self.transcript.result = Some("Agent stopped.".into());
-                    self.notice = Some("Agent stopped.".into());
+                    self.notice = Some(format!("Agent stopped. {usage}"));
                 }
                 Event::SkillsDone(result) => {
                     self.skills_busy = false;
@@ -162,16 +238,24 @@ impl Services {
 
     fn refresh_agents(&mut self) {
         self.agents_busy = true;
+        fetch_models(&self.tx, self.agent);
         let tx = self.tx.clone();
         thread::spawn(move || {
             let _ = tx.send(Event::Agents(agent::detect(), None));
         });
     }
 
-    fn agent_finished(&mut self) {
+    /// Ends the run's bookkeeping and returns its time, tokens and cost.
+    fn agent_finished(&mut self) -> String {
         self.agent_busy = false;
         self.agent_stop = None;
-        self.agent_started = None;
+        let seconds = self
+            .agent_started
+            .take()
+            .map_or(0.0, |start| start.elapsed().as_secs_f64());
+        let line = usage_line(self.transcript.usage.as_ref(), seconds);
+        self.transcript.summary = Some(line.clone());
+        line
     }
 
     pub fn run_agent(&mut self, ws: &Workspace, project: &Path) {
@@ -191,7 +275,8 @@ impl Services {
             ));
             return;
         }
-        let prompt = studio_prompt(project, self.prompt.trim());
+        let prompt = agent::studio_prompt(project, self.prompt.trim());
+        let selection = self.picks.get(self.agent);
         self.transcript = AgentTranscript {
             note: self.prompt.trim().into(),
             ..Default::default()
@@ -205,9 +290,16 @@ impl Services {
         let root = ws.root.clone();
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let done = match agent::run(&Workspace { root }, kind, &prompt, &stop, &mut |output| {
-                let _ = tx.send(Event::Output(output));
-            }) {
+            let done = match agent::run(
+                &Workspace { root },
+                kind,
+                &prompt,
+                &selection,
+                &stop,
+                &mut |output| {
+                    let _ = tx.send(Event::Output(output));
+                },
+            ) {
                 Ok(agent::Outcome::Stopped) => Event::AgentStopped,
                 Ok(agent::Outcome::Finished(status)) if status.success() => {
                     Event::AgentDone(Ok(()))
@@ -226,6 +318,122 @@ impl Services {
     pub fn stop_agent(&self) {
         if let Some(stop) = &self.agent_stop {
             stop.stop();
+        }
+    }
+
+    /// False while the agent list is still being checked.
+    pub fn agents_ready(&self) -> bool {
+        !self.agents_busy
+    }
+
+    /// Model and effort pickers for the chosen agent; each change is saved to config.toml.
+    fn pick_ui(&mut self, ui: &mut egui::Ui, custom_command: bool) {
+        let kind = self.agent;
+        let mut selection = self.picks.get(kind);
+        let before = selection.clone();
+        if custom_command {
+            ui.small(
+                "Custom command in config.toml runs as written. Model and effort are not added.",
+            );
+        }
+        let models = self.models.get(&kind).map_or(&[][..], Vec::as_slice);
+        let efforts = agent::efforts(kind, selection.model.as_deref());
+        let enabled = !custom_command && !self.agent_busy;
+        ui.add_enabled_ui(enabled, |ui| {
+            let custom = selection
+                .model
+                .as_deref()
+                .is_some_and(|id| !models.iter().any(|choice| choice.id == id));
+            ui.horizontal(|ui| {
+                ui.label("Model");
+                egui::ComboBox::from_id_salt("agent_model")
+                    .width(220.0)
+                    .selected_text(match &selection.model {
+                        Some(id) if custom => format!("{id} (custom)"),
+                        Some(id) => id.clone(),
+                        None => "Agent default".into(),
+                    })
+                    .show_ui(ui, |ui| {
+                        // OpenCode always runs a model: an empty choice would reset to the free one.
+                        if kind != AgentKind::OpenCode {
+                            ui.selectable_value(&mut selection.model, None, "Agent default");
+                        }
+                        for choice in models {
+                            let label = if choice.note.is_empty() {
+                                choice.id.clone()
+                            } else {
+                                format!("{} · {}", choice.id, choice.note)
+                            };
+                            ui.selectable_value(
+                                &mut selection.model,
+                                Some(choice.id.clone()),
+                                label,
+                            );
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.custom_model)
+                        .hint_text("Custom model id")
+                        .desired_width(160.0),
+                );
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button("Use").clicked() || enter {
+                    match custom_model_id(&self.custom_model) {
+                        Ok(id) => {
+                            selection.model = Some(id);
+                            self.custom_model.clear();
+                            self.custom_error = None;
+                        }
+                        Err(error) => self.custom_error = Some(error),
+                    }
+                }
+            });
+            if let Some(error) = self.custom_error {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+            }
+            if efforts.is_empty() {
+                ui.small(format!("{} has no effort setting.", kind.label()));
+                return;
+            }
+            ui.horizontal(|ui| {
+                ui.label("Effort");
+                egui::ComboBox::from_id_salt("agent_effort")
+                    .width(220.0)
+                    .selected_text(selection.effort.as_deref().unwrap_or("Agent default"))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selection.effort, None, "Agent default");
+                        for choice in &efforts {
+                            let mut label =
+                                egui::RichText::new(format!("{} · {}", choice.id, choice.note));
+                            if choice.id == agent::ULTRACODE {
+                                label = label.color(egui::Color32::from_rgb(255, 170, 60));
+                            }
+                            ui.selectable_value(
+                                &mut selection.effort,
+                                Some(choice.id.to_string()),
+                                label,
+                            );
+                        }
+                    });
+            });
+            if let Some(choice) = efforts.iter().find(|choice| {
+                selection.effort.as_deref() == Some(choice.id) && choice.id == agent::ULTRACODE
+            }) {
+                ui.colored_label(egui::Color32::from_rgb(255, 170, 60), choice.note);
+            }
+        });
+        if let Some(error) = self.model_errors.get(&kind)
+            && !custom_command
+        {
+            ui.small(format!("Showing built-in models only: {error}"));
+        }
+        if selection != before {
+            self.picks.set(kind, selection);
+            if let Err(error) = self.picks.save(kind) {
+                self.notice = Some(format!("Could not save {} choice: {error:#}", kind.label()));
+            }
         }
     }
 
@@ -267,7 +475,9 @@ impl Services {
                 ui.label(format!("Fix: {fix}"));
             }
         }
+        let custom_command = ready.is_some_and(|status| status.command_override);
         let can_run = ready.is_some_and(AgentStatus::can_run);
+        self.pick_ui(ui, custom_command);
         ui.label("Agent edits the same project.json. Review its changes with Undo.");
         let mut run = false;
         ui.add_enabled_ui(!self.agent_busy && can_run, |ui| {
@@ -313,6 +523,9 @@ impl Services {
                 }
                 if let Some(result) = &self.transcript.result {
                     ui.label(result);
+                }
+                if let Some(summary) = &self.transcript.summary {
+                    ui.small(summary);
                 }
                 egui::CollapsingHeader::new(format!(
                     "Tool output and logs ({})",
@@ -436,6 +649,35 @@ fn send_catalog(tx: &mpsc::Sender<Event>, ws: &Workspace) {
     ));
 }
 
+fn fetch_models(tx: &mpsc::Sender<Event>, kind: AgentKind) {
+    let tx = tx.clone();
+    thread::spawn(move || {
+        let _ = tx.send(Event::Models(
+            kind,
+            agent::models(kind).map_err(|error| format!("{error:#}")),
+        ));
+    });
+}
+
+/// "42 s, 61k tokens, free"; just the time when the agent reported no usage.
+fn usage_line(usage: Option<&Usage>, seconds: f64) -> String {
+    match usage {
+        Some(usage) => usage.summary(seconds),
+        None => format!("{seconds:.0} s"),
+    }
+}
+
+fn custom_model_id(text: &str) -> Result<String, &'static str> {
+    let id = text.trim();
+    if id.is_empty() {
+        Err("Type a model id.")
+    } else if id.starts_with('-') || id.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        Err("A model id has no spaces and does not start with -.")
+    } else {
+        Ok(id.to_string())
+    }
+}
+
 fn skill_entry(
     ui: &mut egui::Ui,
     entry: &skills::Entry,
@@ -477,19 +719,6 @@ impl Drop for Services {
     }
 }
 
-/// The prompt for a note typed in Studio. The editor previews every change as it lands, so the
-/// agent has no reason to render or open a video unless the note asks for one.
-fn studio_prompt(project: &Path, note: &str) -> String {
-    format!(
-        "This note comes from VeeCut Studio. The editor is open on this project and previews every change as soon as you apply it.\n\
-         Apply the note with veecut ops. To check the result you may run veecut frame, which saves a PNG in the project's .cache folder.\n\
-         Do not run veecut render and do not open any file unless the note asks for a video.\n\
-         Answer in one or two lines, then stop.\n\
-         Project: {}\n{note}",
-        project.display()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,5 +741,70 @@ mod tests {
         assert_eq!(transcript.result.as_deref(), Some("stopped"));
         transcript.record(agent::Output::Answer("Review in Studio.".into()));
         assert_eq!(transcript.answer, "Updated captions.\nReview in Studio.");
+    }
+
+    #[test]
+    fn latest_usage_snapshot_wins_and_next_run_starts_clean() {
+        let mut transcript = AgentTranscript::default();
+        for tokens in [10, 25] {
+            transcript.record(agent::Output::Usage(Usage {
+                output_tokens: tokens,
+                ..Default::default()
+            }));
+        }
+        assert_eq!(transcript.usage.as_ref().unwrap().output_tokens, 25);
+        let next = AgentTranscript {
+            note: "again".into(),
+            ..Default::default()
+        };
+        assert!(next.usage.is_none() && next.summary.is_none());
+        assert_eq!(usage_line(None, 41.6), "42 s");
+    }
+
+    #[test]
+    fn picks_follow_config_and_stay_per_agent() {
+        let mut config = Config::default();
+        let saved = Selection {
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+        };
+        config.set_agent_selection(AgentKind::Claude, saved.clone());
+        let mut picks = Picks::from_config(&config);
+        assert_eq!(picks.get(AgentKind::Claude), saved);
+        assert_eq!(picks.get(AgentKind::Codex), Selection::default());
+        assert_eq!(
+            picks.get(AgentKind::OpenCode).model.as_deref(),
+            Some("opencode/glm-5.3-flash-free")
+        );
+        // A model change keeps an effort the model offers.
+        let kept = picks.set(
+            AgentKind::Claude,
+            Selection {
+                model: Some("sonnet".into()),
+                ..saved
+            },
+        );
+        assert_eq!(kept.effort.as_deref(), Some("high"));
+        // Gemini has no effort control, so a model change drops the effort.
+        let dropped = picks.set(
+            AgentKind::Gemini,
+            Selection {
+                model: Some("gemini-custom".into()),
+                effort: Some("high".into()),
+            },
+        );
+        assert_eq!(dropped.effort, None);
+        assert_eq!(picks.get(AgentKind::Claude), kept);
+    }
+
+    #[test]
+    fn custom_model_ids_are_checked() {
+        assert_eq!(
+            custom_model_id("  acme/model-1 "),
+            Ok("acme/model-1".into())
+        );
+        for bad in ["", "  ", "-x", "two words"] {
+            assert!(custom_model_id(bad).is_err(), "{bad:?}");
+        }
     }
 }

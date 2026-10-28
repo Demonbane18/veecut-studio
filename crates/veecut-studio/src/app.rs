@@ -1404,8 +1404,13 @@ impl eframe::App for Studio {
                     .wave_pending
                     .iter()
                     .all(|id| self.waveforms.contains_key(id));
-            match capture.advance(&ctx, preview_ready, self.playback.position()) {
+            let agent_ready = self.services.agents_ready();
+            match capture.advance(&ctx, preview_ready, self.playback.position(), agent_ready) {
                 Ok(capture::Action::Play) => self.toggle_play(&ctx),
+                Ok(capture::Action::ShowAgent) => {
+                    self.tab = Tab::Agent;
+                    ctx.request_repaint();
+                }
                 Ok(capture::Action::Close) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 Ok(capture::Action::None) => {}
                 Err(error) => {

@@ -145,3 +145,42 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent_args(args: &[&str]) -> Result<AgentArgs, clap::Error> {
+        let argv = ["veecut", "agent"].into_iter().chain(args.iter().copied());
+        match Cli::try_parse_from(argv)?.command {
+            Command::Agent(args) => Ok(args),
+            _ => unreachable!("parsed an agent command"),
+        }
+    }
+
+    #[test]
+    fn agent_takes_model_and_effort() {
+        let args = agent_args(&[
+            "tighter cuts",
+            "--with",
+            "claude",
+            "--model",
+            "opus",
+            "--effort",
+            "ultracode",
+        ])
+        .unwrap();
+        assert_eq!(args.prompt.as_deref(), Some("tighter cuts"));
+        assert_eq!(args.with.as_deref(), Some("claude"));
+        assert_eq!(args.model.as_deref(), Some("opus"));
+        assert_eq!(args.effort.as_deref(), Some("ultracode"));
+        assert!(!args.models);
+    }
+
+    #[test]
+    fn agent_lists_models_without_a_prompt_but_runs_need_one() {
+        let args = agent_args(&["--models", "--with", "opencode"]).unwrap();
+        assert!(args.models && args.prompt.is_none());
+        assert!(agent_args(&["--with", "opencode"]).is_err());
+    }
+}

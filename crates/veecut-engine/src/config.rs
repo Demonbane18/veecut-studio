@@ -11,7 +11,9 @@ use crate::agent::AgentKind;
 pub fn home() -> PathBuf {
     match std::env::var_os("VEECUT_HOME") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".veecut"),
+        _ => dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".veecut"),
     }
 }
 
@@ -38,7 +40,11 @@ pub struct SkillsConfig {
 
 impl Default for SkillsConfig {
     fn default() -> Self {
-        SkillsConfig { auto_sync_hours: 24, auto_update: true, safe_only: true }
+        SkillsConfig {
+            auto_sync_hours: 24,
+            auto_update: true,
+            safe_only: true,
+        }
     }
 }
 
@@ -60,7 +66,13 @@ pub struct AgentConfig {
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        AgentConfig { default: "opencode".into(), opencode: None, claude: None, codex: None, gemini: None }
+        AgentConfig {
+            default: "opencode".into(),
+            opencode: None,
+            claude: None,
+            codex: None,
+            gemini: None,
+        }
     }
 }
 
@@ -86,7 +98,10 @@ pub struct TranscribeConfig {
 
 impl Default for TranscribeConfig {
     fn default() -> Self {
-        TranscribeConfig { provider: "auto".into(), local_model: "large-v3-turbo".into() }
+        TranscribeConfig {
+            provider: "auto".into(),
+            local_model: "large-v3-turbo".into(),
+        }
     }
 }
 
@@ -99,8 +114,12 @@ impl Config {
     pub fn load() -> Result<Config> {
         let path = Self::path();
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text)
-                .with_context(|| format!("{} is not valid; fix the line named above or delete the file to reset it", path.display())),
+            Ok(text) => toml::from_str(&text).with_context(|| {
+                format!(
+                    "{} is not valid; fix the line named above or delete the file to reset it",
+                    path.display()
+                )
+            }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -108,8 +127,10 @@ impl Config {
 
     pub fn save(&self) -> Result<()> {
         let path = Self::path();
-        std::fs::create_dir_all(home()).with_context(|| format!("creating {}", home().display()))?;
-        std::fs::write(&path, toml::to_string_pretty(self)?).with_context(|| format!("writing {}", path.display()))
+        std::fs::create_dir_all(home())
+            .with_context(|| format!("creating {}", home().display()))?;
+        std::fs::write(&path, toml::to_string_pretty(self)?)
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     /// The default agent, OpenCode when the name is not one VeeCut knows.
@@ -121,7 +142,9 @@ impl Config {
 /// Sets variables from `<root>/.env` that are not already set. Missing file is fine; lines that
 /// do not parse are skipped. Never prints values.
 pub fn load_dotenv(root: &Path) {
-    let Ok(text) = std::fs::read_to_string(root.join(".env")) else { return };
+    let Ok(text) = std::fs::read_to_string(root.join(".env")) else {
+        return;
+    };
     for (key, value) in parse_dotenv(&text) {
         if std::env::var_os(&key).is_none() {
             // SAFETY: called at startup before VeeCut starts threads that read the environment.
@@ -141,7 +164,9 @@ fn parse_dotenv(text: &str) -> Vec<(String, String)> {
             continue;
         }
         let line = line.strip_prefix("export ").unwrap_or(line);
-        let Some((key, raw)) = line.split_once('=') else { continue };
+        let Some((key, raw)) = line.split_once('=') else {
+            continue;
+        };
         let key = key.trim();
         if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             continue;
@@ -198,7 +223,12 @@ BAD KEY=1
 UNCLOSED="oops
 "#;
         let pairs = parse_dotenv(text);
-        let get = |k: &str| pairs.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
         assert_eq!(get("GROQ_API_KEY"), Some("gsk_plain"));
         assert_eq!(get("GITHUB_TOKEN"), Some("ghp_x\"y\nz"));
         assert_eq!(get("SINGLE"), Some("raw $value # kept"));

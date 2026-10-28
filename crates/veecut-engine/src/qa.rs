@@ -67,22 +67,31 @@ pub fn check(path: &Path) -> Result<QaReport> {
             report.true_peak_db = peak;
             report.black_segments = black;
         }
-        Err(e) => report.problems.push(format!("could not measure loudness or black frames: {e:#}")),
+        Err(e) => report
+            .problems
+            .push(format!("could not measure loudness or black frames: {e:#}")),
     }
     if let Some(tp) = report.true_peak_db {
         if tp > -1.0 {
-            report.problems.push(format!("true peak is {tp:.1} dB, above -1 dBTP"));
+            report
+                .problems
+                .push(format!("true peak is {tp:.1} dB, above -1 dBTP"));
         }
     }
     if let Some(lufs) = report.integrated_lufs {
         if (lufs - -14.0).abs() > 1.0 {
-            report.problems.push(format!("integrated loudness is {lufs:.1} LUFS, more than 1 LU from -14"));
+            report.problems.push(format!(
+                "integrated loudness is {lufs:.1} LUFS, more than 1 LU from -14"
+            ));
         }
     }
     for seg in &report.black_segments {
         let d = seg.end - seg.start;
         if d >= 0.4 {
-            report.problems.push(format!("black from {:.2}s to {:.2}s ({:.2}s)", seg.start, seg.end, d));
+            report.problems.push(format!(
+                "black from {:.2}s to {:.2}s ({:.2}s)",
+                seg.start, seg.end, d
+            ));
         }
     }
     Ok(report)
@@ -96,7 +105,9 @@ fn analyze(path: &Path, has_audio: bool) -> Result<(Option<f32>, Option<f32>, Ve
         cmd.args(["-af", "ebur128=peak=true"]);
     }
     cmd.args(["-f", "null", "-"]);
-    let out = cmd.output().with_context(|| format!("analyzing {}", path.display()))?;
+    let out = cmd
+        .output()
+        .with_context(|| format!("analyzing {}", path.display()))?;
     let err = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
         bail!("{}", tail(&err));
@@ -111,7 +122,9 @@ fn section_value(text: &str, section: &str, prefix: &str) -> Option<f32> {
     let end = rest.find("\n\n").unwrap_or(rest.len().min(400));
     for line in rest[..end].lines() {
         let t = line.trim();
-        let Some(v) = t.strip_prefix(prefix) else { continue };
+        let Some(v) = t.strip_prefix(prefix) else {
+            continue;
+        };
         return first_f32(v);
     }
     None
@@ -123,8 +136,12 @@ fn black_segments(text: &str) -> Vec<BlackSegment> {
         if !line.contains("black_start:") {
             continue;
         }
-        let Some(start) = field(line, "black_start:") else { continue };
-        let Some(end) = field(line, "black_end:") else { continue };
+        let Some(start) = field(line, "black_start:") else {
+            continue;
+        };
+        let Some(end) = field(line, "black_end:") else {
+            continue;
+        };
         out.push(BlackSegment { start, end });
     }
     out

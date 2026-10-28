@@ -91,28 +91,53 @@ pub fn export(
     let frames = ((end - start) * fps).round().max(1.0) as u64;
     let duration = frames as f64 / fps;
 
-    if !progress(&Progress { stage: "audio", done: 0.0, total: 1.0 }) {
+    if !progress(&Progress {
+        stage: "audio",
+        done: 0.0,
+        total: 1.0,
+    }) {
         bail!("export cancelled");
     }
     let wav = if opts.audio {
         let tmp = tempfile::NamedTempFile::new().context("creating a temp wav for the export")?;
-        mix_audio(project, project_dir, tmp.path(), Some((start, start + duration)), true)
-            .context("mixing audio for the export")?;
+        mix_audio(
+            project,
+            project_dir,
+            tmp.path(),
+            Some((start, start + duration)),
+            true,
+        )
+        .context("mixing audio for the export")?;
         Some(tmp)
     } else {
         None
     };
-    if !progress(&Progress { stage: "audio", done: 1.0, total: 1.0 }) {
+    if !progress(&Progress {
+        stage: "audio",
+        done: 1.0,
+        total: 1.0,
+    }) {
         bail!("export cancelled");
     }
 
     if let Some(parent) = out.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
         }
     }
-    let mut partial = PartialFile { path: out.to_path_buf(), keep: false };
-    let mut enc = spawn_encoder(out, width, height, fps, wav.as_ref().map(|w| w.path()), opts.quality)?;
+    let mut partial = PartialFile {
+        path: out.to_path_buf(),
+        keep: false,
+    };
+    let mut enc = spawn_encoder(
+        out,
+        width,
+        height,
+        fps,
+        wav.as_ref().map(|w| w.path()),
+        opts.quality,
+    )?;
     let mut stream = FrameStream::new(project, project_dir, start, width, height)?;
     let mut last_tick = Instant::now();
     for i in 0..frames {
@@ -133,13 +158,22 @@ pub fn export(
         }
         if last_tick.elapsed() >= Duration::from_millis(500) || i + 1 == frames {
             last_tick = Instant::now();
-            if !progress(&Progress { stage: "video", done: (i + 1) as f64, total: frames as f64 }) {
+            if !progress(&Progress {
+                stage: "video",
+                done: (i + 1) as f64,
+                total: frames as f64,
+            }) {
                 enc.fail(out)?;
                 bail!("export cancelled");
             }
         }
     }
-    enc.finish().with_context(|| format!("encoding {}", out.display()))?;
+    enc.finish()
+        .with_context(|| format!("encoding {}", out.display()))?;
+    if let Some(wav) = &wav {
+        audio::fit_true_peak(out, wav.path(), project.audio.true_peak_db)
+            .context("bringing the exported audio under its true-peak ceiling")?;
+    }
     partial.keep = true;
     Ok(ExportReport {
         path: out.to_path_buf(),
@@ -153,11 +187,27 @@ pub fn export(
 
 /// One fully composited frame at timeline time `t`. The last decoder is kept so a nearby
 /// scrub does not start ffmpeg again.
-pub fn render_frame(project: &Project, project_dir: &Path, t: f64, width: u32, height: u32) -> Result<tiny_skia::Pixmap> {
+pub fn render_frame(
+    project: &Project,
+    project_dir: &Path,
+    t: f64,
+    width: u32,
+    height: u32,
+) -> Result<tiny_skia::Pixmap> {
     let mut guard = scrub().lock().unwrap_or_else(|e| e.into_inner());
     let grade = Grade::new(&project.look);
     let ScrubState { pool, scratch, gfx } = &mut *guard;
-    compose::render_at(project, project_dir, t, width, height, pool, scratch, gfx, &grade)
+    compose::render_at(
+        project,
+        project_dir,
+        t,
+        width,
+        height,
+        pool,
+        scratch,
+        gfx,
+        &grade,
+    )
 }
 
 struct ScrubState {
@@ -194,7 +244,13 @@ pub struct FrameStream {
 }
 
 impl FrameStream {
-    pub fn new(project: &Project, project_dir: &Path, from: f64, width: u32, height: u32) -> Result<Self> {
+    pub fn new(
+        project: &Project,
+        project_dir: &Path,
+        from: f64,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
         if width < 2 || height < 2 {
             bail!("render size {width}x{height} is too small; use at least 2x2");
         }
@@ -278,7 +334,10 @@ struct Encoder {
 
 impl Encoder {
     fn write_frame(&mut self, data: &[u8]) -> std::io::Result<()> {
-        let stdin = self.stdin.as_mut().ok_or_else(|| std::io::Error::other("encoder stdin is closed"))?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("encoder stdin is closed"))?;
         stdin.write_all(data)
     }
 
@@ -302,7 +361,10 @@ impl Encoder {
     }
 
     fn stderr_tail(&mut self) -> String {
-        self.stderr.take().and_then(|h| h.join().ok()).unwrap_or_default()
+        self.stderr
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default()
     }
 }
 
@@ -314,11 +376,25 @@ impl Drop for Encoder {
     }
 }
 
-fn spawn_encoder(out: &Path, width: u32, height: u32, fps: f64, wav: Option<&Path>, quality: Quality) -> Result<Encoder> {
+fn spawn_encoder(
+    out: &Path,
+    width: u32,
+    height: u32,
+    fps: f64,
+    wav: Option<&Path>,
+    quality: Quality,
+) -> Result<Encoder> {
     let enc = encoder_args(quality)?;
     let mut cmd = Command::new(ffmpeg()?);
     cmd.args(["-y", "-hide_banner", "-nostdin", "-loglevel", "error"]);
-    cmd.args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{width}x{height}")]);
+    cmd.args([
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "-s",
+        &format!("{width}x{height}"),
+    ]);
     cmd.arg("-r").arg(fps_arg(fps));
     cmd.args(["-i", "pipe:0"]);
     if let Some(wav) = wav {
@@ -334,10 +410,20 @@ fn spawn_encoder(out: &Path, width: u32, height: u32, fps: f64, wav: Option<&Pat
     }
     cmd.args(["-movflags", "+faststart"]);
     cmd.arg(out);
-    cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().with_context(|| format!("starting ffmpeg to encode {}", out.display()))?;
-    let stdin = child.stdin.take().ok_or_else(|| anyhow!("encoder stdin was not piped"))?;
-    let stderr = child.stderr.take().ok_or_else(|| anyhow!("encoder stderr was not piped"))?;
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("starting ffmpeg to encode {}", out.display()))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("encoder stdin was not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("encoder stderr was not piped"))?;
     let stderr = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let mut tmp = [0u8; 1024];
@@ -356,16 +442,38 @@ fn spawn_encoder(out: &Path, width: u32, height: u32, fps: f64, wav: Option<&Pat
         }
         String::from_utf8_lossy(&buf).trim().to_string()
     });
-    Ok(Encoder { child, stdin: Some(stdin), stderr: Some(stderr) })
+    Ok(Encoder {
+        child,
+        stdin: Some(stdin),
+        stderr: Some(stderr),
+    })
 }
 
 fn encoder_args(quality: Quality) -> Result<Vec<String>> {
     let kind = detect_encoder()?;
     let args: &[&str] = match (kind, quality) {
-        (Enc::X264, Quality::Draft) => &["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"],
-        (Enc::X264, Quality::Final) => &["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p"],
-        (Enc::Vt, Quality::Draft) => &["-c:v", "h264_videotoolbox", "-b:v", "4M", "-pix_fmt", "yuv420p"],
-        (Enc::Vt, Quality::Final) => &["-c:v", "h264_videotoolbox", "-b:v", "12M", "-pix_fmt", "yuv420p"],
+        (Enc::X264, Quality::Draft) => &[
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+        ],
+        (Enc::X264, Quality::Final) => &[
+            "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p",
+        ],
+        (Enc::Vt, Quality::Draft) => &[
+            "-c:v",
+            "h264_videotoolbox",
+            "-b:v",
+            "4M",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        (Enc::Vt, Quality::Final) => &[
+            "-c:v",
+            "h264_videotoolbox",
+            "-b:v",
+            "12M",
+            "-pix_fmt",
+            "yuv420p",
+        ],
         (Enc::Mpeg4, Quality::Draft) => &["-c:v", "mpeg4", "-q:v", "7", "-pix_fmt", "yuv420p"],
         (Enc::Mpeg4, Quality::Final) => &["-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p"],
     };
@@ -382,7 +490,9 @@ enum Enc {
 fn detect_encoder() -> Result<Enc> {
     let mut cmd = Command::new(ffmpeg()?);
     cmd.args(["-hide_banner", "-encoders"]);
-    let out = cmd.output().context("asking ffmpeg which encoders it has")?;
+    let out = cmd
+        .output()
+        .context("asking ffmpeg which encoders it has")?;
     let text = String::from_utf8_lossy(&out.stdout);
     if text.contains(" libx264 ") {
         Ok(Enc::X264)
@@ -404,7 +514,11 @@ fn fps_arg(fps: f64) -> String {
 }
 
 fn detail_suffix(detail: &str) -> String {
-    if detail.is_empty() { String::new() } else { format!("\n{detail}") }
+    if detail.is_empty() {
+        String::new()
+    } else {
+        format!("\n{detail}")
+    }
 }
 
 #[cfg(test)]
@@ -412,7 +526,8 @@ mod smoke {
     use super::*;
     use crate::media;
     use crate::project::{
-        Asset, AssetKind, AssetRole, Clip, Item, ItemBody, LookPreset, Rect, Transition, TransitionKind, VideoKind, Zoom,
+        Asset, AssetKind, AssetRole, Clip, Item, ItemBody, LookPreset, Rect, Transition,
+        TransitionKind, VideoKind, Zoom,
     };
     use std::path::PathBuf;
 
@@ -463,31 +578,57 @@ mod smoke {
             body: ItemBody::Clip(body),
         };
         let mut b = Clip::new("src", 1.2);
-        b.transition = Some(Transition { kind: TransitionKind::Crossfade, duration: 0.2 });
-        b.zooms.push(Zoom { at: 0.15, duration: 0.5, scale: 1.3, focus: None, ease: 0.08 });
+        b.transition = Some(Transition {
+            kind: TransitionKind::Crossfade,
+            duration: 0.2,
+        });
+        b.zooms.push(Zoom {
+            at: 0.15,
+            duration: 0.5,
+            scale: 1.3,
+            focus: None,
+            ease: 0.08,
+        });
         project.main_mut().items = vec![
             clip("a", 1.0, Clip::new("src", 0.0)),
             clip("b", 1.0, b),
             clip("c", 1.0, Clip::new("src", 2.4)),
         ];
         let mut overlay = Clip::new("src", 0.3);
-        overlay.frame = Some(Rect { x: 0.08, y: 0.62, w: 0.84, h: 0.28 });
-        overlay.radius = 0.03;
-        project.tracks.iter_mut().find(|t| t.id == "broll").unwrap().items.push(Item {
-            id: "overlay".into(),
-            start: 0.4,
-            duration: 1.2,
-            body: ItemBody::Clip(overlay),
+        overlay.frame = Some(Rect {
+            x: 0.08,
+            y: 0.62,
+            w: 0.84,
+            h: 0.28,
         });
+        overlay.radius = 0.03;
+        project
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == "broll")
+            .unwrap()
+            .items
+            .push(Item {
+                id: "overlay".into(),
+                start: 0.4,
+                duration: 1.2,
+                body: ItemBody::Clip(overlay),
+            });
         let mut bed = Clip::new("music", 0.0);
         bed.duck = true;
         bed.volume = 0.45;
-        project.tracks.iter_mut().find(|t| t.id == "music").unwrap().items.push(Item {
-            id: "bed".into(),
-            start: 0.0,
-            duration: 2.8,
-            body: ItemBody::Clip(bed),
-        });
+        project
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == "music")
+            .unwrap()
+            .items
+            .push(Item {
+                id: "bed".into(),
+                start: 0.0,
+                duration: 2.8,
+                body: ItemBody::Clip(bed),
+            });
         project.normalize();
         let expected = project.duration();
 
@@ -498,7 +639,10 @@ mod smoke {
             &project,
             &dir,
             &draft_path,
-            &RenderOptions { quality: Quality::Draft, ..RenderOptions::for_canvas(&project.canvas, Quality::Draft) },
+            &RenderOptions {
+                quality: Quality::Draft,
+                ..RenderOptions::for_canvas(&project.canvas, Quality::Draft)
+            },
             &mut keep_going,
         )
         .unwrap();
@@ -515,10 +659,18 @@ mod smoke {
             assert_eq!(info.width, 1080, "{}", report.path.display());
             assert_eq!(info.height, 1920);
             assert!(info.has_audio, "{}", report.path.display());
-            assert!((info.duration - expected).abs() < 0.15, "duration {} vs {expected}", info.duration);
+            assert!(
+                (info.duration - expected).abs() < 0.15,
+                "duration {} vs {expected}",
+                info.duration
+            );
             let qa = crate::qa::check(&report.path).unwrap();
             let lufs = qa.integrated_lufs.expect("lufs");
-            assert!((lufs - -14.0).abs() <= 1.0, "{lufs} LUFS, problems: {:?}", qa.problems);
+            assert!(
+                (lufs - -14.0).abs() <= 1.0,
+                "{lufs} LUFS, problems: {:?}",
+                qa.problems
+            );
             let speed = report.duration / report.seconds_taken.max(1e-6);
             println!(
                 "{}: {:.2}s video in {:.2}s = {:.2}x, {}x{}, lufs {lufs:.2}",
@@ -570,7 +722,17 @@ mod smoke {
         cmd.arg(src);
         media::run(&mut cmd).context("generating the source fixture")?;
         let mut cmd = media::ffmpeg_command()?;
-        cmd.args(["-y", "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000", "-t", "5", "-c:a", "pcm_s16le"]);
+        cmd.args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=220:sample_rate=48000",
+            "-t",
+            "5",
+            "-c:a",
+            "pcm_s16le",
+        ]);
         cmd.arg(music);
         media::run(&mut cmd).context("generating the music fixture")?;
         Ok(())
@@ -591,7 +753,15 @@ mod smoke {
         let picture = dir.join("blank.mp4");
         let expr = "0.9*sin(2*PI*(45+90*exp(-35*mod(t\\,0.5)))*t)*exp(-9*mod(t\\,0.5))";
         let mut cmd = media::ffmpeg_command().unwrap();
-        cmd.args(["-y", "-f", "lavfi", "-i", &format!("aevalsrc={expr}:s=48000:d=12"), "-c:a", "pcm_s16le"]);
+        cmd.args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("aevalsrc={expr}:s=48000:d=37"),
+            "-c:a",
+            "pcm_s16le",
+        ]);
         cmd.arg(&kicks);
         media::run(&mut cmd).unwrap();
         let aiff = dir.join("speech.aiff");
@@ -602,15 +772,32 @@ mod smoke {
             .status()
             .unwrap();
         let mut cmd = media::ffmpeg_command().unwrap();
-        cmd.args(["-y", "-i"]).arg(&aiff).args(["-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le"]);
+        cmd.args(["-y", "-i"])
+            .arg(&aiff)
+            .args(["-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le"]);
         cmd.arg(&speech);
         media::run(&mut cmd).unwrap();
         let mut cmd = media::ffmpeg_command().unwrap();
-        cmd.args(["-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:r=30", "-t", "12", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]);
+        cmd.args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=320x180:r=30",
+            "-t",
+            "37",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+        ]);
         cmd.arg(&picture);
         media::run(&mut cmd).unwrap();
-        export_bed(&dir, &picture, &kicks, &dir.join("kicks.mp4"), 12.0);
-        export_bed(&dir, &picture, &speech, &dir.join("speech.mp4"), 8.0);
+        export_bed(&dir, &picture, &kicks, &dir.join("kicks.mp4"), 37.0);
+        let speech_len = media::probe(&speech).unwrap().duration.min(30.0);
+        export_bed(&dir, &picture, &speech, &dir.join("speech.mp4"), speech_len);
     }
 
     fn export_bed(dir: &Path, picture: &Path, audio: &Path, out: &Path, seconds: f64) {
@@ -648,18 +835,33 @@ mod smoke {
         });
         let mut bed = Clip::new("bed", 0.0);
         bed.volume = 1.0;
-        project.tracks.iter_mut().find(|t| t.id == "music").unwrap().items.push(Item {
-            id: "m".into(),
-            start: 0.0,
-            duration: seconds,
-            body: ItemBody::Clip(bed),
-        });
+        project
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == "music")
+            .unwrap()
+            .items
+            .push(Item {
+                id: "m".into(),
+                start: 0.0,
+                duration: seconds,
+                body: ItemBody::Clip(bed),
+            });
         project.normalize();
-        let wav = dir.join(out.file_stem().unwrap()).with_extension("mixed.wav");
+        let wav = dir
+            .join(out.file_stem().unwrap())
+            .with_extension("mixed.wav");
         mix_audio(&project, dir, &wav, None, true).unwrap();
         let wav_qa = crate::qa::check(&wav).unwrap();
         let mut go = |_: &Progress| true;
-        export(&project, dir, out, &RenderOptions::for_canvas(&project.canvas, Quality::Draft), &mut go).unwrap();
+        export(
+            &project,
+            dir,
+            out,
+            &RenderOptions::for_canvas(&project.canvas, Quality::Draft),
+            &mut go,
+        )
+        .unwrap();
         let mp4 = crate::qa::check(out).unwrap();
         println!(
             "{} wav lufs {:?} tp {:?} | mp4 lufs {:?} tp {:?}",
@@ -669,5 +871,9 @@ mod smoke {
             mp4.integrated_lufs,
             mp4.true_peak_db
         );
+        let lufs = mp4.integrated_lufs.expect("lufs");
+        let tp = mp4.true_peak_db.expect("true peak");
+        assert!(tp <= -1.0 + 0.05, "{tp} dBTP");
+        assert!((lufs - -14.0).abs() <= 1.0, "{lufs} LUFS");
     }
 }

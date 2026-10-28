@@ -9,8 +9,8 @@ use crate::analyze;
 use crate::media;
 use crate::ops::{self, Op};
 use crate::project::{
-    Anim, AssetKind, AssetRole, Caption, Item, ItemBody, KenBurns, Point, Project, TextPreset, TrackKind, Transition,
-    TransitionKind, VideoKind, Word,
+    Anim, AssetKind, AssetRole, Caption, Item, ItemBody, KenBurns, Point, Project, TextPreset,
+    TrackKind, Transition, TransitionKind, VideoKind, Word,
 };
 
 /// The beat grid of the music, or a steady 120 BPM grid when no beat is found.
@@ -19,24 +19,43 @@ fn grid(beats: &analyze::Beats, length: f64) -> (Vec<f64>, f64) {
         return (beats.beats.clone(), 60.0 / beats.tempo);
     }
     let step = 0.5;
-    ((0..((length / step) as usize)).map(|i| i as f64 * step).collect(), step)
+    (
+        (0..((length / step) as usize))
+            .map(|i| i as f64 * step)
+            .collect(),
+        step,
+    )
 }
 
 /// The number of beats per shot closest to `target` seconds.
 fn beats_per_shot(spb: f64, target: f64, choices: &[usize]) -> usize {
     *choices
         .iter()
-        .min_by(|a, b| ((**a as f64 * spb) - target).abs().total_cmp(&((**b as f64 * spb) - target).abs()))
+        .min_by(|a, b| {
+            ((**a as f64 * spb) - target)
+                .abs()
+                .total_cmp(&((**b as f64 * spb) - target).abs())
+        })
         .expect("choices are not empty")
 }
 
 /// Splits `[0, length)` into shots that start and end on beats, `per_shot` beats long, starting
 /// at the first downbeat when there is one.
 fn shot_bounds(beats: &[f64], downbeats: &[f64], per_shot: usize, length: f64) -> Vec<(f64, f64)> {
-    let first = downbeats.first().copied().filter(|d| *d < 4.0).unwrap_or(0.0);
+    let first = downbeats
+        .first()
+        .copied()
+        .filter(|d| *d < 4.0)
+        .unwrap_or(0.0);
     let mut marks: Vec<f64> = vec![0.0];
     let from = beats.iter().position(|b| *b >= first - 1e-3).unwrap_or(0);
-    marks.extend(beats[from..].iter().step_by(per_shot.max(1)).copied().filter(|b| *b > 0.3 && *b < length - 0.3));
+    marks.extend(
+        beats[from..]
+            .iter()
+            .step_by(per_shot.max(1))
+            .copied()
+            .filter(|b| *b > 0.3 && *b < length - 0.3),
+    );
     marks.push(length);
     marks.dedup_by(|a, b| (*a - *b).abs() < 0.3);
     marks.windows(2).map(|w| (w[0], w[1])).collect()
@@ -58,10 +77,17 @@ fn parse_lrc(copy: &str) -> Option<Vec<(f64, String)>> {
 
 /// Lyric lines as caption pages, words spread evenly across each line.
 fn lyric_captions(p: &mut Project, lines: &[(f64, String)], length: f64) -> usize {
-    let Some(track) = p.tracks.iter().position(|t| t.kind == TrackKind::Captions) else { return 0 };
+    let Some(track) = p.tracks.iter().position(|t| t.kind == TrackKind::Captions) else {
+        return 0;
+    };
     let mut items = Vec::new();
     for (i, (t, text)) in lines.iter().enumerate() {
-        let end = lines.get(i + 1).map(|l| l.0).unwrap_or(length).min(t + 6.0).min(length);
+        let end = lines
+            .get(i + 1)
+            .map(|l| l.0)
+            .unwrap_or(length)
+            .min(t + 6.0)
+            .min(length);
         let words: Vec<&str> = text.split_whitespace().collect();
         if words.is_empty() || end - t < 0.3 {
             continue;
@@ -70,14 +96,24 @@ fn lyric_captions(p: &mut Project, lines: &[(f64, String)], length: f64) -> usiz
         let words = words
             .iter()
             .enumerate()
-            .map(|(k, w)| Word { text: (*w).into(), start: k as f64 * step, end: (k as f64 + 0.9) * step, emphasis: false })
+            .map(|(k, w)| Word {
+                text: (*w).into(),
+                start: k as f64 * step,
+                end: (k as f64 + 0.9) * step,
+                emphasis: false,
+            })
             .collect();
         items.push((*t, end - t, words));
     }
     let count = items.len();
     p.tracks[track].items.clear();
     for (n, (start, duration, words)) in items.into_iter().enumerate() {
-        p.tracks[track].items.push(Item { id: format!("cap-{}", n + 1), start, duration, body: ItemBody::Caption(Caption { words }) });
+        p.tracks[track].items.push(Item {
+            id: format!("cap-{}", n + 1),
+            start,
+            duration,
+            body: ItemBody::Caption(Caption { words }),
+        });
     }
     count
 }
@@ -95,14 +131,34 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
     }
     visuals.extend(job.req.broll.iter().cloned());
     let music = music
-        .or_else(|| audio_files(&job.ws.root.join("my-sounds/music")).into_iter().next())
-        .context("this recipe cuts to music: pass --music FILE or put a track in my-sounds/music")?;
+        .or_else(|| {
+            audio_files(&job.ws.root.join("my-sounds/music"))
+                .into_iter()
+                .next()
+        })
+        .context(
+            "this recipe cuts to music: pass --music FILE or put a track in my-sounds/music",
+        )?;
     if visuals.is_empty() && kind != VideoKind::Promo {
-        bail!("a {} needs footage or images: pass them as files or with --broll", kind.label());
+        bail!(
+            "a {} needs footage or images: pass them as files or with --broll",
+            kind.label()
+        );
     }
-    let lines: Vec<String> = job.req.copy.as_deref().unwrap_or("").lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
+    let lines: Vec<String> = job
+        .req
+        .copy
+        .as_deref()
+        .unwrap_or("")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
     if kind == VideoKind::Promo && lines.is_empty() {
-        bail!("a promo needs its lines of copy: pass them with --copy \"Line one\\nLine two\" or a text file");
+        bail!(
+            "a promo needs its lines of copy: pass them with --copy \"Line one\\nLine two\" or a text file"
+        );
     }
     let name = job.req.name.clone().unwrap_or_else(|| job.name());
     let canvas = job.canvas(30.0);
@@ -136,7 +192,10 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
     // scene once per video).
     let mut used = 0.0;
     if !visual_ids.is_empty() {
-        let mut cursor: Vec<f64> = visual_ids.iter().map(|id| p.asset(id).map(|a| a.duration * 0.1).unwrap_or(0.0)).collect();
+        let mut cursor: Vec<f64> = visual_ids
+            .iter()
+            .map(|id| p.asset(id).map(|a| a.duration * 0.1).unwrap_or(0.0))
+            .collect();
         let mut exhausted = vec![false; visual_ids.len()];
         let mut ops = Vec::new();
         let mut kb = Vec::new();
@@ -152,7 +211,17 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
                 }
                 let asset = p.asset(&visual_ids[i]).context("visual vanished")?.clone();
                 if asset.kind == AssetKind::Image {
-                    ops.push(Op::AddClip { asset: asset.id.clone(), track: Some("main".into()), start: None, index: None, src_in: 0.0, duration: Some(len), frame: None, volume: None, duck: None });
+                    ops.push(Op::AddClip {
+                        asset: asset.id.clone(),
+                        track: Some("main".into()),
+                        start: None,
+                        index: None,
+                        src_in: 0.0,
+                        duration: Some(len),
+                        frame: None,
+                        volume: None,
+                        duck: None,
+                    });
                     kb.push(true);
                     exhausted[i] = true;
                 } else {
@@ -160,7 +229,17 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
                         exhausted[i] = true;
                         continue;
                     }
-                    ops.push(Op::AddClip { asset: asset.id.clone(), track: Some("main".into()), start: None, index: None, src_in: cursor[i], duration: Some(len), frame: None, volume: None, duck: None });
+                    ops.push(Op::AddClip {
+                        asset: asset.id.clone(),
+                        track: Some("main".into()),
+                        start: None,
+                        index: None,
+                        src_in: cursor[i],
+                        duration: Some(len),
+                        frame: None,
+                        volume: None,
+                        duck: None,
+                    });
                     kb.push(false);
                     cursor[i] += len;
                 }
@@ -182,11 +261,23 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
         for (n, id) in ids.iter().enumerate() {
             let mut patch = serde_json::json!({ "muted": true });
             if kb.get(n) == Some(&true) {
-                let (a, b) = if n % 2 == 0 { (Point::new(0.45, 0.5), Point::new(0.55, 0.5)) } else { (Point::new(0.55, 0.48), Point::new(0.45, 0.52)) };
-                patch["ken_burns"] = serde_json::to_value(KenBurns { from_scale: 1.0, to_scale: 1.1, from_focus: Some(a), to_focus: Some(b) })?;
+                let (a, b) = if n % 2 == 0 {
+                    (Point::new(0.45, 0.5), Point::new(0.55, 0.5))
+                } else {
+                    (Point::new(0.55, 0.48), Point::new(0.45, 0.52))
+                };
+                patch["ken_burns"] = serde_json::to_value(KenBurns {
+                    from_scale: 1.0,
+                    to_scale: 1.1,
+                    from_focus: Some(a),
+                    to_focus: Some(b),
+                })?;
             }
             if kind == VideoKind::Vlog && n > 0 && n % 8 == 0 {
-                patch["transition"] = serde_json::to_value(Transition { kind: TransitionKind::Crossfade, duration: 0.3 })?;
+                patch["transition"] = serde_json::to_value(Transition {
+                    kind: TransitionKind::Crossfade,
+                    duration: 0.3,
+                })?;
             }
             if n == 0 {
                 patch["fade_in"] = serde_json::json!(0.3);
@@ -194,7 +285,13 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
             if n + 1 == ids.len() {
                 patch["fade_out"] = serde_json::json!(0.8);
             }
-            ops::apply(&mut p, &Op::Patch { item: id.clone(), patch })?;
+            ops::apply(
+                &mut p,
+                &Op::Patch {
+                    item: id.clone(),
+                    patch,
+                },
+            )?;
         }
         used = p.duration();
     }
@@ -203,23 +300,67 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
     // Music under everything, full level: there is no voice to duck under.
     let track = audio_track(&mut p, "music", "Music")?;
     let clip = place_audio(&mut p, &track, &music_id, 0.0, 0.0, total, 1.0, false)?;
-    ops::apply(&mut p, &Op::Patch { item: clip, patch: serde_json::json!({ "fade_out": 1.5f64.min(total / 4.0) }) })?;
+    ops::apply(
+        &mut p,
+        &Op::Patch {
+            item: clip,
+            patch: serde_json::json!({ "fade_out": 1.5f64.min(total / 4.0) }),
+        },
+    )?;
 
     match kind {
         VideoKind::Promo => {
             for (n, line) in lines.iter().enumerate() {
-                let start = grid.get(n * 8).copied().unwrap_or(n as f64 * 8.0 * spb).min(total - 0.5);
+                let start = grid
+                    .get(n * 8)
+                    .copied()
+                    .unwrap_or(n as f64 * 8.0 * spb)
+                    .min(total - 0.5);
                 let last = n + 1 == lines.len();
                 let duration = if last { total - start } else { 8.0 * spb };
-                let preset = if last { TextPreset::Cta } else if line.split_whitespace().count() <= 3 { TextPreset::Kinetic } else { TextPreset::Title };
+                let preset = if last {
+                    TextPreset::Cta
+                } else if line.split_whitespace().count() <= 3 {
+                    TextPreset::Kinetic
+                } else {
+                    TextPreset::Title
+                };
                 let anim = if n % 2 == 0 { Anim::Pop } else { Anim::SlideUp };
-                ops::apply(&mut p, &Op::AddText { text: line.clone(), start, duration, preset, position: None, style: None, anim_in: Some(anim), anim_out: Some(Anim::Fade), track: None })?;
+                ops::apply(
+                    &mut p,
+                    &Op::AddText {
+                        text: line.clone(),
+                        start,
+                        duration,
+                        preset,
+                        position: None,
+                        style: None,
+                        anim_in: Some(anim),
+                        anim_out: Some(Anim::Fade),
+                        track: None,
+                    },
+                )?;
             }
-            job.report.summary.push(format!("{} lines of copy, two bars each", lines.len()));
+            job.report
+                .summary
+                .push(format!("{} lines of copy, two bars each", lines.len()));
         }
         VideoKind::Vlog => {
             if let Some(title) = lines.first() {
-                ops::apply(&mut p, &Op::AddText { text: title.clone(), start: 0.0, duration: (8.0 * spb).min(total), preset: TextPreset::Title, position: None, style: None, anim_in: Some(Anim::Fade), anim_out: Some(Anim::Fade), track: None })?;
+                ops::apply(
+                    &mut p,
+                    &Op::AddText {
+                        text: title.clone(),
+                        start: 0.0,
+                        duration: (8.0 * spb).min(total),
+                        preset: TextPreset::Title,
+                        position: None,
+                        style: None,
+                        anim_in: Some(Anim::Fade),
+                        anim_out: Some(Anim::Fade),
+                        track: None,
+                    },
+                )?;
             }
         }
         VideoKind::MusicVideo => {
@@ -239,7 +380,9 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
         }
         _ => {}
     }
-    job.report.summary.push(format!("Cut to the beat at {tempo:.0} BPM, {per_shot} beats per shot"));
+    job.report.summary.push(format!(
+        "Cut to the beat at {tempo:.0} BPM, {per_shot} beats per shot"
+    ));
     text_sfx(job, &dir, &mut p)?;
     job.finish(&dir, &mut p, progress)
 }
@@ -256,18 +399,26 @@ mod tests {
         assert_eq!(shots.first().unwrap().0, 0.0);
         assert_eq!(shots.last().unwrap().1, 12.0);
         for (s, _) in shots.iter().skip(1) {
-            assert!(beats.iter().any(|b| (b - s).abs() < 1e-9), "shot starts on a beat: {s}");
+            assert!(
+                beats.iter().any(|b| (b - s).abs() < 1e-9),
+                "shot starts on a beat: {s}"
+            );
         }
         assert_eq!(beats_per_shot(0.5, 2.0, &[2, 4, 8]), 4);
     }
 
     #[test]
     fn lrc_parses_and_spreads_words() {
-        let lines = parse_lrc("[00:01.00] hello there\n[00:03.50] second line here\nno stamp").unwrap();
+        let lines =
+            parse_lrc("[00:01.00] hello there\n[00:03.50] second line here\nno stamp").unwrap();
         assert_eq!(lines.len(), 2);
         assert!((lines[1].0 - 3.5).abs() < 1e-9);
         assert!(parse_lrc("plain words").is_none());
-        let mut p = Project::new("t", VideoKind::MusicVideo, crate::project::Canvas::vertical());
+        let mut p = Project::new(
+            "t",
+            VideoKind::MusicVideo,
+            crate::project::Canvas::vertical(),
+        );
         assert_eq!(lyric_captions(&mut p, &lines, 6.0), 2);
         let cap = &p.tracks[3].items[1];
         assert!((cap.start - 3.5).abs() < 1e-9 && (cap.duration - 2.5).abs() < 1e-9);

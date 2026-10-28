@@ -24,7 +24,8 @@ veecut edit inbox/ep7-cam-a.mp4 inbox/ep7-cam-b.mp4 --kind podcast --voice inbox
 - Cuts pauses over 0.8 s with the natural pace (over 0.25 s when the style pace is `tight`), and stutters, false starts and high-confidence retakes, keeping the last take.
 - One camera: gentle 1.08x punch-ins about every 8 s.
 - Two to four cameras, each with its own sound: syncs them by sound, then cuts to whoever is speaking, with shots of at least 2 s. One continuous voice track plays under the edit (the `--voice` recording, or the first camera's sound), and the camera sound is muted.
-- Adds captions in the style's mode, a ducked music bed only as the style asks, and sound effects on text unless the style is `voice_only`.
+- Uses each `--broll` file once as a full-frame cutaway of at most 3 s, muted, at a sentence start after the first 3 s, spread evenly; stills get a slow push-in.
+- Adds captions in the style's mode, moved off the face, a ducked music bed only as the style asks, and sound effects on text unless the style is `voice_only`.
 - Renders `outbox/<slug>-v1.mp4` and checks it.
 
 ## Editing rules
@@ -50,10 +51,10 @@ From the podcast and interview recipe in [kmilo93sd/agent-video-editor](https://
 | Note | Fix |
 | --- | --- |
 | "Stay on me here", "wrong camera" | Swap the camera on that clip: patch its `asset` to the other camera and shift `src_in` by the difference between the two cameras' offsets. The edit summary lists them, for example `offsets [0.0, 1.52] s` in the same order as the camera files. A clip on the first camera at `src_in` 40.0 becomes `{"op":"patch","item":"clip-12","patch":{"asset":"asset-2","src_in":41.52}}`. Check with `veecut frame --at T`. |
-| "Keep more of the pauses" | With the natural pace the recipe already keeps pauses up to 0.8 s; check that the style pace is not `tight`. With one camera and no `--voice`, `trim` the clip before the pause outward, then `veecut captions --rebuild`. With a separate voice track, ops cannot bring a cut back without the voice drifting out of sync; offer to edit again. |
+| "Keep more of the pauses" | With the natural pace the recipe already keeps pauses up to 0.8 s; check that the style pace is not `tight`. With one camera and no `--voice`, `trim` the clip before the pause outward. With a separate voice track, trim the main clip outward (that makes room on every track), then trim the voice clip that ends at the same moment outward by the same amount so the voice fills it. |
 | "Add our names" | `{"op":"add_text","text":"Ana Reyes\nHost","start":3.0,"duration":4.0,"preset":"lower_third"}` |
 | "Add chapters" | A `card` text at each topic start, and list the times for the YouTube description from `veecut transcript` |
-| "Cold open" | On a multi-camera edit the voice track would not move with the pictures, so offer a separate teaser instead: `veecut edit SAME-FILE --kind clips --clips 1` |
+| "Cold open" | Insert the strongest exchange at the start: `add_clip` of that camera piece on `main` with `"index":0` (later items on every track move along), then the matching voice piece on the `voice` track with `"start":0`. The voice `src_in` is the speech time from `veecut transcript`; the picture's `src_in` is that time plus the camera's offset. Check with `veecut frames`. If it gets fiddly, offer a separate teaser: `veecut edit SAME-FILE --kind clips --clips 1`. |
 | "No music under us talking" | `{"op":"set","path":"/tracks/4/muted","value":true}` after checking that track 4 is `music` |
 | "Make it for podcast apps too" | After the YouTube final, `{"op":"set","path":"/audio/target_lufs","value":-16}`, then `veecut render --final --out outbox/<slug>-podcast-feed.mp4`, then set it back to -14 |
 | "Clips for Shorts" | `veecut edit SAME-FILE --kind clips --clips 5` |

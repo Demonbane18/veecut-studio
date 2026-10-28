@@ -322,3 +322,93 @@ fn visual_proof() {
         }
     }
 }
+
+/// Contrast proof on white, pale cyan footage and black. Files are temporary.
+/// `cargo test -p veecut-engine --no-default-features graphics::tests::contrast_proof -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn contrast_proof() {
+    let dir = std::path::Path::new("/tmp/veecut-shots/graphics");
+    std::fs::create_dir_all(dir).unwrap();
+    let mut graphics = Graphics::new();
+    for canvas in [Canvas::vertical(), Canvas::landscape()] {
+        let mut kinetic = Project::new("contrast", VideoKind::default(), canvas.clone());
+        kinetic.tracks[2]
+            .items
+            .push(sample(TextPreset::Kinetic, "*MAKE*\nIT"));
+        let mut caption = Project::new("contrast", VideoKind::default(), canvas.clone());
+        caption.captions.size = 0.033;
+        caption.captions.boxed = false;
+        caption.tracks[3].items.push(Item {
+            id: "contrast-caption".into(),
+            start: 0.0,
+            duration: 4.0,
+            body: ItemBody::Caption(Caption {
+                words: vec![
+                    Word {
+                        text: "Make".into(),
+                        start: 0.0,
+                        end: 0.5,
+                        emphasis: false,
+                    },
+                    Word {
+                        text: "every".into(),
+                        start: 0.5,
+                        end: 1.0,
+                        emphasis: false,
+                    },
+                    Word {
+                        text: "word".into(),
+                        start: 1.0,
+                        end: 2.0,
+                        emphasis: false,
+                    },
+                    Word {
+                        text: "count".into(),
+                        start: 2.0,
+                        end: 3.0,
+                        emphasis: true,
+                    },
+                ],
+            }),
+        });
+        for background in ["white", "cyan", "dark"] {
+            let mut base = Pixmap::new(canvas.width, canvas.height).unwrap();
+            for y in 0..canvas.height {
+                for x in 0..canvas.width {
+                    let rgba = match background {
+                        "white" => [255, 255, 255, 255],
+                        "cyan" => [200 + (45 * x / canvas.width) as u8, 245, 255, 255],
+                        _ => [15, 20, 27, 255],
+                    };
+                    let index = ((y * canvas.width + x) * 4) as usize;
+                    base.data_mut()[index..index + 4].copy_from_slice(&rgba);
+                }
+            }
+            for (name, project) in [("kinetic", &kinetic), ("caption", &caption)] {
+                let mut frame = base.clone();
+                graphics.draw(project, 1.6, &mut frame.as_mut());
+                frame
+                    .save_png(dir.join(format!(
+                        "contrast-{name}-{background}-{}x{}.png",
+                        canvas.width, canvas.height
+                    )))
+                    .unwrap();
+            }
+            if canvas.width == 1080 && background == "white" {
+                let mut frame = base.clone();
+                let mut elapsed = std::time::Duration::ZERO;
+                for _ in 0..300 {
+                    frame.data_mut().copy_from_slice(base.data());
+                    let now = std::time::Instant::now();
+                    graphics.draw(&kinetic, 1.6, &mut frame.as_mut());
+                    elapsed += now.elapsed();
+                }
+                println!(
+                    "graphics contrast + scrim: {:.3} ms/frame (300 fresh white frames, 1080x1920, background copy excluded)",
+                    elapsed.as_secs_f64() * 1000.0 / 300.0
+                );
+            }
+        }
+    }
+}

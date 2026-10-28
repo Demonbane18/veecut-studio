@@ -43,6 +43,8 @@ enum Command {
     Edit(EditArgs),
     /// What a project holds: length, tracks, drafts, open notes.
     Status(ProjectArg),
+    /// Bring files (B-roll, music, sound effects, images) into a project so ops can place them.
+    Add(AddArgs),
     /// The transcript, or the captions as SRT or VTT.
     Transcript(TranscriptArgs),
     /// Apply Editor API operations (JSON) atomically.
@@ -79,9 +81,7 @@ enum Command {
         command: Option<SkillsCommand>,
     },
     /// Check a rendered video: size, length, loudness, black frames.
-    Qa {
-        file: PathBuf,
-    },
+    Qa { file: PathBuf },
     /// Hand a request to a coding agent (OpenCode with a free model by default).
     Agent(AgentArgs),
     /// Run the MCP server on stdio for agents.
@@ -107,6 +107,7 @@ fn main() -> ExitCode {
         Command::Ops(args) => Ctx::open(ws).and_then(|c| c.ops(args)),
         Command::Schema => schema(),
         Command::Undo(args) => Ctx::open(ws).and_then(|c| c.undo(args, false)),
+        Command::Add(args) => Ctx::open(ws).and_then(|c| c.add(args)),
         Command::Redo(args) => Ctx::open(ws).and_then(|c| c.undo(args, true)),
         Command::Render(args) => Ctx::open(ws).and_then(|c| c.render(args, &mut progress)),
         Command::Frame(args) => Ctx::open(ws).and_then(|c| c.frame(args)),
@@ -125,7 +126,10 @@ fn main() -> ExitCode {
     match result {
         Ok(out) => {
             if cli.json {
-                println!("{}", serde_json::to_string_pretty(&out.json).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out.json).unwrap_or_default()
+                );
             } else if !out.text.is_empty() {
                 println!("{}", out.text.trim_end());
             }

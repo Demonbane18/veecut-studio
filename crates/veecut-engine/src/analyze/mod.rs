@@ -57,10 +57,15 @@ pub fn silences(pcm: &[f32], sample_rate: u32, threshold_db: f32, min_len: f64) 
     }
     let n = window_len(sample_rate);
     let end = pcm.len() as f64 / sample_rate as f64;
-    quiet_runs(&levels(pcm, n), n as f64 / sample_rate as f64, threshold_db, min_len)
-        .into_iter()
-        .map(|(a, b)| (a, b.min(end)))
-        .collect()
+    quiet_runs(
+        &levels(pcm, n),
+        n as f64 / sample_rate as f64,
+        threshold_db,
+        min_len,
+    )
+    .into_iter()
+    .map(|(a, b)| (a, b.min(end)))
+    .collect()
 }
 
 /// Runs of windows under `threshold` lasting at least `min_len` seconds.
@@ -131,8 +136,16 @@ pub fn speaker_turns(tracks: &[Vec<f32>], sample_rate: u32, min_shot: f64) -> Ve
             challenger = None;
             continue;
         }
-        let level = |i: usize| if raw(i) <= SILENT_DB { f32::NEG_INFINITY } else { raw(i) - offsets[i] };
-        let lead = (0..db.len()).max_by(|&a, &b| level(a).total_cmp(&level(b))).unwrap_or(0);
+        let level = |i: usize| {
+            if raw(i) <= SILENT_DB {
+                f32::NEG_INFINITY
+            } else {
+                raw(i) - offsets[i]
+            }
+        };
+        let lead = (0..db.len())
+            .max_by(|&a, &b| level(a).total_cmp(&level(b)))
+            .unwrap_or(0);
         let Some(&(_, current)) = out.last() else {
             out.push((0.0, lead));
             continue;
@@ -162,18 +175,61 @@ pub fn speaker_turns(tracks: &[Vec<f32>], sample_rate: u32, min_shot: f64) -> Ve
 /// Money and percentages come first, then numbers, names mid-sentence and a short list of strong
 /// words. At most one word in any three is emphasized, so emphasis keeps its punch.
 pub fn emphasis(words: &[TranscriptWord]) -> Vec<bool> {
-    const MONEY: [&str; 9] = ["dollar", "dollars", "bucks", "peso", "pesos", "euro", "euros", "percent", "porsyento"];
+    const MONEY: [&str; 9] = [
+        "dollar",
+        "dollars",
+        "bucks",
+        "peso",
+        "pesos",
+        "euro",
+        "euros",
+        "percent",
+        "porsyento",
+    ];
     const NUMBERS: [&str; 44] = [
-        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
-        "fifteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred",
-        "thousand", "million", "billion", "half", "double", "triple", "twice", "first", "second", "third",
-        "isa", "dalawa", "tatlo", "apat", "lima", "anim", "pito", "walo", "siyam", "sampu", "milyon",
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve", "fifteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+        "eighty", "ninety", "hundred", "thousand", "million", "billion", "half", "double",
+        "triple", "twice", "first", "second", "third", "isa", "dalawa", "tatlo", "apat", "lima",
+        "anim", "pito", "walo", "siyam", "sampu", "milyon",
     ];
     const STRONG: [&str; 36] = [
-        "never", "always", "best", "worst", "free", "secret", "mistake", "mistakes", "huge", "massive", "insane",
-        "crazy", "easy", "fast", "faster", "biggest", "only", "stop", "must", "nobody", "everyone", "everything",
-        "nothing", "guaranteed", "important", "wrong", "instantly", "exactly", "grabe", "sobra", "libre",
-        "sikreto", "mali", "lahat", "wala", "talaga",
+        "never",
+        "always",
+        "best",
+        "worst",
+        "free",
+        "secret",
+        "mistake",
+        "mistakes",
+        "huge",
+        "massive",
+        "insane",
+        "crazy",
+        "easy",
+        "fast",
+        "faster",
+        "biggest",
+        "only",
+        "stop",
+        "must",
+        "nobody",
+        "everyone",
+        "everything",
+        "nothing",
+        "guaranteed",
+        "important",
+        "wrong",
+        "instantly",
+        "exactly",
+        "grabe",
+        "sobra",
+        "libre",
+        "sikreto",
+        "mali",
+        "lahat",
+        "wala",
+        "talaga",
     ];
     const NOT_NAMES: [&str; 7] = ["i", "i'm", "i'll", "i've", "i'd", "ok", "okay"];
     let rank: Vec<u8> = words
@@ -184,13 +240,17 @@ pub fn emphasis(words: &[TranscriptWord]) -> Vec<bool> {
             let token = clean_token(raw);
             let name = i > 0
                 && !ends_sentence(&words[i - 1].text)
-                && raw.trim_start_matches(|c: char| !c.is_alphanumeric()).starts_with(char::is_uppercase)
+                && raw
+                    .trim_start_matches(|c: char| !c.is_alphanumeric())
+                    .starts_with(char::is_uppercase)
                 && !NOT_NAMES.contains(&token.as_str());
             if token.is_empty() {
                 0
-            } else if raw.contains(['$', '%', '₱', '€', '£']) || MONEY.contains(&token.as_str()) {
+            } else if raw.contains(['$', '%', '₱', '€', '£']) || MONEY.contains(&token.as_str())
+            {
                 4
-            } else if token.chars().any(|c| c.is_ascii_digit()) || NUMBERS.contains(&token.as_str()) {
+            } else if token.chars().any(|c| c.is_ascii_digit()) || NUMBERS.contains(&token.as_str())
+            {
                 3
             } else if name {
                 2
@@ -218,13 +278,26 @@ mod tests {
     use super::*;
 
     fn word(text: &str) -> TranscriptWord {
-        TranscriptWord { text: text.into(), start: 0.0, end: 0.0, confidence: None }
+        TranscriptWord {
+            text: text.into(),
+            start: 0.0,
+            end: 0.0,
+            confidence: None,
+        }
     }
 
     #[test]
     fn emphasis_prefers_money_and_spaces_out() {
-        let words: Vec<_> = "We saved $500 in two weeks with Notion, the best tool.".split(' ').map(word).collect();
-        let marked: Vec<&str> = emphasis(&words).iter().zip(&words).filter(|(e, _)| **e).map(|(_, w)| w.text.as_str()).collect();
+        let words: Vec<_> = "We saved $500 in two weeks with Notion, the best tool."
+            .split(' ')
+            .map(word)
+            .collect();
+        let marked: Vec<&str> = emphasis(&words)
+            .iter()
+            .zip(&words)
+            .filter(|(e, _)| **e)
+            .map(|(_, w)| w.text.as_str())
+            .collect();
         // "two" is too close to "$500"; Notion is a name; "best" is two words after it.
         assert_eq!(marked, ["$500", "Notion,"]);
     }
@@ -254,6 +327,9 @@ mod tests {
         pcm.extend(vec![0.5; 400]);
         let found = silences(&pcm, sr, quiet_threshold(&pcm, sr), 0.3);
         assert_eq!(found.len(), 1);
-        assert!((found[0].0 - 1.0).abs() < 1e-9 && (found[0].1 - 1.6).abs() < 1e-9, "{found:?}");
+        assert!(
+            (found[0].0 - 1.0).abs() < 1e-9 && (found[0].1 - 1.6).abs() < 1e-9,
+            "{found:?}"
+        );
     }
 }

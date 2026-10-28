@@ -37,11 +37,17 @@ pub fn beats(pcm: &[f32], sample_rate: u32) -> Beats {
     let onsets = peaks(&env, fps).into_iter().map(time).collect();
 
     let Some(period) = tempo_period(&env, fps) else {
-        return Beats { onsets, ..Beats::default() };
+        return Beats {
+            onsets,
+            ..Beats::default()
+        };
     };
     let grid = beat_grid(&env, period);
     if grid.len() < 2 {
-        return Beats { onsets, ..Beats::default() };
+        return Beats {
+            onsets,
+            ..Beats::default()
+        };
     }
     let beats: Vec<f64> = grid.iter().map(|&f| time(f)).collect();
     // Steady-tempo estimate: slope of beat time against beat number.
@@ -61,13 +67,20 @@ pub fn beats(pcm: &[f32], sample_rate: u32) -> Beats {
         })
         .unwrap_or(0);
     let downbeats = beats.iter().copied().skip(phase).step_by(4).collect();
-    Beats { tempo, beats, downbeats, onsets }
+    Beats {
+        tempo,
+        beats,
+        downbeats,
+        onsets,
+    }
 }
 
 /// Spectral flux on a log-magnitude spectrum, minus its local mean, never negative.
 fn onset_envelope(pcm: &[f32], win: usize, hop: usize) -> Vec<f64> {
     let fft = RealFftPlanner::<f32>::new().plan_fft_forward(win);
-    let hann: Vec<f32> = (0..win).map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / win as f32).cos()).collect();
+    let hann: Vec<f32> = (0..win)
+        .map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / win as f32).cos())
+        .collect();
     let mut input = fft.make_input_vec();
     let mut spectrum = fft.make_output_vec();
     let mut prev = vec![0f32; spectrum.len()];
@@ -118,7 +131,10 @@ fn peaks(env: &[f64], fps: f64) -> Vec<usize> {
     let mut out: Vec<usize> = Vec::new();
     for i in 0..env.len() {
         let near = &env[i.saturating_sub(reach)..(i + reach + 1).min(env.len())];
-        if env[i] > threshold && near.iter().all(|&v| v <= env[i]) && out.last().is_none_or(|&p| i - p > reach) {
+        if env[i] > threshold
+            && near.iter().all(|&v| v <= env[i])
+            && out.last().is_none_or(|&p| i - p > reach)
+        {
             out.push(i);
         }
     }
@@ -133,19 +149,26 @@ fn tempo_period(env: &[f64], fps: f64) -> Option<f64> {
     if env.len() <= hi + 2 {
         return None;
     }
-    let ac = |lag: usize| env.iter().zip(&env[lag..]).map(|(a, b)| a * b).sum::<f64>() / (env.len() - lag) as f64;
+    let ac = |lag: usize| {
+        env.iter().zip(&env[lag..]).map(|(a, b)| a * b).sum::<f64>() / (env.len() - lag) as f64
+    };
     let raw: Vec<f64> = (lo - 1..=hi + 1).map(ac).collect();
     let weight = |lag: usize| {
         let bpm = 60.0 * fps / lag as f64;
         (-0.5 * (bpm / 120.0).log2().powi(2)).exp()
     };
-    let best = (1..raw.len() - 1).max_by(|&a, &b| (raw[a] * weight(a + lo - 1)).total_cmp(&(raw[b] * weight(b + lo - 1))))?;
+    let best = (1..raw.len() - 1)
+        .max_by(|&a, &b| (raw[a] * weight(a + lo - 1)).total_cmp(&(raw[b] * weight(b + lo - 1))))?;
     if raw[best] <= 0.0 {
         return None;
     }
     let (a, b, c) = (raw[best - 1], raw[best], raw[best + 1]);
     let curve = a - 2.0 * b + c;
-    let shift = if curve < 0.0 { (0.5 * (a - c) / curve).clamp(-0.5, 0.5) } else { 0.0 };
+    let shift = if curve < 0.0 {
+        (0.5 * (a - c) / curve).clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
     Some((best + lo - 1) as f64 + shift)
 }
 
@@ -154,7 +177,10 @@ fn tempo_period(env: &[f64], fps: f64) -> Option<f64> {
 fn beat_grid(env: &[f64], period: f64) -> Vec<usize> {
     let mut score = vec![0.0; env.len()];
     let mut back: Vec<Option<usize>> = vec![None; env.len()];
-    let (near, far) = ((period / 2.0).round() as usize, (period * 2.0).round() as usize);
+    let (near, far) = (
+        (period / 2.0).round() as usize,
+        (period * 2.0).round() as usize,
+    );
     for i in 0..env.len() {
         let mut best: Option<(f64, usize)> = None;
         for j in i.saturating_sub(far)..i.saturating_sub(near.max(1)) {
@@ -169,7 +195,9 @@ fn beat_grid(env: &[f64], period: f64) -> Vec<usize> {
     }
     // End on the best-scoring frame in the last period, then walk back.
     let tail = env.len().saturating_sub(period.round() as usize);
-    let Some(mut i) = (tail..env.len()).max_by(|&a, &b| score[a].total_cmp(&score[b])) else { return Vec::new() };
+    let Some(mut i) = (tail..env.len()).max_by(|&a, &b| score[a].total_cmp(&score[b])) else {
+        return Vec::new();
+    };
     let mut grid = vec![i];
     while let Some(j) = back[i] {
         grid.push(j);
@@ -181,7 +209,11 @@ fn beat_grid(env: &[f64], period: f64) -> Vec<usize> {
     let strong = |f: &usize| env[*f] >= 0.5 * rms;
     let first = grid.iter().position(strong).unwrap_or(grid.len());
     let last = grid.iter().rposition(strong).map_or(0, |p| p + 1);
-    if first < last { grid[first..last].to_vec() } else { Vec::new() }
+    if first < last {
+        grid[first..last].to_vec()
+    } else {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -206,10 +238,16 @@ mod tests {
         assert!((b.tempo - 120.0).abs() < 1.0, "tempo {}", b.tempo);
         assert!(b.beats.len() >= 28, "{} beats", b.beats.len());
         for t in &b.beats {
-            let off = clicks.iter().map(|c| (c - t).abs()).fold(f64::INFINITY, f64::min);
+            let off = clicks
+                .iter()
+                .map(|c| (c - t).abs())
+                .fold(f64::INFINITY, f64::min);
             assert!(off < 0.02, "beat {t:.3} is {off:.3} s from a click");
         }
-        assert!(b.downbeats.len() >= b.beats.len() / 4 && b.downbeats.iter().all(|d| b.beats.contains(d)));
+        assert!(
+            b.downbeats.len() >= b.beats.len() / 4
+                && b.downbeats.iter().all(|d| b.beats.contains(d))
+        );
         assert!(b.onsets.len() >= 28);
     }
 }

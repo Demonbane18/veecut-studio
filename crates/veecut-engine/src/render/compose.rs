@@ -21,8 +21,17 @@ pub(crate) struct Grade {
 impl Grade {
     pub fn new(look: &Look) -> Self {
         let skip = color_unchanged(look) && look.vignette <= 0.0;
-        let curves = if skip || !separable(look) { None } else { Some(channel_curves(look)) };
-        Grade { skip, curves, look: look.clone(), vignette: look.vignette.max(0.0) }
+        let curves = if skip || !separable(look) {
+            None
+        } else {
+            Some(channel_curves(look))
+        };
+        Grade {
+            skip,
+            curves,
+            look: look.clone(),
+            vignette: look.vignette.max(0.0),
+        }
     }
 }
 
@@ -33,7 +42,10 @@ pub(crate) struct Scratch {
 
 impl Scratch {
     pub fn new() -> Self {
-        Scratch { a: Vec::new(), b: Vec::new() }
+        Scratch {
+            a: Vec::new(),
+            b: Vec::new(),
+        }
     }
 }
 
@@ -70,7 +82,16 @@ pub(crate) fn render_at(
                 continue;
             }
             let Some(clip) = item.clip() else { continue };
-            draw_overlay(&mut pixmap, project, project_dir, item, clip, t, pool, scratch)?;
+            draw_overlay(
+                &mut pixmap,
+                project,
+                project_dir,
+                item,
+                clip,
+                t,
+                pool,
+                scratch,
+            )?;
         }
     }
     let (black, white) = dip_flash(project, t);
@@ -93,7 +114,11 @@ fn draw_main(
 ) -> Result<()> {
     let main = project.tracks.iter().find(|tr| tr.kind == TrackKind::Main);
     let Some(main) = main else { return Ok(()) };
-    let visible: Vec<&Item> = main.items.iter().filter(|i| i.contains(t) && i.clip().is_some()).collect();
+    let visible: Vec<&Item> = main
+        .items
+        .iter()
+        .filter(|i| i.contains(t) && i.clip().is_some())
+        .collect();
     if visible.is_empty() {
         return Ok(());
     }
@@ -103,7 +128,17 @@ fn draw_main(
         let item = visible[0];
         let clip = item.clip().unwrap();
         let gain = fade_gain(item, clip, t) * clip.opacity.clamp(0.0, 1.0);
-        fill_clip(project, project_dir, item, clip, t, w, h, pool, &mut scratch.a)?;
+        fill_clip(
+            project,
+            project_dir,
+            item,
+            clip,
+            t,
+            w,
+            h,
+            pool,
+            &mut scratch.a,
+        )?;
         replace_weighted(pixmap.data_mut(), &scratch.a, gain);
         return Ok(());
     }
@@ -116,8 +151,28 @@ fn draw_main(
     let out_w = 1.0 - in_w;
     let out_gain = fade_gain(outgoing, out_clip, t) * out_clip.opacity.clamp(0.0, 1.0) * out_w;
     let in_gain = fade_gain(incoming, in_clip, t) * in_clip.opacity.clamp(0.0, 1.0) * in_w;
-    fill_clip(project, project_dir, outgoing, out_clip, t, w, h, pool, &mut scratch.a)?;
-    fill_clip(project, project_dir, incoming, in_clip, t, w, h, pool, &mut scratch.b)?;
+    fill_clip(
+        project,
+        project_dir,
+        outgoing,
+        out_clip,
+        t,
+        w,
+        h,
+        pool,
+        &mut scratch.a,
+    )?;
+    fill_clip(
+        project,
+        project_dir,
+        incoming,
+        in_clip,
+        t,
+        w,
+        h,
+        pool,
+        &mut scratch.b,
+    )?;
     mix2(pixmap.data_mut(), &scratch.a, out_gain, &scratch.b, in_gain);
     Ok(())
 }
@@ -136,7 +191,17 @@ fn draw_overlay(
     if w < 1 || h < 1 {
         return Ok(());
     }
-    fill_clip(project, project_dir, item, clip, t, w, h, pool, &mut scratch.a)?;
+    fill_clip(
+        project,
+        project_dir,
+        item,
+        clip,
+        t,
+        w,
+        h,
+        pool,
+        &mut scratch.a,
+    )?;
     let gain = fade_gain(item, clip, t) * clip.opacity.clamp(0.0, 1.0);
     if gain <= 0.001 {
         return Ok(());
@@ -144,7 +209,18 @@ fn draw_overlay(
     let radius = clip.radius * pixmap.width() as f32;
     let cw = pixmap.width();
     let ch = pixmap.height();
-    blit(pixmap.data_mut(), cw, ch, &scratch.a, w, h, x, y, gain, radius);
+    blit(
+        pixmap.data_mut(),
+        cw,
+        ch,
+        &scratch.a,
+        w,
+        h,
+        x,
+        y,
+        gain,
+        radius,
+    );
     Ok(())
 }
 
@@ -191,10 +267,16 @@ fn fill_clip(
     Ok(())
 }
 
-
-fn clip_source<'a>(project: &'a Project, dir: &Path, clip: &Clip) -> Result<(&'a Asset, std::path::PathBuf)> {
+fn clip_source<'a>(
+    project: &'a Project,
+    dir: &Path,
+    clip: &Clip,
+) -> Result<(&'a Asset, std::path::PathBuf)> {
     let asset = project.asset(&clip.asset).ok_or_else(|| {
-        anyhow!("clip uses asset {:?}, which the project does not have", clip.asset)
+        anyhow!(
+            "clip uses asset {:?}, which the project does not have",
+            clip.asset
+        )
     })?;
     let path = project.asset_path(dir, asset);
     if !path.is_file() {
@@ -260,7 +342,11 @@ fn replace_weighted(dst: &mut [u8], src: &[u8], gain: f32) {
 fn mix2(dst: &mut [u8], a: &[u8], wa: f32, b: &[u8], wb: f32) {
     let wa = (wa.clamp(0.0, 1.0) * 256.0).round() as u16;
     let wb = (wb.clamp(0.0, 1.0) * 256.0).round() as u16;
-    for ((d, pa), pb) in dst.chunks_exact_mut(4).zip(a.chunks_exact(4)).zip(b.chunks_exact(4)) {
+    for ((d, pa), pb) in dst
+        .chunks_exact_mut(4)
+        .zip(a.chunks_exact(4))
+        .zip(b.chunks_exact(4))
+    {
         d[0] = ((pa[0] as u16 * wa + pb[0] as u16 * wb) >> 8).min(255) as u8;
         d[1] = ((pa[1] as u16 * wa + pb[1] as u16 * wb) >> 8).min(255) as u8;
         d[2] = ((pa[2] as u16 * wa + pb[2] as u16 * wb) >> 8).min(255) as u8;
@@ -382,7 +468,11 @@ fn apply_grade(data: &mut [u8], width: u32, height: u32, grade: &Grade) {
                 return;
             }
             let rgb = if let Some(curves) = grade.curves {
-                [curves[0][data[i] as usize], curves[1][data[i + 1] as usize], curves[2][data[i + 2] as usize]]
+                [
+                    curves[0][data[i] as usize],
+                    curves[1][data[i + 1] as usize],
+                    curves[2][data[i + 2] as usize],
+                ]
             } else {
                 math::map_color(&grade.look, [data[i], data[i + 1], data[i + 2]])
             };
@@ -401,4 +491,3 @@ fn apply_grade(data: &mut [u8], width: u32, height: u32, grade: &Grade) {
         }
     }
 }
-

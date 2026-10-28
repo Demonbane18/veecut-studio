@@ -56,7 +56,7 @@ veecut style set captions.highlight "#FFD400"
 | `captions.font` | a family from `veecut fonts` |
 | `captions.uppercase` | `true`, `false` |
 
-How the answers map: word by word is `word_pop`, the highlighted phrase is `highlight`, key-word pills is `pills`, full sentences is `subtitle`, none is `off`. White with a shadow is the default color (`#FFFFFF`). A brand color usually goes in `captions.highlight`; put it in `captions.color` only if they want every word in it. Sound effects plus music is `sfx_music`; the recipes then take the first track in `my-sounds/music/`, so ask the user to put one there. Sound effects come from `my-sounds/sfx/`.
+How the answers map: word by word is `word_pop`, the highlighted phrase is `highlight`, key-word pills is `pills`, full sentences is `subtitle`, none is `off`. White with a shadow is the default color (`#FFFFFF`). A brand color usually goes in `captions.highlight`; put it in `captions.color` only if they want every word in it. Sound effects plus music is `sfx_music`; the recipes then take the first track in `my-sounds/music/`, so ask the user to put one there. Sound effects come from `my-sounds/sfx/`. With `format = "both"`, each recipe's first draft comes in the other shape too, such as `<slug>-v1-16x9.mp4`.
 
 The style applies to new edits. To change a project that already exists, use `set` ops on it (`reference/editor-api.md`).
 

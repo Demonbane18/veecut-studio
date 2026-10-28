@@ -1,11 +1,13 @@
 //! Shared Rust text renderer for preview and export. Layouts and finished layers are cached.
 //!
 //! Caption lead, phone-safe region and edged caption boxes follow Herk Edit Kit (MIT).
+//! Unboxed copy samples the underlying footage and gets a neutral scrim below 3:1 contrast.
 //! Caption choices follow free247editor (MIT). Font files are OFL; licenses sit beside them.
 //! Montserrat comes from JulietaUla/Montserrat/fonts/ttf; other families from google/fonts/ofl.
 //! Inter is a static instance of that upstream font at wght=600, opsz=14 (fontTools 4.68).
 //! Run the ignored `visual_proof` test for PNG samples and a warm-frame draw benchmark.
 
+mod contrast;
 mod raster;
 #[cfg(test)]
 mod tests;
@@ -726,6 +728,19 @@ fn draw_layer(
                 mask.fill_path(&path, FillRule::Winding, true, transform);
             }
         }
+    }
+    if let Some(guard) = &layer.contrast {
+        guard.draw(
+            target,
+            Rect {
+                x: cx - width * scale / 2.0,
+                y: cy - height * scale / 2.0,
+                w: width * scale,
+                h: height * scale,
+            },
+            transform,
+            m.alpha,
+        );
     }
     target.draw_pixmap(
         0,

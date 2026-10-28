@@ -17,7 +17,8 @@ const DETECT_WIDTH: u32 = 480;
 /// Median face center over `samples` frames of `range`, if a face is found. The point is
 /// normalized to the source picture; with several faces in a frame, the largest one counts.
 pub fn face_focus(path: &Path, range: (f64, f64), samples: usize) -> Result<Option<Point>> {
-    let model = rustface::read_model(MODEL).context("the bundled face model is damaged; reinstall VeeCut")?;
+    let model = rustface::read_model(MODEL)
+        .context("the bundled face model is damaged; reinstall VeeCut")?;
     let mut detector = rustface::create_detector_with_model(model);
     detector.set_min_face_size(24);
     detector.set_score_thresh(2.0);
@@ -32,13 +33,18 @@ pub fn face_focus(path: &Path, range: (f64, f64), samples: usize) -> Result<Opti
         let gray = image::DynamicImage::ImageRgba8(frame).to_luma8();
         let (w, h) = gray.dimensions();
         let faces = detector.detect(&ImageData::new(&gray, w, h));
-        if let Some(face) = faces.iter().max_by_key(|f| f.bbox().width() * f.bbox().height()) {
+        if let Some(face) = faces
+            .iter()
+            .max_by_key(|f| f.bbox().width() * f.bbox().height())
+        {
             let b = face.bbox();
             xs.push(((b.x() as f32 + b.width() as f32 / 2.0) / w as f32).clamp(0.0, 1.0));
             ys.push(((b.y() as f32 + b.height() as f32 / 2.0) / h as f32).clamp(0.0, 1.0));
         }
     }
-    Ok(median(&mut xs).zip(median(&mut ys)).map(|(x, y)| Point::new(x, y)))
+    Ok(median(&mut xs)
+        .zip(median(&mut ys))
+        .map(|(x, y)| Point::new(x, y)))
 }
 
 fn median(v: &mut [f32]) -> Option<f32> {

@@ -1,6 +1,7 @@
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, Weight, Wrap};
-use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
 
+use super::contrast::ContrastGuard;
 use crate::project::{Align, Color, Rect, TextPreset};
 
 pub(super) const DARK: Color = Color::rgba(13, 18, 25, 238);
@@ -45,6 +46,7 @@ pub(super) struct Layer {
     pub image: Pixmap,
     pub glyphs: Vec<Rect>,
     pub line_bottoms: Vec<f32>,
+    pub contrast: Option<ContrastGuard>,
 }
 
 pub(super) fn paint(color: Color) -> Paint<'static> {
@@ -53,7 +55,7 @@ pub(super) fn paint(color: Color) -> Paint<'static> {
     p
 }
 
-pub(super) fn rounded(pix: &mut Pixmap, rect: Rect, radius: f32, color: Color) {
+fn rounded_path(rect: Rect, radius: f32) -> Option<Path> {
     let r = radius.min(rect.w / 2.0).min(rect.h / 2.0).max(0.0);
     let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
     let mut p = PathBuilder::new();
@@ -67,7 +69,11 @@ pub(super) fn rounded(pix: &mut Pixmap, rect: Rect, radius: f32, color: Color) {
     p.line_to(x, y + r);
     p.quad_to(x, y, x + r, y);
     p.close();
-    if let Some(path) = p.finish() {
+    p.finish()
+}
+
+pub(super) fn rounded(pix: &mut Pixmap, rect: Rect, radius: f32, color: Color) {
+    if let Some(path) = rounded_path(rect, radius) {
         pix.fill_path(
             &path,
             &paint(color),
@@ -344,10 +350,24 @@ pub(super) fn render(
         }
     }
     glyphs.sort_by_key(|(line, start, _)| (*line, *start));
+    let contrast = if spec.background.is_none_or(|color| color.a == 0) {
+        rounded_path(outer, radius).and_then(|path| {
+            ContrastGuard::new(
+                path,
+                spec.spans
+                    .iter()
+                    .filter(|span| !span.pill && !span.text.trim().is_empty())
+                    .map(|span| span.color),
+            )
+        })
+    } else {
+        None
+    };
     Some(Layer {
         image,
         glyphs: glyphs.into_iter().map(|(_, _, rect)| rect).collect(),
         line_bottoms,
+        contrast,
     })
 }
 

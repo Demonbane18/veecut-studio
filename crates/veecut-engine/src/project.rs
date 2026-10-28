@@ -154,7 +154,11 @@ impl fmt::Display for Color {
         if self.a == 255 {
             write!(f, "#{:02X}{:02X}{:02X}", self.r, self.g, self.b)
         } else {
-            write!(f, "#{:02X}{:02X}{:02X}{:02X}", self.r, self.g, self.b, self.a)
+            write!(
+                f,
+                "#{:02X}{:02X}{:02X}{:02X}",
+                self.r, self.g, self.b, self.a
+            )
         }
     }
 }
@@ -196,7 +200,12 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub const FULL: Rect = Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+    pub const FULL: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
 }
 
 /// Output frame size, frame rate and background color.
@@ -215,7 +224,12 @@ fn default_background() -> Color {
 
 impl Canvas {
     pub fn new(width: u32, height: u32) -> Self {
-        Canvas { width, height, fps: 30.0, background: Color::BLACK }
+        Canvas {
+            width,
+            height,
+            fps: 30.0,
+            background: Color::BLACK,
+        }
     }
     /// 9:16, 1080x1920: Reels, TikTok, Shorts.
     pub fn vertical() -> Self {
@@ -699,7 +713,10 @@ impl Clip {
     /// Crossfade overlap with the previous main-track clip, in seconds.
     pub fn overlap(&self) -> f64 {
         match &self.transition {
-            Some(Transition { kind: TransitionKind::Crossfade, duration }) => duration.max(0.0),
+            Some(Transition {
+                kind: TransitionKind::Crossfade,
+                duration,
+            }) => duration.max(0.0),
             _ => 0.0,
         }
     }
@@ -907,7 +924,9 @@ impl Project {
         std::fs::create_dir_all(dir)?;
         let tmp = dir.join(format!(
             ".{}.tmp",
-            path.file_name().and_then(|n| n.to_str()).unwrap_or(PROJECT_FILE)
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(PROJECT_FILE)
         ));
         std::fs::write(&tmp, json + "\n")?;
         std::fs::rename(&tmp, path).with_context(|| format!("saving {}", path.display()))?;
@@ -947,7 +966,10 @@ impl Project {
     /// (track index, item index) of an item id.
     pub fn find(&self, item_id: &str) -> Option<(usize, usize)> {
         self.tracks.iter().enumerate().find_map(|(ti, t)| {
-            t.items.iter().position(|i| i.id == item_id).map(|ii| (ti, ii))
+            t.items
+                .iter()
+                .position(|i| i.id == item_id)
+                .map(|ii| (ti, ii))
         })
     }
 
@@ -956,7 +978,8 @@ impl Project {
     }
 
     pub fn item_mut(&mut self, item_id: &str) -> Option<&mut Item> {
-        self.find(item_id).map(move |(t, i)| &mut self.tracks[t].items[i])
+        self.find(item_id)
+            .map(move |(t, i)| &mut self.tracks[t].items[i])
     }
 
     pub fn asset(&self, id: &str) -> Option<&Asset> {
@@ -976,14 +999,22 @@ impl Project {
     pub fn new_id(&self, prefix: &str) -> String {
         let taken = |id: &str| {
             self.assets.iter().any(|a| a.id == id)
-                || self.tracks.iter().any(|t| t.id == id || t.items.iter().any(|i| i.id == id))
+                || self
+                    .tracks
+                    .iter()
+                    .any(|t| t.id == id || t.items.iter().any(|i| i.id == id))
         };
         let mut n = 1 + self
             .tracks
             .iter()
             .flat_map(|t| t.items.iter().map(|i| i.id.as_str()).chain([t.id.as_str()]))
             .chain(self.assets.iter().map(|a| a.id.as_str()))
-            .filter_map(|id| id.strip_prefix(prefix)?.strip_prefix('-')?.parse::<u64>().ok())
+            .filter_map(|id| {
+                id.strip_prefix(prefix)?
+                    .strip_prefix('-')?
+                    .parse::<u64>()
+                    .ok()
+            })
             .max()
             .unwrap_or(0);
         loop {
@@ -1024,7 +1055,11 @@ impl Project {
         for item in &mut self.tracks[0].items {
             let overlap = item
                 .clip()
-                .map(|c| c.overlap().min(prev_duration / 2.0).min(item.duration / 2.0))
+                .map(|c| {
+                    c.overlap()
+                        .min(prev_duration / 2.0)
+                        .min(item.duration / 2.0)
+                })
                 .unwrap_or(0.0);
             item.start = (t - overlap).max(0.0);
             t = item.start + item.duration;
@@ -1050,7 +1085,11 @@ impl Project {
         if self.version != PROJECT_VERSION {
             bail!("project version {} is not supported", self.version);
         }
-        if self.canvas.width < 16 || self.canvas.height < 16 || self.canvas.width % 2 == 1 || self.canvas.height % 2 == 1 {
+        if self.canvas.width < 16
+            || self.canvas.height < 16
+            || self.canvas.width % 2 == 1
+            || self.canvas.height % 2 == 1
+        {
             bail!("canvas must be at least 16x16 with even width and height");
         }
         if !(1.0..=120.0).contains(&self.canvas.fps) {
@@ -1059,7 +1098,13 @@ impl Project {
         if self.tracks.first().map(|t| t.kind) != Some(TrackKind::Main) {
             bail!("the first track must be the main track");
         }
-        if self.tracks.iter().filter(|t| t.kind == TrackKind::Main).count() != 1 {
+        if self
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Main)
+            .count()
+            != 1
+        {
             bail!("a project has exactly one main track");
         }
         let mut ids = std::collections::HashSet::new();
@@ -1093,13 +1138,19 @@ impl Project {
         match (&item.body, track.kind) {
             (ItemBody::Clip(c), TrackKind::Main | TrackKind::Overlay | TrackKind::Audio) => {
                 let Some(asset) = self.asset(&c.asset) else {
-                    bail!("clip {id} uses asset {:?}, which the project does not have", c.asset);
+                    bail!(
+                        "clip {id} uses asset {:?}, which the project does not have",
+                        c.asset
+                    );
                 };
                 if track.kind == TrackKind::Audio && asset.kind == AssetKind::Image {
                     bail!("clip {id}: an image cannot go on an audio track");
                 }
                 if !(c.speed > 0.0 && c.speed <= 16.0) {
-                    bail!("clip {id}: speed {} must be above 0 and at most 16", c.speed);
+                    bail!(
+                        "clip {id}: speed {} must be above 0 and at most 16",
+                        c.speed
+                    );
                 }
                 if c.src_in < 0.0 {
                     bail!("clip {id}: src_in cannot be negative");
@@ -1118,7 +1169,10 @@ impl Project {
                 }
                 for z in &c.zooms {
                     if !(z.scale >= 1.0 && z.scale <= 4.0) || z.duration <= 0.0 || z.at < 0.0 {
-                        bail!("clip {id}: zoom at {}s needs scale 1..4 and a positive duration", z.at);
+                        bail!(
+                            "clip {id}: zoom at {}s needs scale 1..4 and a positive duration",
+                            z.at
+                        );
                     }
                 }
                 if let Some(f) = c.frame {
@@ -1164,7 +1218,12 @@ mod tests {
     }
 
     fn clip_item(id: &str, src_in: f64, duration: f64) -> Item {
-        Item { id: id.into(), start: 0.0, duration, body: ItemBody::Clip(Clip::new("a", src_in)) }
+        Item {
+            id: id.into(),
+            start: 0.0,
+            duration,
+            body: ItemBody::Clip(Clip::new("a", src_in)),
+        }
     }
 
     #[test]
@@ -1174,8 +1233,10 @@ mod tests {
         p.main_mut().items = vec![clip_item("c1", 0.0, 4.0), clip_item("c2", 10.0, 2.0)];
         p.normalize();
         assert_eq!(p.main().items[1].start, 4.0);
-        p.main_mut().items[1].clip_mut().unwrap().transition =
-            Some(Transition { kind: TransitionKind::Crossfade, duration: 0.5 });
+        p.main_mut().items[1].clip_mut().unwrap().transition = Some(Transition {
+            kind: TransitionKind::Crossfade,
+            duration: 0.5,
+        });
         p.normalize();
         assert_eq!(p.main().items[1].start, 3.5);
         assert_eq!(p.duration(), 5.5);
@@ -1194,7 +1255,10 @@ mod tests {
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
         assert!(Color::parse("#ffd400").is_ok() && Color::parse("ffd40").is_err());
-        assert_eq!(VideoKind::from_slug("music_video"), Some(VideoKind::MusicVideo));
+        assert_eq!(
+            VideoKind::from_slug("music_video"),
+            Some(VideoKind::MusicVideo)
+        );
     }
 
     #[test]

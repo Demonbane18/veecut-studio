@@ -51,11 +51,16 @@ fn spans(project: &Project, asset: &str) -> Vec<Span> {
             .collect()
     };
     let main = of(TrackKind::Main);
-    if main.is_empty() { of(TrackKind::Audio) } else { main }
+    if main.is_empty() {
+        of(TrackKind::Audio)
+    } else {
+        main
+    }
 }
 
 fn breaks_after(text: &str) -> bool {
-    text.trim_end().ends_with(['.', '!', '?', '…', ',', ';', ':'])
+    text.trim_end()
+        .ends_with(['.', '!', '?', '…', ',', ';', ':'])
 }
 
 /// Caption pages for every transcript word kept on the main track, grouped by the project's caption style.
@@ -71,12 +76,26 @@ pub fn build(project: &Project, transcript: &Transcript) -> Vec<Item> {
     for (w, &emphasis) in transcript.words.iter().zip(&emphasis) {
         let text = w.text.trim();
         let mid = (w.start + w.end) / 2.0;
-        let Some((span, s)) = spans.iter().enumerate().find(|(_, s)| mid >= s.src_in && mid < s.src_out) else { continue };
+        let Some((span, s)) = spans
+            .iter()
+            .enumerate()
+            .find(|(_, s)| mid >= s.src_in && mid < s.src_out)
+        else {
+            continue;
+        };
         if text.is_empty() {
             continue;
         }
         let at = |t: f64| (s.start + (t - s.src_in) / s.speed).clamp(s.start, s.end);
-        placed.push(Placed { text, start: at(w.start), end: at(w.end).max(at(w.start)), span, src_start: w.start, src_end: w.end, emphasis });
+        placed.push(Placed {
+            text,
+            start: at(w.start),
+            end: at(w.end).max(at(w.start)),
+            span,
+            src_start: w.start,
+            src_end: w.end,
+            emphasis,
+        });
     }
     placed.sort_by(|a, b| a.start.total_cmp(&b.start));
 
@@ -86,7 +105,11 @@ pub fn build(project: &Project, transcript: &Transcript) -> Vec<Item> {
     for word in placed {
         let fits = pages.last().is_some_and(|page| {
             let prev = &page[page.len() - 1];
-            let chars: usize = page.iter().map(|w| w.text.chars().count() + 1).sum::<usize>() + word.text.chars().count();
+            let chars: usize = page
+                .iter()
+                .map(|w| w.text.chars().count() + 1)
+                .sum::<usize>()
+                + word.text.chars().count();
             page.len() < max_words
                 && chars <= max_chars
                 && prev.span == word.span
@@ -106,9 +129,19 @@ pub fn build(project: &Project, transcript: &Transcript) -> Vec<Item> {
             let end = page.iter().map(|w| w.end).fold(start, f64::max);
             let words = page
                 .iter()
-                .map(|w| Word { text: w.text.to_string(), start: w.start - start, end: w.end - start, emphasis: w.emphasis })
+                .map(|w| Word {
+                    text: w.text.to_string(),
+                    start: w.start - start,
+                    end: w.end - start,
+                    emphasis: w.emphasis,
+                })
                 .collect();
-            Item { id: format!("cap-{}", k + 1), start, duration: end - start, body: ItemBody::Caption(Caption { words }) }
+            Item {
+                id: format!("cap-{}", k + 1),
+                start,
+                duration: end - start,
+                body: ItemBody::Caption(Caption { words }),
+            }
         })
         .collect()
 }
@@ -120,16 +153,36 @@ pub fn apply(project: &mut Project, transcript: &Transcript) -> Result<usize> {
     let ti = match project.track_of_kind(TrackKind::Captions) {
         Some(ti) => ti,
         None => {
-            let id = if project.track("captions").is_none() { "captions".to_string() } else { project.new_id("captions") };
-            let at = project.tracks.iter().position(|t| t.kind == TrackKind::Audio).unwrap_or(project.tracks.len());
-            let track = Track { id, kind: TrackKind::Captions, name: "Captions".into(), muted: false, hidden: false, items: Vec::new() };
+            let id = if project.track("captions").is_none() {
+                "captions".to_string()
+            } else {
+                project.new_id("captions")
+            };
+            let at = project
+                .tracks
+                .iter()
+                .position(|t| t.kind == TrackKind::Audio)
+                .unwrap_or(project.tracks.len());
+            let track = Track {
+                id,
+                kind: TrackKind::Captions,
+                name: "Captions".into(),
+                muted: false,
+                hidden: false,
+                items: Vec::new(),
+            };
             project.tracks.insert(at, track);
             at
         }
     };
     project.tracks[ti].items.clear();
     // Every number past the highest `cap-N` in use is free.
-    let first: u64 = project.new_id("cap").rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(1);
+    let first: u64 = project
+        .new_id("cap")
+        .rsplit('-')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(1);
     for (k, item) in items.iter_mut().enumerate() {
         item.id = format!("cap-{}", first + k as u64);
     }
@@ -140,14 +193,22 @@ pub fn apply(project: &mut Project, transcript: &Transcript) -> Result<usize> {
 
 /// Caption pages of the first captions track: (start, end, text).
 fn cues(project: &Project) -> Vec<(f64, f64, String)> {
-    let Some(ti) = project.track_of_kind(TrackKind::Captions) else { return Vec::new() };
+    let Some(ti) = project.track_of_kind(TrackKind::Captions) else {
+        return Vec::new();
+    };
     let mut cues: Vec<(f64, f64, String)> = project.tracks[ti]
         .items
         .iter()
         .filter_map(|item| match &item.body {
-            ItemBody::Caption(c) if !c.words.is_empty() => {
-                Some((item.start, item.end(), c.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")))
-            }
+            ItemBody::Caption(c) if !c.words.is_empty() => Some((
+                item.start,
+                item.end(),
+                c.words
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )),
             _ => None,
         })
         .collect();
@@ -157,7 +218,13 @@ fn cues(project: &Project) -> Vec<(f64, f64, String)> {
 
 fn stamp(t: f64, separator: char) -> String {
     let ms = (t.max(0.0) * 1000.0).round() as u64;
-    format!("{:02}:{:02}:{:02}{separator}{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+    format!(
+        "{:02}:{:02}:{:02}{separator}{:03}",
+        ms / 3_600_000,
+        ms / 60_000 % 60,
+        ms / 1000 % 60,
+        ms % 1000
+    )
 }
 
 /// The caption pages as SubRip subtitles.
@@ -165,7 +232,14 @@ pub fn to_srt(project: &Project) -> String {
     cues(project)
         .into_iter()
         .enumerate()
-        .map(|(i, (a, b, text))| format!("{}\n{} --> {}\n{text}\n\n", i + 1, stamp(a, ','), stamp(b, ',')))
+        .map(|(i, (a, b, text))| {
+            format!(
+                "{}\n{} --> {}\n{text}\n\n",
+                i + 1,
+                stamp(a, ','),
+                stamp(b, ',')
+            )
+        })
         .collect()
 }
 
@@ -202,15 +276,34 @@ mod tests {
     }
 
     fn transcript(words: &[(&str, f64, f64)]) -> Transcript {
-        let words = words.iter().map(|&(t, s, e)| TranscriptWord { text: t.into(), start: s, end: e, confidence: None }).collect();
-        Transcript { asset: "a".into(), provider: "test".into(), language: None, duration: 60.0, words }
+        let words = words
+            .iter()
+            .map(|&(t, s, e)| TranscriptWord {
+                text: t.into(),
+                start: s,
+                end: e,
+                confidence: None,
+            })
+            .collect();
+        Transcript {
+            asset: "a".into(),
+            provider: "test".into(),
+            language: None,
+            duration: 60.0,
+            words,
+        }
     }
 
     fn pages(items: &[Item]) -> Vec<String> {
         items
             .iter()
             .map(|i| match &i.body {
-                ItemBody::Caption(c) => c.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
+                ItemBody::Caption(c) => c
+                    .words
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 _ => String::new(),
             })
             .collect()
@@ -219,7 +312,17 @@ mod tests {
     #[test]
     fn captions_follow_the_cuts() {
         let mut p = project_with("a");
-        let add = Op::AddClip { asset: "a".into(), track: None, start: None, index: None, src_in: 0.0, duration: Some(20.0), frame: None, volume: None, duck: None };
+        let add = Op::AddClip {
+            asset: "a".into(),
+            track: None,
+            start: None,
+            index: None,
+            src_in: 0.0,
+            duration: Some(20.0),
+            frame: None,
+            volume: None,
+            duck: None,
+        };
         apply_op(&mut p, &add).unwrap();
         apply_op(&mut p, &Op::CutRange { from: 2.9, to: 4.0 }).unwrap();
         let t = transcript(&[
@@ -237,15 +340,47 @@ mod tests {
             ("later", 7.2, 7.5),
         ]);
         let items = build(&p, &t);
-        assert_eq!(pages(&items), ["Hello world.", "This is", "and this stays", "here too", "later"]);
+        assert_eq!(
+            pages(&items),
+            [
+                "Hello world.",
+                "This is",
+                "and this stays",
+                "here too",
+                "later"
+            ]
+        );
         let third = &items[2];
-        assert!((third.start - 3.9).abs() < 1e-9, "source 5.0 lands at 3.9 after the 1.1 s cut");
-        let ItemBody::Caption(c) = &third.body else { panic!() };
+        assert!(
+            (third.start - 3.9).abs() < 1e-9,
+            "source 5.0 lands at 3.9 after the 1.1 s cut"
+        );
+        let ItemBody::Caption(c) = &third.body else {
+            panic!()
+        };
         assert!((c.words[1].start - 0.3).abs() < 1e-9 && (third.duration - 1.0).abs() < 1e-9);
 
-        apply_op(&mut p, &Op::AddText { text: "x".into(), start: 0.0, duration: 1.0, preset: Default::default(), position: None, style: None, anim_in: None, anim_out: None, track: None }).unwrap();
+        apply_op(
+            &mut p,
+            &Op::AddText {
+                text: "x".into(),
+                start: 0.0,
+                duration: 1.0,
+                preset: Default::default(),
+                position: None,
+                style: None,
+                anim_in: None,
+                anim_out: None,
+                track: None,
+            },
+        )
+        .unwrap();
         assert_eq!(apply(&mut p, &t).unwrap(), 5);
-        assert_eq!(apply(&mut p, &t).unwrap(), 5, "applying again replaces the pages");
+        assert_eq!(
+            apply(&mut p, &t).unwrap(),
+            5,
+            "applying again replaces the pages"
+        );
         let caps = &p.tracks[p.track_of_kind(TrackKind::Captions).unwrap()].items;
         assert_eq!(caps.len(), 5);
         assert!(caps.iter().all(|i| i.id.starts_with("cap-")));
@@ -257,9 +392,19 @@ mod tests {
         let mut p = project_with("a");
         let music = p.track_of_kind(TrackKind::Audio).unwrap();
         for (id, start, src_in) in [("n1", 0.0, 0.0), ("n2", 2.0, 3.0)] {
-            p.tracks[music].items.push(Item { id: id.into(), start, duration: 2.0, body: ItemBody::Clip(Clip::new("a", src_in)) });
+            p.tracks[music].items.push(Item {
+                id: id.into(),
+                start,
+                duration: 2.0,
+                body: ItemBody::Clip(Clip::new("a", src_in)),
+            });
         }
-        let t = transcript(&[("One", 0.2, 0.5), ("two", 0.6, 0.9), ("gone", 2.2, 2.6), ("three", 3.2, 3.5)]);
+        let t = transcript(&[
+            ("One", 0.2, 0.5),
+            ("two", 0.6, 0.9),
+            ("gone", 2.2, 2.6),
+            ("three", 3.2, 3.5),
+        ]);
         let items = build(&p, &t);
         assert_eq!(pages(&items), ["One two", "three"]);
         assert!((items[1].start - 2.2).abs() < 1e-9);
@@ -268,13 +413,42 @@ mod tests {
     #[test]
     fn srt_and_vtt_format() {
         let mut p = project_with("a");
-        let words = |list: &[&str]| list.iter().map(|w| Word { text: w.to_string(), start: 0.0, end: 0.1, emphasis: false }).collect();
+        let words = |list: &[&str]| {
+            list.iter()
+                .map(|w| Word {
+                    text: w.to_string(),
+                    start: 0.0,
+                    end: 0.1,
+                    emphasis: false,
+                })
+                .collect()
+        };
         let caps = p.track_of_kind(TrackKind::Captions).unwrap();
         p.tracks[caps].items = vec![
-            Item { id: "cap-1".into(), start: 0.5, duration: 1.25, body: ItemBody::Caption(Caption { words: words(&["Hello", "world."]) }) },
-            Item { id: "cap-2".into(), start: 3661.0, duration: 0.5, body: ItemBody::Caption(Caption { words: words(&["Bye"]) }) },
+            Item {
+                id: "cap-1".into(),
+                start: 0.5,
+                duration: 1.25,
+                body: ItemBody::Caption(Caption {
+                    words: words(&["Hello", "world."]),
+                }),
+            },
+            Item {
+                id: "cap-2".into(),
+                start: 3661.0,
+                duration: 0.5,
+                body: ItemBody::Caption(Caption {
+                    words: words(&["Bye"]),
+                }),
+            },
         ];
-        assert_eq!(to_srt(&p), "1\n00:00:00,500 --> 00:00:01,750\nHello world.\n\n2\n01:01:01,000 --> 01:01:01,500\nBye\n\n");
-        assert_eq!(to_vtt(&p), "WEBVTT\n\n00:00:00.500 --> 00:00:01.750\nHello world.\n\n01:01:01.000 --> 01:01:01.500\nBye\n\n");
+        assert_eq!(
+            to_srt(&p),
+            "1\n00:00:00,500 --> 00:00:01,750\nHello world.\n\n2\n01:01:01,000 --> 01:01:01,500\nBye\n\n"
+        );
+        assert_eq!(
+            to_vtt(&p),
+            "WEBVTT\n\n00:00:00.500 --> 00:00:01.750\nHello world.\n\n01:01:01.000 --> 01:01:01.500\nBye\n\n"
+        );
     }
 }

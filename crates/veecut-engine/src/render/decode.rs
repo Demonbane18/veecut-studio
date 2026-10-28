@@ -56,8 +56,18 @@ fn framing_filter(req: &FrameReq, crop: Option<(u32, u32, u32, u32)>) -> String 
 /// How a source-normalized point lands in the decoded (already framed) picture.
 #[derive(Clone, Copy)]
 enum FocusMap {
-    Cover { crop: CropRect, src_w: f64, src_h: f64 },
-    Contain { ox: f64, oy: f64, scale: f64, src_w: f64, src_h: f64 },
+    Cover {
+        crop: CropRect,
+        src_w: f64,
+        src_h: f64,
+    },
+    Contain {
+        ox: f64,
+        oy: f64,
+        scale: f64,
+        src_w: f64,
+        src_h: f64,
+    },
 }
 
 impl FocusMap {
@@ -71,7 +81,13 @@ impl FocusMap {
                     (sy - crop.y) / crop.h.max(1.0) * dec_h,
                 )
             }
-            FocusMap::Contain { ox, oy, scale, src_w, src_h } => (
+            FocusMap::Contain {
+                ox,
+                oy,
+                scale,
+                src_w,
+                src_h,
+            } => (
                 ox + focus.x as f64 * src_w * scale,
                 oy + focus.y as f64 * src_h * scale,
             ),
@@ -97,17 +113,34 @@ impl VideoDecoder {
     fn spawn(path: &Path, src_t: f64, src_len: f64, filter: &str, w: u32, h: u32) -> Result<Self> {
         let mut cmd = Command::new(ffmpeg()?);
         // No -noautorotate: phone rotation metadata is applied. +genpts keeps VFR timestamps usable.
-        cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-fflags", "+genpts"]);
+        cmd.args([
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "+genpts",
+        ]);
         cmd.arg("-ss").arg(format!("{src_t:.6}"));
         cmd.arg("-t").arg(format!("{src_len:.6}"));
         cmd.arg("-i").arg(path);
-        cmd.args(["-vf", filter, "-an", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
-        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.args([
+            "-vf", filter, "-an", "-f", "rawvideo", "-pix_fmt", "rgba", "-",
+        ]);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut child = cmd
             .spawn()
             .with_context(|| format!("starting ffmpeg to decode {}", path.display()))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("ffmpeg stdout was not piped"))?;
-        let stderr = child.stderr.take().ok_or_else(|| anyhow!("ffmpeg stderr was not piped"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("ffmpeg stdout was not piped"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("ffmpeg stderr was not piped"))?;
         let stderr_thread = std::thread::spawn(move || {
             let mut buf = Vec::new();
             let mut tmp = [0u8; 1024];
@@ -140,7 +173,10 @@ impl VideoDecoder {
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
             Err(e) => {
                 let detail = self.stderr_tail();
-                bail!("reading a frame from ffmpeg failed: {e}{}", fmt_detail(&detail))
+                bail!(
+                    "reading a frame from ffmpeg failed: {e}{}",
+                    fmt_detail(&detail)
+                )
             }
         }
     }
@@ -210,7 +246,8 @@ impl DecoderPool {
         if info.width == 0 || info.height == 0 {
             bail!("{} has no picture size", path.display());
         }
-        self.probes.insert(path.to_path_buf(), (info.width, info.height));
+        self.probes
+            .insert(path.to_path_buf(), (info.width, info.height));
         Ok((info.width, info.height))
     }
 
@@ -234,8 +271,11 @@ impl DecoderPool {
             self.slots.len() - 1
         };
         self.slots[idx].generation = self.generation;
-        let (fx, fy) = self.slots[idx].map.pixel(focus, req.dec_w as f64, req.dec_h as f64);
-        let (x, y, w, h) = math::zoom_window(req.dec_w as f64, req.dec_h as f64, scale as f64, fx, fy);
+        let (fx, fy) = self.slots[idx]
+            .map
+            .pixel(focus, req.dec_w as f64, req.dec_h as f64);
+        let (x, y, w, h) =
+            math::zoom_window(req.dec_w as f64, req.dec_h as f64, scale as f64, fx, fy);
         let opaque = !self.slots[idx].image;
         self.blit_zoom(idx, x, y, w, h, dest_w, dest_h, dest)?;
         Ok(opaque)
@@ -258,8 +298,17 @@ impl DecoderPool {
             (pixels, map, None)
         } else {
             let (map, filter) = video_framing(req);
-            let src_len = (req.src_out - req.src_t).max(req.speed / req.fps.max(1.0)).max(0.04);
-            let dec = VideoDecoder::spawn(&req.path, req.src_t.max(0.0), src_len, &filter, req.dec_w, req.dec_h)?;
+            let src_len = (req.src_out - req.src_t)
+                .max(req.speed / req.fps.max(1.0))
+                .max(0.04);
+            let dec = VideoDecoder::spawn(
+                &req.path,
+                req.src_t.max(0.0),
+                src_len,
+                &filter,
+                req.dec_w,
+                req.dec_h,
+            )?;
             (Vec::new(), map, Some(dec))
         };
         let step = req.speed / req.fps.max(1.0);
@@ -306,8 +355,17 @@ impl DecoderPool {
         }
         // Jump. Restart at the requested source time.
         let (map, filter) = video_framing(req);
-        let src_len = (req.src_out - req.src_t).max(req.speed / req.fps.max(1.0)).max(0.04);
-        let dec = VideoDecoder::spawn(&req.path, req.src_t.max(0.0), src_len, &filter, req.dec_w, req.dec_h)?;
+        let src_len = (req.src_out - req.src_t)
+            .max(req.speed / req.fps.max(1.0))
+            .max(0.04);
+        let dec = VideoDecoder::spawn(
+            &req.path,
+            req.src_t.max(0.0),
+            src_len,
+            &filter,
+            req.dec_w,
+            req.dec_h,
+        )?;
         let slot = &mut self.slots[idx];
         slot.dec = Some(dec);
         slot.map = map;
@@ -332,7 +390,12 @@ impl DecoderPool {
     ) -> Result<()> {
         let need = dest_w as usize * dest_h as usize * 4;
         dest.resize(need, 0);
-        let DecoderPool { slots, resizer, resize_opts, .. } = self;
+        let DecoderPool {
+            slots,
+            resizer,
+            resize_opts,
+            ..
+        } = self;
         let slot = &slots[idx];
         if !slot.has_frame || slot.pixels.len() < slot.w as usize * slot.h as usize * 4 {
             dest.fill(0);
@@ -374,7 +437,11 @@ fn pull(slot: &mut Slot, req: &FrameReq) -> Result<bool> {
         }
         Ok(None) => {
             if !slot.has_frame {
-                let detail = slot.dec.as_mut().map(|d| d.stderr_tail()).unwrap_or_default();
+                let detail = slot
+                    .dec
+                    .as_mut()
+                    .map(|d| d.stderr_tail())
+                    .unwrap_or_default();
                 bail!(
                     "ffmpeg returned no frame from {} at {:.3}s{}",
                     req.path.display(),
@@ -412,10 +479,14 @@ fn video_framing(req: &FrameReq) -> (FocusMap, String) {
                 src_w: req.src_w as f64,
                 src_h: req.src_h as f64,
             };
-            (map, video_filter(req.speed, req.fps, &framing_filter(req, Some(px))))
+            (
+                map,
+                video_filter(req.speed, req.fps, &framing_filter(req, Some(px))),
+            )
         }
         Fit::Contain => {
-            let scale = (req.dec_w as f64 / req.src_w.max(1) as f64).min(req.dec_h as f64 / req.src_h.max(1) as f64);
+            let scale = (req.dec_w as f64 / req.src_w.max(1) as f64)
+                .min(req.dec_h as f64 / req.src_h.max(1) as f64);
             let iw = req.src_w as f64 * scale;
             let ih = req.src_h as f64 * scale;
             let map = FocusMap::Contain {
@@ -425,7 +496,10 @@ fn video_framing(req: &FrameReq) -> (FocusMap, String) {
                 src_w: req.src_w as f64,
                 src_h: req.src_h as f64,
             };
-            (map, video_filter(req.speed, req.fps, &framing_filter(req, None)))
+            (
+                map,
+                video_filter(req.speed, req.fps, &framing_filter(req, None)),
+            )
         }
     }
 }
@@ -440,15 +514,26 @@ fn frame_image(req: &FrameReq) -> Result<(Vec<u8>, FocusMap)> {
         .to_rgba8();
     let (sw, sh) = (img.width().max(1), img.height().max(1));
     let raw = img.into_raw();
-    let src = ImageRef::new(sw, sh, &raw, PixelType::U8x4)
-        .map_err(|e| anyhow!("image {} could not be read as RGBA: {e}", req.path.display()))?;
+    let src = ImageRef::new(sw, sh, &raw, PixelType::U8x4).map_err(|e| {
+        anyhow!(
+            "image {} could not be read as RGBA: {e}",
+            req.path.display()
+        )
+    })?;
     let mut resizer = Resizer::new();
     let opts = ResizeOptions::new()
         .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
         .use_alpha(true);
     match req.fit {
         Fit::Cover => {
-            let crop = math::cover_crop(sw as f64, sh as f64, req.dec_w as f64, req.dec_h as f64, req.focus.x as f64, req.focus.y as f64);
+            let crop = math::cover_crop(
+                sw as f64,
+                sh as f64,
+                req.dec_w as f64,
+                req.dec_h as f64,
+                req.focus.x as f64,
+                req.focus.y as f64,
+            );
             let mut dst = Image::new(req.dec_w, req.dec_h, PixelType::U8x4);
             resizer
                 .resize(&src, &mut dst, &opts.crop(crop.x, crop.y, crop.w, crop.h))
@@ -500,7 +585,9 @@ fn blit_opaque(dst: &mut [u8], dst_w: u32, src: &[u8], sw: u32, sh: u32, x: u32,
         let dy = y + row_i;
         let src_off = row_i as usize * row;
         let dst_off = (dy as usize * dst_w as usize + x as usize) * 4;
-        let n = row.min(src.len().saturating_sub(src_off)).min(dst.len().saturating_sub(dst_off));
+        let n = row
+            .min(src.len().saturating_sub(src_off))
+            .min(dst.len().saturating_sub(dst_off));
         dst[dst_off..dst_off + n].copy_from_slice(&src[src_off..src_off + n]);
     }
 }

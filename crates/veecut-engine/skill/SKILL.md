@@ -26,7 +26,7 @@ my-sounds/sfx/    sound effects the recipes may use
 
 1. Run `veecut doctor`. It checks ffmpeg, ffprobe, transcription, coding agents and the skills catalog. If something says `missing`, tell the user in one line what to install.
 2. Run `veecut style show`. If every value is still the default (vertical, hook on, natural pace, highlight captions in the upper third), offer the short style setup in `reference/style-setup.md`. It takes two or three quick rounds of questions. If the user says skip, use the defaults.
-3. Transcription runs on the user's computer with whisper.cpp by default. The first run downloads a model. If it is slow, tell the user they can add a free Groq key: they open `.env` themselves and put `GROQ_API_KEY=...` on its own line. Never ask them to paste a key into the chat, and never read `.env` aloud.
+3. Transcription runs on the user's computer with whisper.cpp unless a Groq key is set. The first local run downloads a model. If it is slow, tell the user they can get a free key at https://console.groq.com/keys and add it themselves: they open `.env` and put `GROQ_API_KEY=...` on its own line. Say plainly that with the key set, the audio is uploaded to Groq for transcription. Never ask them to paste a key into the chat, and never read `.env` aloud.
 
 ## The edit loop
 
@@ -37,9 +37,9 @@ my-sounds/sfx/    sound effects the recipes may use
 5. If you can look at images, look before the user does: `veecut frames` saves a contact sheet, `veecut frame --at T` saves one frame. Check that captions stay off the mouth, the hook is readable and nothing is cut off at the edges.
 6. Open the draft for the user: `open outbox/<slug>-v1.mp4` on macOS, `start "" outbox\<slug>-v1.mp4` on Windows, `xdg-open outbox/<slug>-v1.mp4` on Linux.
 7. Tell them what changed in 3 to 5 short bullets, then ask for notes. Turn review items into plain questions ("At 0:12 you said the intro twice. Keep the second one?").
-8. Turn each note into Editor API ops (`reference/editor-api.md`) and apply them with `veecut ops`. If a note is lasting, save it as a rule (`reference/notes-and-rules.md`) and confirm in one line.
+8. Turn each note into Editor API ops (`reference/editor-api.md`) and apply them with `veecut ops`. To use a new file (more B-roll, music, a logo), bring it in first with `veecut add FILE` and use the asset id it prints. If a note is lasting, save it as a rule (`reference/notes-and-rules.md`) and confirm in one line.
 9. After each round of notes, run `veecut render`. Drafts count up: `-v2`, `-v3`. Open the new draft and say in one or two lines what you fixed.
-10. When the user approves ("ok na", "approved", "final", "goods na", "ship it"), run `veecut render --final`. It writes `outbox/<slug>-final.mp4`. If their style format is `both`, also render the other shape: `veecut render --final --aspect 16:9` for a vertical edit, or `--aspect 9:16` for a horizontal one.
+10. When the user approves ("ok na", "approved", "final", "goods na", "ship it"), run `veecut render --final`. It writes `outbox/<slug>-final.mp4`. If their style format is `both`, the recipe's first draft already comes in two shapes (for example `<slug>-v1.mp4` and `<slug>-v1-16x9.mp4`). For later drafts and the final, run the render a second time with `--aspect 16:9` for a vertical edit, or `--aspect 9:16` for a horizontal one.
 
 ## Pick the kind
 
@@ -65,6 +65,7 @@ These habits keep small models on track, and they work for big ones too.
 - Add `--json` to commands whose output you need to read.
 - Let the recipes and ops do the work. Do not write scripts, ffmpeg commands or code to edit a video.
 - When you are unsure what the project holds, run `veecut status --json`. It lists the tracks, every item id, the assets, drafts and open notes. Copy ids from it; never guess them.
+- Commands work on the most recently changed project. When there are several (the `clips` recipe makes one per clip), pass `-p SLUG` with the folder name from `projects/`.
 - Never edit `project.json` by hand. Every change goes through `veecut ops`, so it can be checked and undone with `veecut undo` (and `veecut redo`).
 - An op that fails changes nothing. Read the error, fix that one thing and try again.
 - Put the ops for one note in one JSON array so they apply together.
@@ -83,7 +84,7 @@ VeeCut keeps a catalog of community video skills from awesome-claude-video-skill
 
 ## MCP tools
 
-When VeeCut is connected as an MCP server (`veecut mcp`, which `veecut init` registers in `opencode.json`), you can call tools instead of the command line: `status`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `note`, `undo`, `skills_search` and `skills_install`. Each takes the same arguments as the matching command. `frame` and `frames` return images you can look at. Use one way or the other; both change the same project.
+When VeeCut is connected as an MCP server (`veecut mcp`, which `veecut init` registers in `opencode.json`), you can call tools instead of the command line: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `note`, `undo` (with `redo: true` to redo), `skills_search` and `skills_install`. Each takes the same arguments as the matching command. `frame` and `frames` return the PNG as an image you can look at. Use one way or the other; both change the same project.
 
 ## Never
 

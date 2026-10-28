@@ -30,8 +30,13 @@ pub fn run(opts: StudioOptions) -> anyhow::Result<()> {
             .with_min_inner_size([960.0, 640.0]),
         ..Default::default()
     };
-    eframe::run_native("VeeCut Studio", native, Box::new(move |cc| {
-        cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
-        Ok(Box::new(app))
-    })).map_err(|error| anyhow::anyhow!("opening the editor: {error}"))
+    eframe::run_native(
+        "VeeCut Studio",
+        native,
+        Box::new(move |cc| {
+            cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
+            Ok(Box::new(app))
+        }),
+    )
+    .map_err(|error| anyhow::anyhow!("opening the editor: {error}"))
 }

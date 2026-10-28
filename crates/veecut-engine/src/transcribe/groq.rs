@@ -23,7 +23,10 @@ const ATTEMPTS: u32 = 6;
 
 /// The user's Groq key, if set. Never printed.
 pub(super) fn api_key() -> Option<String> {
-    std::env::var("GROQ_API_KEY").ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
+    std::env::var("GROQ_API_KEY")
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
 }
 
 pub(super) fn transcribe(
@@ -34,7 +37,9 @@ pub(super) fn transcribe(
     progress: &mut dyn FnMut(&str),
 ) -> Result<Transcript> {
     let Some(key) = api_key() else {
-        bail!("GROQ_API_KEY is not set. Get a free key at https://console.groq.com/keys and put GROQ_API_KEY=... in the workspace .env, or transcribe locally");
+        bail!(
+            "GROQ_API_KEY is not set. Get a free key at https://console.groq.com/keys and put GROQ_API_KEY=... in the workspace .env, or transcribe locally"
+        );
     };
     let model = model.unwrap_or(DEFAULT_MODEL);
     let parts = parts(media, duration, progress)?;
@@ -45,23 +50,45 @@ pub(super) fn transcribe(
         let mp3 = dir.path().join(format!("part{k}.mp3"));
         let mut cmd = media::ffmpeg_command()?;
         if parts.len() > 1 {
-            cmd.arg("-ss").arg(format!("{from:.3}")).arg("-t").arg(format!("{:.3}", to - from));
+            cmd.arg("-ss")
+                .arg(format!("{from:.3}"))
+                .arg("-t")
+                .arg(format!("{:.3}", to - from));
         }
-        cmd.arg("-i").arg(media).args(["-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", "-f", "mp3", "-y"]).arg(&mp3);
+        cmd.arg("-i")
+            .arg(media)
+            .args([
+                "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", "-f", "mp3", "-y",
+            ])
+            .arg(&mp3);
         media::run(&mut cmd).context("preparing audio for Groq")?;
         let audio = std::fs::read(&mp3)?;
         if audio.len() as u64 > MAX_UPLOAD {
-            bail!("the audio part is {:.1} MB, over the 20 MB upload limit", audio.len() as f64 / 1e6);
+            bail!(
+                "the audio part is {:.1} MB, over the 20 MB upload limit",
+                audio.len() as f64 / 1e6
+            );
         }
-        let label = if parts.len() > 1 { format!(" part {}/{}", k + 1, parts.len()) } else { String::new() };
-        progress(&format!("Groq {model}: uploading{label} ({:.1} MB)", audio.len() as f64 / 1e6));
+        let label = if parts.len() > 1 {
+            format!(" part {}/{}", k + 1, parts.len())
+        } else {
+            String::new()
+        };
+        progress(&format!(
+            "Groq {model}: uploading{label} ({:.1} MB)",
+            audio.len() as f64 / 1e6
+        ));
         let reply = post(&key, &audio, model, language, progress)?;
         detected = detected.or(reply.language.as_deref().and_then(iso_language));
-        words.extend(punctuate(reply.words, &reply.segments).into_iter().map(|mut w| {
-            w.start += from;
-            w.end += from;
-            w
-        }));
+        words.extend(
+            punctuate(reply.words, &reply.segments)
+                .into_iter()
+                .map(|mut w| {
+                    w.start += from;
+                    w.end += from;
+                    w
+                }),
+        );
     }
     Ok(Transcript {
         asset: String::new(),
@@ -79,7 +106,10 @@ fn parts(media: &Path, duration: f64, progress: &mut dyn FnMut(&str)) -> Result<
     }
     progress("Finding pauses to split the long recording");
     let pcm = media::pcm_mono(media, 8000, None)?;
-    Ok(split(duration, &analyze::silences(&pcm, 8000, analyze::quiet_threshold(&pcm, 8000), 0.3)))
+    Ok(split(
+        duration,
+        &analyze::silences(&pcm, 8000, analyze::quiet_threshold(&pcm, 8000), 0.3),
+    ))
 }
 
 /// Pieces of at most 20 minutes, each ending in the middle of the longest pause of its last
@@ -125,8 +155,19 @@ struct Word {
 
 /// Posts one audio file, retrying 429 and 5xx with backoff (honoring `retry-after`) and network
 /// failures.
-fn post(key: &str, audio: &[u8], model: &str, language: Option<&str>, progress: &mut dyn FnMut(&str)) -> Result<Reply> {
-    let boundary = format!("veecut{:016x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64));
+fn post(
+    key: &str,
+    audio: &[u8],
+    model: &str,
+    language: Option<&str>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Reply> {
+    let boundary = format!(
+        "veecut{:016x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64)
+    );
     let mut fields = vec![
         ("model", model),
         ("response_format", "verbose_json"),
@@ -142,7 +183,10 @@ fn post(key: &str, audio: &[u8], model: &str, language: Option<&str>, progress: 
     for attempt in 1..=ATTEMPTS {
         let sent = ureq::post(URL)
             .header("Authorization", &format!("Bearer {key}"))
-            .header("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
+            .header(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )
             .config()
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(600)))
@@ -152,40 +196,63 @@ fn post(key: &str, audio: &[u8], model: &str, language: Option<&str>, progress: 
             Ok(mut reply) => {
                 let status = reply.status().as_u16();
                 if status == 200 {
-                    return reply.body_mut().read_json().context("Groq sent a reply VeeCut could not read");
+                    return reply
+                        .body_mut()
+                        .read_json()
+                        .context("Groq sent a reply VeeCut could not read");
                 }
-                let retry_after = reply.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<f64>().ok());
+                let retry_after = reply
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<f64>().ok());
                 let message = error_message(&reply.body_mut().read_to_string().unwrap_or_default());
                 match status {
                     429 | 500.. if attempt < ATTEMPTS => {
                         let wait = retry_after.unwrap_or(delay).clamp(1.0, 120.0);
-                        progress(&format!("Groq is busy (HTTP {status}); trying again in {wait:.0} s"));
+                        progress(&format!(
+                            "Groq is busy (HTTP {status}); trying again in {wait:.0} s"
+                        ));
                         wait
                     }
-                    401 | 403 => bail!("Groq refused GROQ_API_KEY (HTTP {status}: {message}). Check the key at https://console.groq.com/keys"),
+                    401 | 403 => bail!(
+                        "Groq refused GROQ_API_KEY (HTTP {status}: {message}). Check the key at https://console.groq.com/keys"
+                    ),
                     413 => bail!("Groq says the audio is too large (HTTP 413: {message})"),
                     _ => bail!("Groq transcription failed (HTTP {status}: {message})"),
                 }
             }
             Err(e) if attempt < ATTEMPTS => {
-                progress(&format!("Could not reach Groq ({e}); trying again in {delay:.0} s"));
+                progress(&format!(
+                    "Could not reach Groq ({e}); trying again in {delay:.0} s"
+                ));
                 delay
             }
-            Err(e) => return Err(e).context("could not reach Groq; check your internet connection"),
+            Err(e) => {
+                return Err(e).context("could not reach Groq; check your internet connection");
+            }
         };
         std::thread::sleep(Duration::from_secs_f64(wait));
         delay *= 2.0;
     }
-    bail!("Groq stayed busy after {ATTEMPTS} attempts; try again in a few minutes or transcribe locally")
+    bail!(
+        "Groq stayed busy after {ATTEMPTS} attempts; try again in a few minutes or transcribe locally"
+    )
 }
 
 /// A multipart/form-data body with text fields and the MP3 as `file`.
 fn form(boundary: &str, fields: &[(&str, &str)], audio: &[u8]) -> Vec<u8> {
     let mut body = Vec::with_capacity(audio.len() + 1024);
     for (name, value) in fields {
-        let _ = write!(body, "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n");
+        let _ = write!(
+            body,
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        );
     }
-    let _ = write!(body, "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.mp3\"\r\nContent-Type: audio/mpeg\r\n\r\n");
+    let _ = write!(
+        body,
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.mp3\"\r\nContent-Type: audio/mpeg\r\n\r\n"
+    );
     body.extend_from_slice(audio);
     let _ = write!(body, "\r\n--{boundary}--\r\n");
     body
@@ -195,22 +262,35 @@ fn form(boundary: &str, fields: &[(&str, &str)], audio: &[u8]) -> Vec<u8> {
 fn error_message(body: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|v| v.pointer("/error/message").and_then(|m| m.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| body.chars().take(300).collect())
 }
 
 /// Groq's word list has no punctuation; the segment text does. Each word takes the matching
 /// segment token (looking a few tokens ahead), so sentence ends and commas survive.
 fn punctuate(words: Vec<Word>, segments: &[Segment]) -> Vec<TranscriptWord> {
-    let norm = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
-    let tokens: Vec<&str> = segments.iter().flat_map(|s| s.text.split_whitespace()).collect();
+    let norm = |s: &str| {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let tokens: Vec<&str> = segments
+        .iter()
+        .flat_map(|s| s.text.split_whitespace())
+        .collect();
     let mut next = 0;
     words
         .into_iter()
         .filter(|w| !w.word.trim().is_empty() && w.end >= w.start)
         .map(|w| {
             let key = norm(&w.word);
-            let found = (next..(next + 4).min(tokens.len())).find(|&k| !key.is_empty() && norm(tokens[k]) == key);
+            let found = (next..(next + 4).min(tokens.len()))
+                .find(|&k| !key.is_empty() && norm(tokens[k]) == key);
             let text = match found {
                 Some(k) => {
                     next = k + 1;
@@ -218,7 +298,12 @@ fn punctuate(words: Vec<Word>, segments: &[Segment]) -> Vec<TranscriptWord> {
                 }
                 None => w.word.trim().to_string(),
             };
-            TranscriptWord { text, start: w.start, end: w.end, confidence: None }
+            TranscriptWord {
+                text,
+                start: w.start,
+                end: w.end,
+                confidence: None,
+            }
         })
         .collect()
 }
@@ -260,10 +345,31 @@ mod tests {
 
     #[test]
     fn words_take_punctuation_from_segments() {
-        let w = |word: &str, start: f64| Word { word: word.into(), start, end: start + 0.2 };
-        let words = vec![w("It", 0.0), w("costs", 0.3), w("20", 0.6), w("dollars", 0.9), w("OK", 1.5), w("so", 1.8)];
-        let segments = vec![Segment { text: " It costs $20 dollars.".into() }, Segment { text: " OK, so".into() }];
-        let got: Vec<String> = punctuate(words, &segments).into_iter().map(|w| w.text).collect();
+        let w = |word: &str, start: f64| Word {
+            word: word.into(),
+            start,
+            end: start + 0.2,
+        };
+        let words = vec![
+            w("It", 0.0),
+            w("costs", 0.3),
+            w("20", 0.6),
+            w("dollars", 0.9),
+            w("OK", 1.5),
+            w("so", 1.8),
+        ];
+        let segments = vec![
+            Segment {
+                text: " It costs $20 dollars.".into(),
+            },
+            Segment {
+                text: " OK, so".into(),
+            },
+        ];
+        let got: Vec<String> = punctuate(words, &segments)
+            .into_iter()
+            .map(|w| w.text)
+            .collect();
         assert_eq!(got, ["It", "costs", "$20", "dollars.", "OK,", "so"]);
     }
 
@@ -280,7 +386,13 @@ mod tests {
     #[test]
     fn long_audio_splits_at_the_longest_late_pause() {
         let pauses = [(799.5, 800.0), (1100.0, 1101.0), (1900.0, 1901.0)];
-        assert_eq!(split(3000.0, &pauses), [(0.0, 1100.5), (1100.5, 1900.5), (1900.5, 3000.0)]);
-        assert_eq!(split(2500.0, &[]), [(0.0, 1200.0), (1200.0, 2400.0), (2400.0, 2500.0)]);
+        assert_eq!(
+            split(3000.0, &pauses),
+            [(0.0, 1100.5), (1100.5, 1900.5), (1900.5, 3000.0)]
+        );
+        assert_eq!(
+            split(2500.0, &[]),
+            [(0.0, 1200.0), (1200.0, 2400.0), (2400.0, 2500.0)]
+        );
     }
 }

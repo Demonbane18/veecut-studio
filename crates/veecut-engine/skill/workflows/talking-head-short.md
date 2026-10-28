@@ -18,6 +18,7 @@ Nothing, usually. Ask only if it helps:
 ```
 veecut edit inbox/my-take.mp4 --kind talking-head-short --json
 veecut edit --kind talking-head-short --hook "Stop paying for *editors*" --music my-sounds/music/bed.mp3 --json
+veecut edit inbox/my-take.mp4 --kind talking-head-short --broll inbox/desk.mp4 inbox/screenshot.png --json
 ```
 
 Without a file it edits the newest video in `inbox/`.
@@ -28,8 +29,9 @@ Without a file it edits the newest video in `inbox/`.
 - Cuts pauses and mistakes. The pace comes from the style: `tight` cuts pauses over 0.25 s, `natural` cuts pauses over 0.55 s, and each trimmed pause keeps a breath of 0.14 to 0.24 s. Stutters, false starts and high-confidence retakes are cut, keeping the last take. Medium and low-confidence ones stay in and appear in the review list.
 - Crops around the face.
 - Alternates punch-ins (1.15x) and the wide shot at cuts and phrase boundaries, so no shot runs past 2.8 s.
-- Puts hook text over the first 3 s when the style has `hook = true`: the `--hook` text, or the first sentence cut to at most 7 words with the strongest word in the accent color. A picked hook goes in the review list.
-- Adds captions in the style's mode and moves them off the face.
+- Puts hook text over the first 3 s when the style has `hook = true`: the `--hook` text, or the first sentence cut to at most 7 words with the strongest word in the accent color. It sits clear of the captions and the face. A picked hook goes in the review list.
+- Uses each `--broll` file once, full frame over the speaker, starting at a sentence after the first 3 s and spread evenly through the video. Each cutaway lasts at most 3 s and plays muted; stills get a slow push-in.
+- Adds captions in the style's mode and moves them off the face. Text and captions get a dark or light scrim when the footage behind them would make them hard to read.
 - Adds a music bed from `--music`, or the first file in `my-sounds/music/` when the style sound is `sfx_music`. It sits 11 dB under the voice, ducks under speech and fades in and out over 1.5 s.
 - Adds sound effects from `my-sounds/sfx/` when text lands, unless the style is `voice_only`.
 - Renders `outbox/<slug>-v1.mp4` and checks it.
@@ -103,7 +105,8 @@ Checks before you show the draft:
 | "Too much zooming" | `patch` the clips with `{"zooms":[]}`, or keep one zoom per key line |
 | "Zoom in here" | `{"op":"add_zoom","at":12.0,"duration":1.5,"scale":1.15}` |
 | "You cut my word" | `trim` the clip before the cut outward by about 0.1 s |
-| "Keep the first take" | Put it back with `add_clip` from the source time, and `cut_range` the later take |
+| "Keep the first take" | Put it back with `add_clip` from the source time, then `cut_range` the later take |
+| "Add B-roll here" | `veecut add FILE`, then `{"op":"add_clip","asset":"ID","track":"broll","start":12.0,"duration":2.0}` |
 | "Music too loud" | `patch` each music item, for example `{"volume":0.18}` |
 | "Horizontal version too" | `veecut render --aspect 16:9` |
 

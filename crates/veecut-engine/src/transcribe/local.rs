@@ -17,10 +17,26 @@ struct Model {
 
 const DEFAULT_MODEL: &str = "large-v3-turbo";
 const MODELS: [Model; 4] = [
-    Model { name: "large-v3-turbo", file: "ggml-large-v3-turbo-q5_0.bin", megabytes: 574 },
-    Model { name: "base", file: "ggml-base.bin", megabytes: 148 },
-    Model { name: "small", file: "ggml-small.bin", megabytes: 488 },
-    Model { name: "medium", file: "ggml-medium.bin", megabytes: 1533 },
+    Model {
+        name: "large-v3-turbo",
+        file: "ggml-large-v3-turbo-q5_0.bin",
+        megabytes: 574,
+    },
+    Model {
+        name: "base",
+        file: "ggml-base.bin",
+        megabytes: 148,
+    },
+    Model {
+        name: "small",
+        file: "ggml-small.bin",
+        megabytes: 488,
+    },
+    Model {
+        name: "medium",
+        file: "ggml-medium.bin",
+        megabytes: 1533,
+    },
 ];
 
 fn model(name: &str) -> Result<&'static Model> {
@@ -46,18 +62,35 @@ pub(super) fn status() -> String {
     if path.is_file() {
         format!("local: ready ({} at {})", m.name, path.display())
     } else {
-        format!("local: ready; the {} model (about {} MB) downloads to {} on first use", m.name, m.megabytes, path.display())
+        format!(
+            "local: ready; the {} model (about {} MB) downloads to {} on first use",
+            m.name,
+            m.megabytes,
+            path.display()
+        )
     }
 }
 
 #[cfg(not(feature = "whisper"))]
-pub(super) fn transcribe(_: &Path, model: Option<&str>, _: Option<&str>, _: &mut dyn FnMut(&str)) -> Result<Transcript> {
+pub(super) fn transcribe(
+    _: &Path,
+    model: Option<&str>,
+    _: Option<&str>,
+    _: &mut dyn FnMut(&str),
+) -> Result<Transcript> {
     self::model(model.unwrap_or(DEFAULT_MODEL))?;
-    bail!("this VeeCut was built without whisper.cpp; set GROQ_API_KEY to use Groq, or rebuild with the `whisper` feature")
+    bail!(
+        "this VeeCut was built without whisper.cpp; set GROQ_API_KEY to use Groq, or rebuild with the `whisper` feature"
+    )
 }
 
 #[cfg(feature = "whisper")]
-pub(super) fn transcribe(media: &Path, model: Option<&str>, language: Option<&str>, progress: &mut dyn FnMut(&str)) -> Result<Transcript> {
+pub(super) fn transcribe(
+    media: &Path,
+    model: Option<&str>,
+    language: Option<&str>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Transcript> {
     let m = self::model(model.unwrap_or(DEFAULT_MODEL))?;
     let path = model_path(m);
     if !path.is_file() {
@@ -84,17 +117,31 @@ fn download(m: &Model, path: &Path, progress: &mut dyn FnMut(&str)) -> Result<()
 
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}", m.file);
-    progress(&format!("Downloading the {} whisper model (about {} MB, first use only) to {}", m.name, m.megabytes, dir.display()));
-    let reply = ureq::get(&url).call().with_context(|| format!("downloading {url}; check your internet connection"))?;
+    let url = format!(
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
+        m.file
+    );
+    progress(&format!(
+        "Downloading the {} whisper model (about {} MB, first use only) to {}",
+        m.name,
+        m.megabytes,
+        dir.display()
+    ));
+    let reply = ureq::get(&url)
+        .call()
+        .with_context(|| format!("downloading {url}; check your internet connection"))?;
     let total = reply.body().content_length();
     let mut body = reply.into_body().into_reader();
     let part = path.with_extension("bin.part");
-    let mut file = std::io::BufWriter::new(std::fs::File::create(&part).with_context(|| format!("creating {}", part.display()))?);
+    let mut file = std::io::BufWriter::new(
+        std::fs::File::create(&part).with_context(|| format!("creating {}", part.display()))?,
+    );
     let mut buf = vec![0u8; 1 << 16];
     let (mut done, mut next_report) = (0u64, 0.1f64);
     loop {
-        let n = body.read(&mut buf).context("the model download was interrupted; run again to retry")?;
+        let n = body
+            .read(&mut buf)
+            .context("the model download was interrupted; run again to retry")?;
         if n == 0 {
             break;
         }
@@ -110,7 +157,10 @@ fn download(m: &Model, path: &Path, progress: &mut dyn FnMut(&str)) -> Result<()
     file.flush()?;
     drop(file);
     if let Some(t) = total {
-        ensure!(done == t, "the model download stopped early ({done} of {t} bytes); run again to retry");
+        ensure!(
+            done == t,
+            "the model download stopped early ({done} of {t} bytes); run again to retry"
+        );
     }
     std::fs::rename(&part, path).with_context(|| format!("saving {}", path.display()))?;
     Ok(())
@@ -123,7 +173,10 @@ mod whisper {
     use std::time::Duration;
 
     use anyhow::{Result, anyhow};
-    use whisper_rs::{DtwMode, DtwModelPreset, DtwParameters, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+    use whisper_rs::{
+        DtwMode, DtwModelPreset, DtwParameters, FullParams, SamplingStrategy, WhisperContext,
+        WhisperContextParameters,
+    };
 
     use crate::analyze;
     use crate::transcript::TranscriptWord;
@@ -158,12 +211,26 @@ mod whisper {
             _ => DtwModelPreset::LargeV3Turbo,
         };
         let mut params = WhisperContextParameters::default();
-        params.dtw_parameters(DtwParameters { mode: DtwMode::ModelPreset { model_preset: preset }, ..Default::default() });
-        let ctx = WhisperContext::new_with_params(model, params)
-            .map_err(|e| anyhow!("could not load {} ({e}); delete it to download it again", model.display()))?;
-        let mut state = ctx.create_state().map_err(|e| anyhow!("whisper.cpp could not start: {e}"))?;
+        params.dtw_parameters(DtwParameters {
+            mode: DtwMode::ModelPreset {
+                model_preset: preset,
+            },
+            ..Default::default()
+        });
+        let ctx = WhisperContext::new_with_params(model, params).map_err(|e| {
+            anyhow!(
+                "could not load {} ({e}); delete it to download it again",
+                model.display()
+            )
+        })?;
+        let mut state = ctx
+            .create_state()
+            .map_err(|e| anyhow!("whisper.cpp could not start: {e}"))?;
 
-        let mut full = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: -1.0 });
+        let mut full = FullParams::new(SamplingStrategy::BeamSearch {
+            beam_size: 5,
+            patience: -1.0,
+        });
         full.set_language(Some(language.unwrap_or("auto")));
         full.set_token_timestamps(true);
         full.set_print_progress(false);
@@ -171,12 +238,17 @@ mod whisper {
         full.set_print_special(false);
         full.set_print_timestamps(false);
         full.set_suppress_nst(true);
-        full.set_n_threads(std::thread::available_parallelism().map_or(4, |n| n.get().min(8)) as i32);
+        full.set_n_threads(
+            std::thread::available_parallelism().map_or(4, |n| n.get().min(8)) as i32,
+        );
         let (tx, rx) = mpsc::channel::<i32>();
         full.set_progress_callback_safe(move |p: i32| {
             let _ = tx.send(p);
         });
-        progress(&format!("Transcribing {:.0} s of audio with whisper.cpp ({name})", pcm.len() as f64 / SAMPLE_RATE as f64));
+        progress(&format!(
+            "Transcribing {:.0} s of audio with whisper.cpp ({name})",
+            pcm.len() as f64 / SAMPLE_RATE as f64
+        ));
         let result = std::thread::scope(|s| {
             let job = s.spawn(|| state.full(full, pcm));
             let mut last = -1;
@@ -197,11 +269,15 @@ mod whisper {
         for segment in state.as_iter() {
             let mut first = true;
             for k in 0..segment.n_tokens() {
-                let Some(token) = segment.get_token(k) else { continue };
+                let Some(token) = segment.get_token(k) else {
+                    continue;
+                };
                 if token.token_id() >= eot {
                     continue; // timestamps and other special tokens
                 }
-                let Ok(bytes) = token.to_bytes() else { continue };
+                let Ok(bytes) = token.to_bytes() else {
+                    continue;
+                };
                 let data = token.token_data();
                 let at = if data.t_dtw >= 0 { data.t_dtw } else { data.t0 } as f64 / 100.0;
                 match pieces.last_mut() {
@@ -210,12 +286,18 @@ mod whisper {
                         p.probability += token.token_probability();
                         p.tokens += 1;
                     }
-                    _ => pieces.push(Piece { bytes: bytes.to_vec(), at, probability: token.token_probability(), tokens: 1 }),
+                    _ => pieces.push(Piece {
+                        bytes: bytes.to_vec(),
+                        at,
+                        probability: token.token_probability(),
+                        tokens: 1,
+                    }),
                 }
                 first = false;
             }
         }
-        let detected = whisper_rs::get_lang_str(state.full_lang_id_from_state()).map(str::to_string);
+        let detected =
+            whisper_rs::get_lang_str(state.full_lang_id_from_state()).map(str::to_string);
         Ok((settle(pieces, pcm), detected))
     }
 
@@ -233,7 +315,12 @@ mod whisper {
         const PER_LETTER: f64 = 0.05;
         const WORD_BOUNDS: (f64, f64) = (0.05, 0.3);
         let audio_end = pcm.len() as f64 / SAMPLE_RATE as f64;
-        let pauses = analyze::silences(pcm, SAMPLE_RATE, analyze::quiet_threshold(pcm, SAMPLE_RATE), 0.1);
+        let pauses = analyze::silences(
+            pcm,
+            SAMPLE_RATE,
+            analyze::quiet_threshold(pcm, SAMPLE_RATE),
+            0.1,
+        );
         let mut sound = Vec::new();
         let mut at = 0.0;
         for &(a, b) in &pauses {
@@ -252,8 +339,17 @@ mod whisper {
                 continue;
             }
             // Distance to each stretch of sound; time after a stretch counts half, since DTW runs late.
-            let distance = |&(a, b): &(f64, f64)| if p.at < a { a - p.at } else { (p.at - b).max(0.0) * 0.5 };
-            let nearest = sound.iter().enumerate().min_by(|x, y| distance(x.1).total_cmp(&distance(y.1)));
+            let distance = |&(a, b): &(f64, f64)| {
+                if p.at < a {
+                    a - p.at
+                } else {
+                    (p.at - b).max(0.0) * 0.5
+                }
+            };
+            let nearest = sound
+                .iter()
+                .enumerate()
+                .min_by(|x, y| distance(x.1).total_cmp(&distance(y.1)));
             let Some((k, s)) = nearest else { continue };
             if distance(s) > REACH {
                 continue;
@@ -268,8 +364,16 @@ mod whisper {
         let mut words = Vec::new();
         for (k, group) in groups {
             let (a, b) = sound[k];
-            let letters = |p: &Piece| String::from_utf8_lossy(&p.bytes).chars().filter(|c| c.is_alphanumeric()).count();
-            let need: Vec<f64> = group.iter().map(|p| (letters(p) as f64 * PER_LETTER).clamp(WORD_BOUNDS.0, WORD_BOUNDS.1)).collect();
+            let letters = |p: &Piece| {
+                String::from_utf8_lossy(&p.bytes)
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .count()
+            };
+            let need: Vec<f64> = group
+                .iter()
+                .map(|p| (letters(p) as f64 * PER_LETTER).clamp(WORD_BOUNDS.0, WORD_BOUNDS.1))
+                .collect();
             let scale = ((b - a) / need.iter().sum::<f64>()).min(1.0);
             let mut starts = vec![a];
             for (j, p) in group.iter().enumerate().skip(1) {
@@ -301,13 +405,35 @@ mod whisper {
                     *s = 0.3;
                 }
             }
-            let piece = |text: &str, at: f64| Piece { bytes: format!(" {text}").into_bytes(), at, probability: 0.9, tokens: 1 };
-            let pieces = vec![piece("Hello", 0.2), piece("there.", 0.55), piece("big", 1.15), piece("world.", 1.45), piece("Thanks.", 3.0)];
-            let got: Vec<(String, f64, f64)> = settle(pieces, &pcm).into_iter().map(|w| (w.text, w.start, w.end)).collect();
-            let want = [("Hello", 0.0, 0.25), ("there.", 0.25, 0.5), ("big", 1.0, 1.35), ("world.", 1.35, 1.6)];
+            let piece = |text: &str, at: f64| Piece {
+                bytes: format!(" {text}").into_bytes(),
+                at,
+                probability: 0.9,
+                tokens: 1,
+            };
+            let pieces = vec![
+                piece("Hello", 0.2),
+                piece("there.", 0.55),
+                piece("big", 1.15),
+                piece("world.", 1.45),
+                piece("Thanks.", 3.0),
+            ];
+            let got: Vec<(String, f64, f64)> = settle(pieces, &pcm)
+                .into_iter()
+                .map(|w| (w.text, w.start, w.end))
+                .collect();
+            let want = [
+                ("Hello", 0.0, 0.25),
+                ("there.", 0.25, 0.5),
+                ("big", 1.0, 1.35),
+                ("world.", 1.35, 1.6),
+            ];
             assert_eq!(got.len(), want.len(), "{got:?}");
             for (g, w) in got.iter().zip(want) {
-                assert!(g.0 == w.0 && (g.1 - w.1).abs() < 1e-6 && (g.2 - w.2).abs() < 1e-6, "{got:?}");
+                assert!(
+                    g.0 == w.0 && (g.1 - w.1).abs() < 1e-6 && (g.2 - w.2).abs() < 1e-6,
+                    "{got:?}"
+                );
             }
         }
     }

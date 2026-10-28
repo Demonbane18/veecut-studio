@@ -38,16 +38,40 @@ pub struct TranscribeOptions {
 
 /// Transcribes the speech in `media` with word times in source seconds.
 /// Auto provider: Groq when GROQ_API_KEY is set, else local whisper.cpp (model downloaded to ~/.veecut/models on first use).
-pub fn transcribe(media: &Path, asset_id: &str, opts: &TranscribeOptions, progress: &mut dyn FnMut(&str)) -> Result<Transcript> {
+pub fn transcribe(
+    media: &Path,
+    asset_id: &str,
+    opts: &TranscribeOptions,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Transcript> {
     let info = media::probe(media)?;
     if !info.has_audio {
         bail!("{} has no audio to transcribe", media.display());
     }
-    let language = opts.language.as_deref().map(str::trim).filter(|l| !l.is_empty() && !l.eq_ignore_ascii_case("auto"));
-    let model = opts.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+    let language = opts
+        .language
+        .as_deref()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.eq_ignore_ascii_case("auto"));
+    let model = opts
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
     let mut transcript = match opts.provider.unwrap_or_else(auto_provider) {
-        Provider::Groq => groq::transcribe(media, info.duration, model.filter(|m| m.starts_with("whisper-")), language, progress)?,
-        Provider::Local => local::transcribe(media, model.map(|m| m.trim_start_matches("whisper-")), language, progress)?,
+        Provider::Groq => groq::transcribe(
+            media,
+            info.duration,
+            model.filter(|m| m.starts_with("whisper-")),
+            language,
+            progress,
+        )?,
+        Provider::Local => local::transcribe(
+            media,
+            model.map(|m| m.trim_start_matches("whisper-")),
+            language,
+            progress,
+        )?,
     };
     transcript.asset = asset_id.to_string();
     transcript.duration = transcript.duration.max(info.duration);
@@ -58,7 +82,11 @@ pub fn transcribe(media: &Path, asset_id: &str, opts: &TranscribeOptions, progre
 }
 
 fn auto_provider() -> Provider {
-    if groq::api_key().is_some() { Provider::Groq } else { Provider::Local }
+    if groq::api_key().is_some() {
+        Provider::Groq
+    } else {
+        Provider::Local
+    }
 }
 
 /// One line per provider: ready, or what is missing.
@@ -70,5 +98,8 @@ pub fn status() -> Vec<String> {
         Some(_) => format!("groq: ready (GROQ_API_KEY is set; uploads audio to Groq){}", ffmpeg.as_deref().unwrap_or("")),
         None => "groq: GROQ_API_KEY is not set; get a free key at https://console.groq.com/keys and put GROQ_API_KEY=... in the workspace .env".to_string(),
     };
-    vec![groq + mark(Provider::Groq), local::status() + ffmpeg.as_deref().unwrap_or("") + mark(Provider::Local)]
+    vec![
+        groq + mark(Provider::Groq),
+        local::status() + ffmpeg.as_deref().unwrap_or("") + mark(Provider::Local),
+    ]
 }

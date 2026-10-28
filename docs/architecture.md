@@ -232,6 +232,8 @@ veecut edit [FILE...] [--kind K] [--aspect 9:16|16:9|4:5|1:1] [--broll FILE...] 
                                       files, or the newest inbox video; prints projects, drafts,
                                       what it did and what needs review
 veecut status                         kind, length, tracks and items, drafts, open notes
+veecut add FILE... [--role source|broll|music|sfx|voice|image|logo]
+                                      bring files into the project as assets; prints ids for add_clip
 veecut transcript [--srt|--vtt|--raw]   sentences with timeline times; captions as SRT/VTT; raw words
 veecut ops JSON|--file F|-            apply Editor API ops atomically (one op, an array, or JSON lines)
 veecut schema                         JSON schema of the ops
@@ -252,7 +254,7 @@ veecut studio                         open the desktop editor
 veecut fonts                          list caption and text fonts
 ```
 
-MCP tools: `status`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `note`,
+MCP tools: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `note`,
 `undo` (with `redo: true` to redo), `skills_search`, `skills_install`. Each takes the same
 arguments as the matching command; `frame` and `frames` also return the PNG as an image.
 

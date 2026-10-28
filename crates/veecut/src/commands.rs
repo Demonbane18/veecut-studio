@@ -13,7 +13,10 @@ use veecut_engine::agent::{self, AgentKind};
 use veecut_engine::config::{self, Config};
 use veecut_engine::graphics::Graphics;
 use veecut_engine::ops::{self, Op};
-use veecut_engine::project::{Canvas, CaptionMode, ItemBody, PROJECT_FILE, Project, TrackKind, VideoKind};
+use veecut_engine::project::{
+    AssetKind, AssetRole, Canvas, CaptionMode, ItemBody, PROJECT_FILE, Project, TrackKind,
+    VideoKind,
+};
 use veecut_engine::recipes::{self, EditRequest};
 use veecut_engine::render::{self, Quality, RenderOptions};
 use veecut_engine::skills;
@@ -31,7 +34,11 @@ pub struct Out {
 
 impl Out {
     fn new(text: impl Into<String>, json: Value) -> Self {
-        Out { text: text.into(), json, png: None }
+        Out {
+            text: text.into(),
+            json,
+            png: None,
+        }
     }
     pub fn quiet() -> Self {
         Out::new("", Value::Null)
@@ -82,6 +89,20 @@ pub struct EditArgs {
     /// Build the project but do not render a draft.
     #[arg(long)]
     pub no_render: bool,
+}
+
+#[derive(Args, Deserialize, JsonSchema, Default)]
+#[serde(default)]
+pub struct AddArgs {
+    /// Files to bring into the project (paths, or names of files in inbox/).
+    pub files: Vec<PathBuf>,
+    /// What they are for: source, broll, music, sfx, voice, image or logo. Default: broll for
+    /// video, image for pictures, music for audio.
+    #[arg(long)]
+    pub role: Option<String>,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub project: ProjectArg,
 }
 
 #[derive(Args, Deserialize, JsonSchema, Default)]
@@ -275,16 +296,23 @@ pub struct AgentArgs {
 
 fn kind_of(s: &str) -> Result<VideoKind> {
     VideoKind::from_slug(s).ok_or_else(|| {
-        anyhow!("unknown kind {s:?}; use one of: {}", VideoKind::ALL.map(|k| k.slug()).join(", "))
+        anyhow!(
+            "unknown kind {s:?}; use one of: {}",
+            VideoKind::ALL.map(|k| k.slug()).join(", ")
+        )
     })
 }
 
 fn aspect_of(s: &str) -> Result<Canvas> {
-    Canvas::from_aspect(s).ok_or_else(|| anyhow!("unknown aspect {s:?}; use 9:16, 16:9, 4:5 or 1:1"))
+    Canvas::from_aspect(s)
+        .ok_or_else(|| anyhow!("unknown aspect {s:?}; use 9:16, 16:9, 4:5 or 1:1"))
 }
 
 fn rel(ws: &Workspace, path: &Path) -> String {
-    path.strip_prefix(&ws.root).unwrap_or(path).display().to_string()
+    path.strip_prefix(&ws.root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 fn time(t: f64) -> String {
@@ -321,7 +349,9 @@ impl Ctx {
                 } else if self.ws.projects().join(sel).join(PROJECT_FILE).is_file() {
                     self.ws.projects().join(sel)
                 } else {
-                    bail!("no project {sel:?}; `veecut status --json` and the projects/ folder list them");
+                    bail!(
+                        "no project {sel:?}; `veecut status --json` and the projects/ folder list them"
+                    );
                 }
             }
             None => self
@@ -338,7 +368,11 @@ impl Ctx {
 
     /// An input file: a path as given, or a name inside inbox/ or the workspace.
     fn input(&self, path: &Path) -> Result<PathBuf> {
-        for candidate in [path.to_path_buf(), self.ws.inbox().join(path), self.ws.root.join(path)] {
+        for candidate in [
+            path.to_path_buf(),
+            self.ws.inbox().join(path),
+            self.ws.root.join(path),
+        ] {
             if candidate.is_file() {
                 return Ok(std::path::absolute(candidate)?);
             }
@@ -354,12 +388,22 @@ impl Ctx {
             None => VideoKind::TalkingHeadShort,
         };
         let mut req = EditRequest::new(kind);
-        req.sources = args.files.iter().map(|f| self.input(f)).collect::<Result<_>>()?;
-        req.broll = args.broll.iter().map(|f| self.input(f)).collect::<Result<_>>()?;
+        req.sources = args
+            .files
+            .iter()
+            .map(|f| self.input(f))
+            .collect::<Result<_>>()?;
+        req.broll = args
+            .broll
+            .iter()
+            .map(|f| self.input(f))
+            .collect::<Result<_>>()?;
         req.music = args.music.as_deref().map(|f| self.input(f)).transpose()?;
         req.voice = args.voice.as_deref().map(|f| self.input(f)).transpose()?;
         req.copy = match args.copy {
             Some(c) if Path::new(&c).is_file() => Some(std::fs::read_to_string(&c)?),
+            // A shell passes "Line one\nLine two" with a literal backslash-n.
+            Some(c) if !c.contains('\n') => Some(c.replace("\\n", "\n")),
             other => other,
         };
         req.canvas = args.aspect.as_deref().map(aspect_of).transpose()?;
@@ -387,13 +431,68 @@ impl Ctx {
                 let _ = writeln!(text, "- {r}");
             }
         }
-        let _ = write!(text, "Next: watch the draft, then turn notes into `veecut ops`, and `veecut render` again.");
+        let _ = write!(
+            text,
+            "Next: watch the draft, then turn notes into `veecut ops`, and `veecut render` again."
+        );
         Ok(Out::new(text, serde_json::to_value(&report)?))
+    }
+
+    /// Brings files into a project as assets so ops can place them.
+    pub fn add(&self, args: AddArgs) -> Result<Out> {
+        if args.files.is_empty() {
+            bail!("name at least one file to add");
+        }
+        let role = args
+            .role
+            .as_deref()
+            .map(|r| {
+                serde_json::from_value::<AssetRole>(json!(r.trim().to_lowercase())).map_err(|_| {
+                    anyhow!(
+                        "unknown role {r:?}; use source, broll, music, sfx, voice, image or logo"
+                    )
+                })
+            })
+            .transpose()?;
+        let (dir, mut p) = self.project(&args.project)?;
+        let mut text = String::new();
+        let mut added = Vec::new();
+        for file in &args.files {
+            let path = self.input(file)?;
+            let info = media::probe(&path)?;
+            let role = role.unwrap_or(match info.kind {
+                AssetKind::Video => AssetRole::Broll,
+                AssetKind::Image => AssetRole::Image,
+                AssetKind::Audio => AssetRole::Music,
+            });
+            let id = self.ws.add_asset(&mut p, &dir, &path, role)?;
+            let _ = writeln!(
+                text,
+                "{id}: {} ({:?}, {:?}, {:.1} s)",
+                rel(&self.ws, &path),
+                info.kind,
+                role,
+                info.duration
+            );
+            added.push(json!({ "id": id, "path": rel(&self.ws, &path), "kind": info.kind, "role": role, "duration": info.duration }));
+        }
+        self.ws.save_project(&dir, &p)?;
+        if let Some(first) = added.first().and_then(|a| a["id"].as_str()) {
+            let _ = write!(
+                text,
+                "Place it with an op, for example {{\"op\":\"add_clip\",\"asset\":\"{first}\",\"start\":5.0,\"duration\":3.0}}"
+            );
+        }
+        Ok(Out::new(text, json!({ "added": added })))
     }
 
     pub fn status(&self, args: ProjectArg) -> Result<Out> {
         let (dir, p) = self.project(&args)?;
-        let slug = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let slug = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let mut text = format!(
             "{} ({}), {}x{} at {} fps, {:.1} s\n",
             p.name,
@@ -405,7 +504,21 @@ impl Ctx {
         );
         let mut tracks = Vec::new();
         for t in &p.tracks {
-            let _ = writeln!(text, "  {} [{}] {:?}: {} items{}", t.name, t.id, t.kind, t.items.len(), if t.hidden { " (hidden)" } else if t.muted { " (muted)" } else { "" });
+            let _ = writeln!(
+                text,
+                "  {} [{}] {:?}: {} items{}",
+                t.name,
+                t.id,
+                t.kind,
+                t.items.len(),
+                if t.hidden {
+                    " (hidden)"
+                } else if t.muted {
+                    " (muted)"
+                } else {
+                    ""
+                }
+            );
             let items: Vec<Value> = t
                 .items
                 .iter()
@@ -421,11 +534,31 @@ impl Ctx {
             tracks.push(json!({ "id": t.id, "kind": t.kind, "name": t.name, "muted": t.muted, "hidden": t.hidden, "items": items }));
         }
         for a in &p.assets {
-            let _ = writeln!(text, "  asset {}: {} ({:?}, {:?}, {:.1} s)", a.id, a.path.display(), a.kind, a.role, a.duration);
+            let _ = writeln!(
+                text,
+                "  asset {}: {} ({:?}, {:?}, {:.1} s)",
+                a.id,
+                a.path.display(),
+                a.kind,
+                a.role,
+                a.duration
+            );
         }
-        let _ = writeln!(text, "  look {:?}; captions {:?} at {:.2} of the height", p.look.preset, p.captions.mode, p.captions.position);
+        let _ = writeln!(
+            text,
+            "  look {:?}; captions {:?} at {:.2} of the height",
+            p.look.preset, p.captions.mode, p.captions.position
+        );
         let mut drafts: Vec<PathBuf> = std::fs::read_dir(self.ws.outbox())
-            .map(|rd| rd.flatten().map(|e| e.path()).filter(|f| f.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&format!("{slug}-")))).collect())
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|f| {
+                        f.file_name()
+                            .is_some_and(|n| n.to_string_lossy().starts_with(&format!("{slug}-")))
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         drafts.sort();
         for d in &drafts {
@@ -447,29 +580,50 @@ impl Ctx {
     pub fn transcript(&self, args: TranscriptArgs) -> Result<Out> {
         let (dir, p) = self.project(&args.project)?;
         if args.srt || args.vtt {
-            let text = if args.srt { captions::to_srt(&p) } else { captions::to_vtt(&p) };
+            let text = if args.srt {
+                captions::to_srt(&p)
+            } else {
+                captions::to_vtt(&p)
+            };
             return Ok(Out::new(text.clone(), json!({ "text": text })));
         }
-        let t = Transcript::load(&dir.join("transcript.json")).context("this project has no transcript; `veecut captions --rebuild` needs one too")?;
+        let t = Transcript::load(&dir.join("transcript.json"))
+            .context("this project has no transcript; `veecut captions --rebuild` needs one too")?;
         if args.raw {
-            return Ok(Out::new(serde_json::to_string_pretty(&t)?, serde_json::to_value(&t)?));
+            return Ok(Out::new(
+                serde_json::to_string_pretty(&t)?,
+                serde_json::to_value(&t)?,
+            ));
         }
         let mut text = String::from("timeline  source  sentence\n");
         let mut rows = Vec::new();
         for s in t.sentences() {
             let at = p.source_to_timeline(&t.asset, s.start);
-            let _ = writeln!(text, "{:>8}  {:>6}  {}", at.map(time).unwrap_or_else(|| "(cut)".into()), time(s.start), s.text);
+            let _ = writeln!(
+                text,
+                "{:>8}  {:>6}  {}",
+                at.map(time).unwrap_or_else(|| "(cut)".into()),
+                time(s.start),
+                s.text
+            );
             rows.push(json!({ "timeline": at, "source": s.start, "end": s.end, "text": s.text }));
         }
-        Ok(Out::new(text, json!({ "asset": t.asset, "language": t.language, "sentences": rows })))
+        Ok(Out::new(
+            text,
+            json!({ "asset": t.asset, "language": t.language, "sentences": rows }),
+        ))
     }
 
     pub fn ops(&self, args: OpsArgs) -> Result<Out> {
         let input = match (&args.file, args.ops.as_deref()) {
-            (Some(f), _) => std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?,
+            (Some(f), _) => {
+                std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?
+            }
             (None, Some("-")) => std::io::read_to_string(std::io::stdin())?,
             (None, Some(s)) => s.to_string(),
-            (None, None) => bail!("give the ops as JSON, with --file, or `-` for standard input; `veecut schema` shows them"),
+            (None, None) => bail!(
+                "give the ops as JSON, with --file, or `-` for standard input; `veecut schema` shows them"
+            ),
         };
         let list = ops::parse_ops(&input)?;
         let (dir, mut p) = self.project(&args.project)?;
@@ -480,19 +634,36 @@ impl Ctx {
             let _ = writeln!(text, "- {}", d.summary);
         }
         let _ = write!(text, "Saved. `veecut render` shows the change.");
-        Ok(Out::new(text, json!({ "applied": done, "duration": p.duration() })))
+        Ok(Out::new(
+            text,
+            json!({ "applied": done, "duration": p.duration() }),
+        ))
     }
 
     pub fn undo(&self, args: ProjectArg, redo: bool) -> Result<Out> {
         let (dir, _) = self.project(&args)?;
-        let p = if redo { self.ws.redo(&dir)? } else { self.ws.undo(&dir)? };
+        let p = if redo {
+            self.ws.redo(&dir)?
+        } else {
+            self.ws.undo(&dir)?
+        };
         let word = if redo { "Redid" } else { "Undid" };
-        Ok(Out::new(format!("{word} the last change; the project is {:.1} s long.", p.duration()), json!({ "duration": p.duration() })))
+        Ok(Out::new(
+            format!(
+                "{word} the last change; the project is {:.1} s long.",
+                p.duration()
+            ),
+            json!({ "duration": p.duration() }),
+        ))
     }
 
     pub fn render(&self, args: RenderArgs, progress: &mut dyn FnMut(&str)) -> Result<Out> {
         let (dir, mut p) = self.project(&args.project)?;
-        let slug = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let slug = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let mut suffix = String::new();
         if let Some(a) = &args.aspect {
             let c = aspect_of(a)?;
@@ -500,18 +671,29 @@ impl Ctx {
             p.canvas.width = c.width;
             p.canvas.height = c.height;
         }
-        let quality = if args.final_ { Quality::Final } else { Quality::Draft };
+        let quality = if args.final_ {
+            Quality::Final
+        } else {
+            Quality::Draft
+        };
         let mut opts = RenderOptions::for_canvas(&p.canvas, quality);
         if let Some(r) = &args.range {
             let (a, b) = r.split_once('-').context("--range looks like 0-5")?;
-            opts.range = Some((a.trim().parse().context("--range start")?, b.trim().parse().context("--range end")?));
+            opts.range = Some((
+                a.trim().parse().context("--range start")?,
+                b.trim().parse().context("--range end")?,
+            ));
         }
         let out = match args.out {
             Some(o) => o,
             None if args.final_ => self.ws.outbox().join(format!("{slug}-final{suffix}.mp4")),
             None => {
                 let next = self.ws.next_draft_path(&slug);
-                let stem = next.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                let stem = next
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 next.with_file_name(format!("{stem}{suffix}.mp4"))
             }
         };
@@ -524,25 +706,46 @@ impl Ctx {
             true
         })?;
         let check = qa::check(&out)?;
-        let mut text = format!("Rendered {} ({:.1} s, {}x{}) in {:.1} s.", rel(&self.ws, &out), report.duration, report.width, report.height, report.seconds_taken);
+        let mut text = format!(
+            "Rendered {} ({:.1} s, {}x{}) in {:.1} s.",
+            rel(&self.ws, &out),
+            report.duration,
+            report.width,
+            report.height,
+            report.seconds_taken
+        );
         for problem in &check.problems {
             let _ = write!(text, "\nCheck: {problem}");
         }
-        Ok(Out::new(text, json!({ "path": rel(&self.ws, &out), "duration": report.duration, "width": report.width, "height": report.height, "qa": check })))
+        Ok(Out::new(
+            text,
+            json!({ "path": rel(&self.ws, &out), "duration": report.duration, "width": report.width, "height": report.height, "qa": check }),
+        ))
     }
 
     pub fn frame(&self, args: FrameArgs) -> Result<Out> {
         let (dir, p) = self.project(&args.project)?;
         let width = args.width.unwrap_or(540).clamp(64, 3840) & !1;
-        let height = ((width as f64 * p.canvas.height as f64 / p.canvas.width as f64).round() as u32).max(2) & !1;
+        let height =
+            ((width as f64 * p.canvas.height as f64 / p.canvas.width as f64).round() as u32).max(2)
+                & !1;
         let pixmap = render::render_frame(&p, &dir, args.at, width, height)?;
         let png = pixmap.encode_png().context("encoding the frame")?;
-        let out = args.out.unwrap_or_else(|| dir.join(".cache").join(format!("frame-{:.2}.png", args.at)));
+        let out = args
+            .out
+            .unwrap_or_else(|| dir.join(".cache").join(format!("frame-{:.2}.png", args.at)));
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&out, &png)?;
-        let mut o = Out::new(format!("Frame at {} saved to {}", time(args.at), rel(&self.ws, &out)), json!({ "path": rel(&self.ws, &out), "at": args.at }));
+        let mut o = Out::new(
+            format!(
+                "Frame at {} saved to {}",
+                time(args.at),
+                rel(&self.ws, &out)
+            ),
+            json!({ "path": rel(&self.ws, &out), "at": args.at }),
+        );
         o.png = Some(png);
         Ok(o)
     }
@@ -554,28 +757,53 @@ impl Ctx {
             bail!("the project is empty");
         }
         let every = args.every.unwrap_or((length / 12.0).max(0.5)).max(0.1);
-        let times: Vec<f64> = (0..36).map(|i| every / 2.0 + i as f64 * every).take_while(|t| *t < length).collect();
+        let times: Vec<f64> = (0..36)
+            .map(|i| every / 2.0 + i as f64 * every)
+            .take_while(|t| *t < length)
+            .collect();
         let vertical = p.canvas.height > p.canvas.width;
-        let (w, cols) = if vertical { (216u32, 6usize) } else { (320u32, 4usize) };
+        let (w, cols) = if vertical {
+            (216u32, 6usize)
+        } else {
+            (320u32, 4usize)
+        };
         let h = ((w as f64 * p.canvas.height as f64 / p.canvas.width as f64).round() as u32) & !1;
         let rows = times.len().div_ceil(cols);
         let gap = 4u32;
-        let mut sheet = image::RgbaImage::from_pixel(cols as u32 * (w + gap) + gap, rows as u32 * (h + gap) + gap, image::Rgba([24, 24, 24, 255]));
+        let mut sheet = image::RgbaImage::from_pixel(
+            cols as u32 * (w + gap) + gap,
+            rows as u32 * (h + gap) + gap,
+            image::Rgba([24, 24, 24, 255]),
+        );
         for (n, &t) in times.iter().enumerate() {
             let frame = render::render_frame(&p, &dir, t, w, h)?;
-            let tile = image::RgbaImage::from_raw(w, h, frame.data().to_vec()).context("frame size mismatch")?;
-            let (x, y) = ((n % cols) as u32 * (w + gap) + gap, (n / cols) as u32 * (h + gap) + gap);
+            let tile = image::RgbaImage::from_raw(w, h, frame.data().to_vec())
+                .context("frame size mismatch")?;
+            let (x, y) = (
+                (n % cols) as u32 * (w + gap) + gap,
+                (n / cols) as u32 * (h + gap) + gap,
+            );
             image::imageops::overlay(&mut sheet, &tile, x as i64, y as i64);
         }
-        let out = args.out.unwrap_or_else(|| dir.join(".cache").join("frames.png"));
+        let out = args
+            .out
+            .unwrap_or_else(|| dir.join(".cache").join("frames.png"));
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        sheet.save(&out).with_context(|| format!("writing {}", out.display()))?;
+        sheet
+            .save(&out)
+            .with_context(|| format!("writing {}", out.display()))?;
         let png = std::fs::read(&out)?;
         let legend: Vec<String> = times.iter().map(|t| time(*t)).collect();
         let mut o = Out::new(
-            format!("{} frames, {} per row, left to right: {}\nSaved to {}", times.len(), cols, legend.join(", "), rel(&self.ws, &out)),
+            format!(
+                "{} frames, {} per row, left to right: {}\nSaved to {}",
+                times.len(),
+                cols,
+                legend.join(", "),
+                rel(&self.ws, &out)
+            ),
             json!({ "path": rel(&self.ws, &out), "times": times, "columns": cols }),
         );
         o.png = Some(png);
@@ -589,10 +817,16 @@ impl Ctx {
             p.captions.mode = serde_json::from_value::<CaptionMode>(json!(m.replace('-', "_")))
                 .map_err(|_| anyhow!("unknown caption mode {m:?}; use word_pop, highlight, pills, subtitle or off"))?;
         }
-        let has_pages = p.tracks.iter().any(|t| t.kind == TrackKind::Captions && !t.items.is_empty());
+        let has_pages = p
+            .tracks
+            .iter()
+            .any(|t| t.kind == TrackKind::Captions && !t.items.is_empty());
         let mut text = format!("Captions: {:?}", p.captions.mode);
-        if args.rebuild || (!has_pages && before == CaptionMode::Off && p.captions.mode != CaptionMode::Off) {
-            let t = Transcript::load(&dir.join("transcript.json")).context("no transcript to build captions from")?;
+        if args.rebuild
+            || (!has_pages && before == CaptionMode::Off && p.captions.mode != CaptionMode::Off)
+        {
+            let t = Transcript::load(&dir.join("transcript.json"))
+                .context("no transcript to build captions from")?;
             let n = captions::apply(&mut p, &t)?;
             let _ = write!(text, ", rebuilt {n} pages");
         }
@@ -605,23 +839,47 @@ impl Ctx {
             bail!("the note is empty");
         }
         let (dir, mut p) = self.project(&args.project)?;
-        ops::apply(&mut p, &Op::AddMarker { at: args.at.unwrap_or(0.0), note: args.note.clone() })?;
+        ops::apply(
+            &mut p,
+            &Op::AddMarker {
+                at: args.at.unwrap_or(0.0),
+                note: args.note.clone(),
+            },
+        )?;
         self.ws.save_project(&dir, &p)?;
         let mut text = format!("Noted at {}: {}", time(args.at.unwrap_or(0.0)), args.note);
         if args.rule {
             style::add_rule(&self.ws.rules_path(), &args.note, &args.note)?;
             let _ = write!(text, "\nSaved as a rule: {}", args.note);
         }
-        Ok(Out::new(text, json!({ "note": args.note, "rule": args.rule })))
+        Ok(Out::new(
+            text,
+            json!({ "note": args.note, "rule": args.rule }),
+        ))
     }
 
     pub fn rules(&self, command: Option<RulesCommand>) -> Result<Out> {
         if let Some(RulesCommand::Add { rule, words }) = command {
-            style::add_rule(&self.ws.rules_path(), &rule, words.as_deref().unwrap_or(&rule))?;
-            return Ok(Out::new(format!("Saved as a rule: {rule}"), json!({ "added": rule })));
+            style::add_rule(
+                &self.ws.rules_path(),
+                &rule,
+                words.as_deref().unwrap_or(&rule),
+            )?;
+            return Ok(Out::new(
+                format!("Saved as a rule: {rule}"),
+                json!({ "added": rule }),
+            ));
         }
         let rules = style::rules(&self.ws.rules_path())?;
-        let text = if rules.is_empty() { "No rules yet.".to_string() } else { rules.iter().map(|r| format!("- {r}")).collect::<Vec<_>>().join("\n") };
+        let text = if rules.is_empty() {
+            "No rules yet.".to_string()
+        } else {
+            rules
+                .iter()
+                .map(|r| format!("- {r}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         Ok(Out::new(text, json!({ "rules": rules })))
     }
 
@@ -629,7 +887,8 @@ impl Ctx {
         let path = self.ws.style_path();
         if let Some(StyleCommand::Set { key, value }) = command {
             let text = std::fs::read_to_string(&path).unwrap_or_default();
-            let mut table: toml::Table = toml::from_str(&text).with_context(|| format!("{} is not valid TOML", path.display()))?;
+            let mut table: toml::Table = toml::from_str(&text)
+                .with_context(|| format!("{} is not valid TOML", path.display()))?;
             let parsed: toml::Value = toml::from_str::<toml::Table>(&format!("v = {value}"))
                 .ok()
                 .and_then(|mut t| t.remove("v"))
@@ -644,17 +903,26 @@ impl Ctx {
                     .with_context(|| format!("{part} is not a section"))?;
             }
             node.insert(parts[parts.len() - 1].to_string(), parsed);
-            let style: Style = toml::from_str(&toml::to_string(&table)?).with_context(|| format!("{key} cannot be {value}"))?;
+            let style: Style = toml::from_str(&toml::to_string(&table)?)
+                .with_context(|| format!("{key} cannot be {value}"))?;
             style.save(&path)?;
-            return Ok(Out::new(format!("{key} = {value}"), json!({ "key": key, "value": value })));
+            return Ok(Out::new(
+                format!("{key} = {value}"),
+                json!({ "key": key, "value": value }),
+            ));
         }
         let style = Style::load(&path)?;
-        Ok(Out::new(toml::to_string_pretty(&style)?, serde_json::to_value(&style)?))
+        Ok(Out::new(
+            toml::to_string_pretty(&style)?,
+            serde_json::to_value(&style)?,
+        ))
     }
 
     pub fn agent(&self, args: AgentArgs) -> Result<Out> {
         let kind = match &args.with {
-            Some(w) => AgentKind::from_name(w).ok_or_else(|| anyhow!("unknown agent {w:?}; use opencode, claude, codex or gemini"))?,
+            Some(w) => AgentKind::from_name(w).ok_or_else(|| {
+                anyhow!("unknown agent {w:?}; use opencode, claude, codex or gemini")
+            })?,
             None => Config::load()?.default_agent(),
         };
         let status = agent::run(&self.ws, kind, &args.prompt, &mut |line| println!("{line}"))?;
@@ -671,7 +939,10 @@ impl Ctx {
                 Some(_) => Some(self.project(&args)?.0.join(PROJECT_FILE)),
                 None => None,
             };
-            veecut_studio::run(veecut_studio::StudioOptions { workspace: self.ws.root.clone(), project })?;
+            veecut_studio::run(veecut_studio::StudioOptions {
+                workspace: self.ws.root.clone(),
+                project,
+            })?;
             Ok(Out::quiet())
         }
         #[cfg(not(feature = "studio"))]
@@ -699,38 +970,90 @@ pub fn doctor(workspace: Option<&Path>) -> Result<Out> {
     let mut lines = Vec::new();
     let mut checks = Vec::new();
     let mut check = |name: &str, ok: bool, detail: String| {
-        lines.push(format!("{} {name}: {detail}", if ok { "ok     " } else { "missing" }));
+        lines.push(format!(
+            "{} {name}: {detail}",
+            if ok { "ok     " } else { "missing" }
+        ));
         checks.push(json!({ "name": name, "ok": ok, "detail": detail }));
     };
     match media::ffmpeg() {
         Ok(path) => {
-            let version = media::run(std::process::Command::new(&path).arg("-version")).ok().and_then(|o| String::from_utf8_lossy(&o).lines().next().map(String::from)).unwrap_or_default();
+            let version = media::run(std::process::Command::new(&path).arg("-version"))
+                .ok()
+                .and_then(|o| String::from_utf8_lossy(&o).lines().next().map(String::from))
+                .unwrap_or_default();
             check("ffmpeg", true, version);
-            let encoders = media::run(std::process::Command::new(&path).args(["-hide_banner", "-encoders"])).map(|o| String::from_utf8_lossy(&o).to_string()).unwrap_or_default();
-            let h264 = ["libx264", "h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_mf"].into_iter().find(|e| encoders.contains(e));
-            check("H.264 encoder", h264.is_some(), h264.unwrap_or("none found; renders fall back to MPEG-4").to_string());
+            let encoders =
+                media::run(std::process::Command::new(&path).args(["-hide_banner", "-encoders"]))
+                    .map(|o| String::from_utf8_lossy(&o).to_string())
+                    .unwrap_or_default();
+            let h264 = [
+                "libx264",
+                "h264_videotoolbox",
+                "h264_nvenc",
+                "h264_qsv",
+                "h264_mf",
+            ]
+            .into_iter()
+            .find(|e| encoders.contains(e));
+            check(
+                "H.264 encoder",
+                h264.is_some(),
+                h264.unwrap_or("none found; renders fall back to MPEG-4")
+                    .to_string(),
+            );
         }
         Err(e) => check("ffmpeg", false, format!("{e:#}")),
     }
-    check("ffprobe", media::ffprobe().is_ok(), media::ffprobe().map(|p| p.display().to_string()).unwrap_or_else(|e| format!("{e:#}")));
-    let ws = workspace.map(Path::to_path_buf).unwrap_or(std::env::current_dir()?);
+    check(
+        "ffprobe",
+        media::ffprobe().is_ok(),
+        media::ffprobe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|e| format!("{e:#}")),
+    );
+    let ws = workspace
+        .map(Path::to_path_buf)
+        .unwrap_or(std::env::current_dir()?);
     match Workspace::open(&ws) {
         Ok(w) => {
             config::load_dotenv(&w.root);
             check("workspace", true, w.root.display().to_string());
         }
-        Err(_) => check("workspace", false, "not inside one; run `veecut init`".into()),
+        Err(_) => check(
+            "workspace",
+            false,
+            "not inside one; run `veecut init`".into(),
+        ),
     }
     for line in transcribe::status() {
-        check("transcription", !line.contains("missing") && !line.contains("not "), line);
+        check(
+            "transcription",
+            !line.contains("missing") && !line.contains("not "),
+            line,
+        );
     }
     for (kind, version) in agent::detect() {
-        let detail = version.clone().unwrap_or_else(|| format!("not installed ({})", kind.install_hint()));
+        let detail = version
+            .clone()
+            .unwrap_or_else(|| format!("not installed ({})", kind.install_hint()));
         check(kind.label(), version.is_some(), detail);
     }
     match skills::load_catalog() {
-        Ok(Some(c)) => check("skills catalog", true, format!("{} skills, synced {}", c.entries.len(), c.fetched_at.format("%Y-%m-%d %H:%M UTC"))),
-        Ok(None) => check("skills catalog", false, "not synced yet; run `veecut skills sync`".into()),
+        Ok(Some(c)) => check(
+            "skills catalog",
+            true,
+            format!(
+                "{} skills, synced {}",
+                c.entries.len(),
+                c.fetched_at.format("%Y-%m-%d %H:%M UTC")
+            ),
+        ),
+        Ok(None) => check(
+            "skills catalog",
+            false,
+            "not synced yet; run `veecut skills sync`".into(),
+        ),
         Err(e) => check("skills catalog", false, format!("{e:#}")),
     }
     Ok(Out::new(lines.join("\n"), json!({ "checks": checks })))
@@ -783,21 +1106,33 @@ fn entry_line(e: &skills::Entry, installed: bool) -> String {
 }
 
 /// Skills commands. Listing and searching work outside a workspace; installing needs one.
-pub fn skills(workspace: Option<&Path>, command: Option<SkillsCommand>, progress: &mut dyn FnMut(&str)) -> Result<Out> {
+pub fn skills(
+    workspace: Option<&Path>,
+    command: Option<SkillsCommand>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Out> {
     let ctx = Ctx::open(workspace).ok();
     let config = Config::load()?;
     if !matches!(command, Some(SkillsCommand::Sync)) {
         let auto = match &ctx {
-            Some(c) => skills::auto_sync_and_update(&c.ws, &config).map(|r| r.map(|(s, u)| (s, u.into_iter().filter(|u| u.updated).count()))),
+            Some(c) => skills::auto_sync_and_update(&c.ws, &config)
+                .map(|r| r.map(|(s, u)| (s, u.into_iter().filter(|u| u.updated).count()))),
             None => skills::auto_sync_if_stale(&config).map(|r| r.map(|s| (s, 0))),
         };
         match auto {
-            Some(Ok((s, updated))) => progress(&format!("Catalog refreshed: {} skills; {updated} installed skills updated", s.entries)),
+            Some(Ok((s, updated))) => progress(&format!(
+                "Catalog refreshed: {} skills; {updated} installed skills updated",
+                s.entries
+            )),
             Some(Err(e)) => progress(&format!("Could not refresh the catalog: {e:#}")),
             None => {}
         }
     }
-    let need_ws = || ctx.as_ref().map(|c| &c.ws).context("run this inside a workspace (`veecut init`)");
+    let need_ws = || {
+        ctx.as_ref()
+            .map(|c| &c.ws)
+            .context("run this inside a workspace (`veecut init`)")
+    };
     let installed_repos: Vec<String> = ctx
         .as_ref()
         .and_then(|c| skills::installed(&c.ws).ok())
@@ -807,74 +1142,171 @@ pub fn skills(workspace: Option<&Path>, command: Option<SkillsCommand>, progress
     let catalog = || -> Result<skills::Catalog> {
         skills::load_catalog()?.context("no catalog yet; run `veecut skills sync`")
     };
-    match command.unwrap_or(SkillsCommand::List { category: None, installed: false }) {
+    match command.unwrap_or(SkillsCommand::List {
+        category: None,
+        installed: false,
+    }) {
         SkillsCommand::Sync => {
             let r = skills::sync()?;
-            Ok(Out::new(format!("Catalog synced from awesome-claude-video-skills at {}: {} skills in {} categories.", &r.commit[..r.commit.len().min(8)], r.entries, r.categories), serde_json::to_value(&r)?))
+            Ok(Out::new(
+                format!(
+                    "Catalog synced from awesome-claude-video-skills at {}: {} skills in {} categories.",
+                    &r.commit[..r.commit.len().min(8)],
+                    r.entries,
+                    r.categories
+                ),
+                serde_json::to_value(&r)?,
+            ))
         }
-        SkillsCommand::List { category, installed: true } => {
+        SkillsCommand::List {
+            category,
+            installed: true,
+        } => {
             let _ = category;
             let lock = skills::installed(need_ws()?)?;
             let text = if lock.repos.is_empty() {
                 "No catalog skills installed in this workspace.".to_string()
             } else {
-                lock.repos.iter().map(|r| format!("{} at {} ({}): {}", r.repo, &r.commit[..r.commit.len().min(8)], r.license.as_deref().unwrap_or("license unknown"), r.skills.join(", "))).collect::<Vec<_>>().join("\n")
+                lock.repos
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{} at {} ({}): {}",
+                            r.repo,
+                            &r.commit[..r.commit.len().min(8)],
+                            r.license.as_deref().unwrap_or("license unknown"),
+                            r.skills.join(", ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
             };
             Ok(Out::new(text, serde_json::to_value(&lock)?))
         }
-        SkillsCommand::List { category, installed: false } => {
+        SkillsCommand::List {
+            category,
+            installed: false,
+        } => {
             let c = catalog()?;
             let found = skills::search(&c, "", category.as_deref());
-            let mut text = format!("{} skills (synced {}). Categories: {}\n", found.len(), c.fetched_at.format("%Y-%m-%d"), c.categories.iter().map(|k| k.id.as_str()).collect::<Vec<_>>().join(", "));
+            let mut text = format!(
+                "{} skills (synced {}). Categories: {}\n",
+                found.len(),
+                c.fetched_at.format("%Y-%m-%d"),
+                c.categories
+                    .iter()
+                    .map(|k| k.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             for e in found.iter().take(40) {
                 let _ = writeln!(text, "{}", entry_line(e, is_installed(&e.repo)));
             }
             if found.len() > 40 {
-                let _ = write!(text, "... {} more; narrow with --category or `veecut skills search`", found.len() - 40);
+                let _ = write!(
+                    text,
+                    "... {} more; narrow with --category or `veecut skills search`",
+                    found.len() - 40
+                );
             }
             Ok(Out::new(text, json!({ "entries": found })))
         }
         SkillsCommand::Search { query, category } => {
             let c = catalog()?;
             let found = skills::search(&c, &query, category.as_deref());
-            let text = if found.is_empty() { format!("Nothing matches {query:?}.") } else { found.iter().take(25).map(|e| entry_line(e, is_installed(&e.repo))).collect::<Vec<_>>().join("\n") };
+            let text = if found.is_empty() {
+                format!("Nothing matches {query:?}.")
+            } else {
+                found
+                    .iter()
+                    .take(25)
+                    .map(|e| entry_line(e, is_installed(&e.repo)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             Ok(Out::new(text, json!({ "entries": found })))
         }
         SkillsCommand::Show { repo } => {
             let c = catalog()?;
-            let e = c.entries.iter().find(|e| e.repo.eq_ignore_ascii_case(&repo)).with_context(|| format!("{repo} is not in the catalog"))?;
-            let text = format!("{}\n{}\ncategories: {}\n{}", entry_line(e, is_installed(&e.repo)), e.url, e.categories.join(", "), if e.is_safe() { "Install: veecut skills install ".to_string() + &e.repo } else { "Not graded SAFE: install only with --force after reading it".into() });
+            let e = c
+                .entries
+                .iter()
+                .find(|e| e.repo.eq_ignore_ascii_case(&repo))
+                .with_context(|| format!("{repo} is not in the catalog"))?;
+            let text = format!(
+                "{}\n{}\ncategories: {}\n{}",
+                entry_line(e, is_installed(&e.repo)),
+                e.url,
+                e.categories.join(", "),
+                if e.is_safe() {
+                    "Install: veecut skills install ".to_string() + &e.repo
+                } else {
+                    "Not graded SAFE: install only with --force after reading it".into()
+                }
+            );
             Ok(Out::new(text, serde_json::to_value(e)?))
         }
         SkillsCommand::Install { repo, force } => {
             let r = skills::install(need_ws()?, &repo, force)?;
-            Ok(Out::new(format!("Installed {} at {}: {}. Skills land in .agents/skills and .claude/skills; restart your agent to load them.", r.repo, &r.commit[..r.commit.len().min(8)], r.skills.join(", ")), serde_json::to_value(&r)?))
+            Ok(Out::new(
+                format!(
+                    "Installed {} at {}: {}. Skills land in .agents/skills and .claude/skills; restart your agent to load them.",
+                    r.repo,
+                    &r.commit[..r.commit.len().min(8)],
+                    r.skills.join(", ")
+                ),
+                serde_json::to_value(&r)?,
+            ))
         }
         SkillsCommand::Update { repo } => {
             let reports = skills::update(need_ws()?, repo.as_deref())?;
             let text = if reports.is_empty() {
                 "Nothing installed to update.".to_string()
             } else {
-                reports.iter().map(|u| match (&u.error, u.updated) {
-                    (Some(e), _) => format!("{}: {e}", u.repo),
-                    (None, true) => format!("{}: updated {} -> {}", u.repo, &u.from[..u.from.len().min(8)], &u.to[..u.to.len().min(8)]),
-                    (None, false) => format!("{}: up to date", u.repo),
-                }).collect::<Vec<_>>().join("\n")
+                reports
+                    .iter()
+                    .map(|u| match (&u.error, u.updated) {
+                        (Some(e), _) => format!("{}: {e}", u.repo),
+                        (None, true) => format!(
+                            "{}: updated {} -> {}",
+                            u.repo,
+                            &u.from[..u.from.len().min(8)],
+                            &u.to[..u.to.len().min(8)]
+                        ),
+                        (None, false) => format!("{}: up to date", u.repo),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
             };
             Ok(Out::new(text, serde_json::to_value(&reports)?))
         }
         SkillsCommand::Remove { repo } => {
             skills::remove(need_ws()?, &repo)?;
-            Ok(Out::new(format!("Removed {repo}."), json!({ "removed": repo })))
+            Ok(Out::new(
+                format!("Removed {repo}."),
+                json!({ "removed": repo }),
+            ))
         }
         SkillsCommand::Recommend { kind } => {
             let kind = match kind {
                 Some(k) => kind_of(&k)?,
-                None => ctx.as_ref().and_then(|c| c.project(&ProjectArg::default()).ok()).map(|(_, p)| p.kind).unwrap_or_default(),
+                None => ctx
+                    .as_ref()
+                    .and_then(|c| c.project(&ProjectArg::default()).ok())
+                    .map(|(_, p)| p.kind)
+                    .unwrap_or_default(),
             };
             let c = catalog()?;
             let found = skills::recommended(&c, kind, 8);
-            let text = format!("Best catalog skills for {}:\n{}", kind.label(), found.iter().map(|e| entry_line(e, is_installed(&e.repo))).collect::<Vec<_>>().join("\n"));
+            let text = format!(
+                "Best catalog skills for {}:\n{}",
+                kind.label(),
+                found
+                    .iter()
+                    .map(|e| entry_line(e, is_installed(&e.repo)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
             Ok(Out::new(text, json!({ "kind": kind, "entries": found })))
         }
     }

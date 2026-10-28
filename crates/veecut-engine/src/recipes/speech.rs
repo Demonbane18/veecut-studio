@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use super::{
-    Job, SAMPLE_RATE, add_captions, audio_track, hook, hook_from, keep_captions_off_face, lay_main, music_bed, pcm,
-    place_audio, text_sfx,
+    Job, SAMPLE_RATE, add_captions, audio_track, hook, hook_from, keep_captions_off_face, lay_main,
+    music_bed, pcm, place_audio, place_broll, text_sfx,
 };
 use crate::analyze::{self, CutReason};
 use crate::media;
@@ -20,12 +20,26 @@ use crate::transcript::Transcript;
 /// Herk Edit Kit's camera for talking heads: alternate wide and punched-in framing, switching
 /// only at cuts and phrase boundaries, so no shot runs past `max_shot` (its measured reels: shots
 /// 1.1-1.4 s on average, none over about 2.8 s). Long-form uses slower numbers.
-pub(super) fn punch_ins(project: &mut Project, transcript: &Transcript, min_shot: f64, target: f64, max_shot: f64, scale: f32) {
+pub(super) fn punch_ins(
+    project: &mut Project,
+    transcript: &Transcript,
+    min_shot: f64,
+    target: f64,
+    max_shot: f64,
+    scale: f32,
+) {
     let asset = transcript.asset.as_str();
-    let mut points: Vec<(f64, bool)> = project.main().items.iter().skip(1).map(|i| (i.start, true)).collect();
+    let mut points: Vec<(f64, bool)> = project
+        .main()
+        .items
+        .iter()
+        .skip(1)
+        .map(|i| (i.start, true))
+        .collect();
     for pair in transcript.words.windows(2) {
         let (a, b) = (&pair[0], &pair[1]);
-        let phrase_end = a.text.ends_with([',', '.', ';', ':', '?', '!']) || b.start - a.end >= 0.12;
+        let phrase_end =
+            a.text.ends_with([',', '.', ';', ':', '?', '!']) || b.start - a.end >= 0.12;
         if !phrase_end {
             continue;
         }
@@ -65,12 +79,20 @@ pub(super) fn punch_ins(project: &mut Project, transcript: &Transcript, min_shot
     }
     for item in &mut project.main_mut().items {
         let (s, e, dur) = (item.start, item.end(), item.duration);
-        let Some(clip) = item.clip_mut() else { continue };
+        let Some(clip) = item.clip_mut() else {
+            continue;
+        };
         for &(a, b) in &intervals {
             let (from, to) = (a.max(s), b.min(e));
             if to - from > 0.1 {
                 let at = from - s;
-                clip.zooms.push(Zoom { at, duration: (to - from).min(dur - at), scale, focus: None, ease: 0.0 });
+                clip.zooms.push(Zoom {
+                    at,
+                    duration: (to - from).min(dur - at),
+                    scale,
+                    focus: None,
+                    ease: 0.0,
+                });
             }
         }
     }
@@ -86,7 +108,10 @@ fn source_video(job: &Job) -> Result<PathBuf> {
 }
 
 fn stem(path: &Path) -> String {
-    path.file_stem().unwrap_or_default().to_string_lossy().replace(['_', '.'], " ")
+    path.file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .replace(['_', '.'], " ")
 }
 
 fn note_reviews(job: &mut Job, removed: &[analyze::Removal]) {
@@ -107,7 +132,9 @@ fn cut_summary(job: &mut Job, removed: &[analyze::Removal], before: f64, after: 
             _ => mistakes += 1,
         }
     }
-    job.report.summary.push(format!("Cut {pauses} pauses and {mistakes} mistakes: {before:.1}s to {after:.1}s"));
+    job.report.summary.push(format!(
+        "Cut {pauses} pauses and {mistakes} mistakes: {before:.1}s to {after:.1}s"
+    ));
 }
 
 /// Talking head (short or long) and screen tutorials.
@@ -159,7 +186,12 @@ pub(super) fn talking_head(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Res
         keep_captions_off_face(job, &mut p, face);
     }
     if kind == VideoKind::TalkingHeadShort && (job.req.hook.is_some() || job.style.hook()) {
-        let picked = job.req.hook.clone().map(|h| (h, 3.0)).or_else(|| hook_from(&transcript));
+        let picked = job
+            .req
+            .hook
+            .clone()
+            .map(|h| (h, 3.0))
+            .or_else(|| hook_from(&transcript));
         if let Some((text, src_end)) = picked {
             let until = p.source_to_timeline(&src, src_end).unwrap_or(3.0);
             hook(&mut p, &text, until, face)?;
@@ -168,6 +200,7 @@ pub(super) fn talking_head(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Res
             }
         }
     }
+    place_broll(job, &dir, &mut p, &transcript)?;
     add_captions(job, &mut p, &transcript)?;
     music_bed(job, &dir, &mut p, true)?;
     text_sfx(job, &dir, &mut p)?;
@@ -178,7 +211,11 @@ pub(super) fn talking_head(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Res
 /// a small speed label, instead of cutting what the viewer needs to see.
 fn lay_tutorial(p: &mut Project, src: &str, plan: &analyze::CutPlan) -> Result<()> {
     let mut segments: Vec<(f64, f64, f64)> = plan.keep.iter().map(|&(a, b)| (a, b, 1.0)).collect();
-    for r in plan.removed.iter().filter(|r| r.reason == CutReason::Silence && !r.review) {
+    for r in plan
+        .removed
+        .iter()
+        .filter(|r| r.reason == CutReason::Silence && !r.review)
+    {
         let len = r.end - r.start - 0.4;
         if len >= 2.0 {
             let speed = (len / 1.5).clamp(2.0, 8.0).round();
@@ -186,19 +223,31 @@ fn lay_tutorial(p: &mut Project, src: &str, plan: &analyze::CutPlan) -> Result<(
         }
     }
     segments.sort_by(|a, b| a.0.total_cmp(&b.0));
-    lay_main(p, src, &segments.iter().map(|&(a, b, _)| (a, b)).collect::<Vec<_>>())?;
+    lay_main(
+        p,
+        src,
+        &segments.iter().map(|&(a, b, _)| (a, b)).collect::<Vec<_>>(),
+    )?;
     let fast: Vec<(String, f64, f64)> = p
         .main()
         .items
         .iter()
         .filter_map(|item| {
             let clip = item.clip()?;
-            let seg = segments.iter().find(|s| (s.0 - clip.src_in).abs() < 1e-6 && s.2 > 1.0)?;
+            let seg = segments
+                .iter()
+                .find(|s| (s.0 - clip.src_in).abs() < 1e-6 && s.2 > 1.0)?;
             Some((item.id.clone(), seg.2, seg.1 - seg.0))
         })
         .collect();
     for (id, speed, src_len) in fast {
-        ops::apply(p, &Op::Patch { item: id.clone(), patch: serde_json::json!({ "speed": speed, "duration": src_len / speed, "muted": true }) })?;
+        ops::apply(
+            p,
+            &Op::Patch {
+                item: id.clone(),
+                patch: serde_json::json!({ "speed": speed, "duration": src_len / speed, "muted": true }),
+            },
+        )?;
         let item = p.item(&id).context("sped-up clip vanished")?;
         let (start, duration) = (item.start, item.duration);
         ops::apply(
@@ -226,7 +275,10 @@ fn envelope(samples: &[f32]) -> Vec<f32> {
     let hop = (SAMPLE_RATE / 100) as usize;
     samples
         .chunks(hop)
-        .map(|c| (10.0 * (c.iter().map(|s| s * s).sum::<f32>() / c.len() as f32 + 1e-9).log10()).max(-70.0))
+        .map(|c| {
+            (10.0 * (c.iter().map(|s| s * s).sum::<f32>() / c.len() as f32 + 1e-9).log10())
+                .max(-70.0)
+        })
         .collect()
 }
 
@@ -273,7 +325,8 @@ pub(super) fn podcast(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<(
     let speech_file = job.req.voice.clone().unwrap_or_else(|| sources[0].clone());
     let multi = cams.len() > 1 && cams.iter().all(|c| p.asset(c).is_some_and(|a| a.has_audio));
     let speech = if multi || job.req.voice.is_some() {
-        job.ws.add_asset(&mut p, &dir, &speech_file, AssetRole::Voice)?
+        job.ws
+            .add_asset(&mut p, &dir, &speech_file, AssetRole::Voice)?
     } else {
         cams[0].clone()
     };
@@ -290,7 +343,9 @@ pub(super) fn podcast(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<(
             lay_voice(&mut p, &speech, &plan.keep)?;
         }
         punch_ins(&mut p, &transcript, 5.0, 8.0, 12.0, 1.08);
-        job.report.summary.push("One camera: natural cuts with gentle punch-ins".into());
+        job.report
+            .summary
+            .push("One camera: natural cuts with gentle punch-ins".into());
     } else {
         progress("Syncing cameras");
         let mut offsets = Vec::new();
@@ -300,14 +355,34 @@ pub(super) fn podcast(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<(
             let off = sync_offset(&speech_pcm, &cam_pcm);
             // The camera's own microphone, aligned to the speech timeline.
             let shift = (off * SAMPLE_RATE as f64).round() as i64;
-            tracks.push((0..speech_pcm.len() as i64).map(|i| cam_pcm.get((i + shift).max(0) as usize).copied().unwrap_or(0.0)).collect::<Vec<f32>>());
+            tracks.push(
+                (0..speech_pcm.len() as i64)
+                    .map(|i| {
+                        cam_pcm
+                            .get((i + shift).max(0) as usize)
+                            .copied()
+                            .unwrap_or(0.0)
+                    })
+                    .collect::<Vec<f32>>(),
+            );
             offsets.push(off);
         }
         let turns = analyze::speaker_turns(&tracks, SAMPLE_RATE, 2.0);
-        let speaker_at = |t: f64| turns.iter().rev().find(|(s, _)| *s <= t).map(|&(_, k)| k).unwrap_or(0);
+        let speaker_at = |t: f64| {
+            turns
+                .iter()
+                .rev()
+                .find(|(s, _)| *s <= t)
+                .map(|&(_, k)| k)
+                .unwrap_or(0)
+        };
         let mut pieces = Vec::new();
         for &(a, b) in &plan.keep {
-            let mut cuts: Vec<f64> = turns.iter().map(|&(s, _)| s).filter(|&s| s > a && s < b).collect();
+            let mut cuts: Vec<f64> = turns
+                .iter()
+                .map(|&(s, _)| s)
+                .filter(|&s| s > a && s < b)
+                .collect();
             cuts.insert(0, a);
             cuts.push(b);
             for w in cuts.windows(2) {
@@ -335,7 +410,10 @@ pub(super) fn podcast(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<(
         job.report.summary.push(format!(
             "{} cameras synced by sound (offsets {:?} s); the edit cuts to whoever speaks",
             cams.len(),
-            offsets.iter().map(|o| (o * 100.0).round() / 100.0).collect::<Vec<_>>()
+            offsets
+                .iter()
+                .map(|o| (o * 100.0).round() / 100.0)
+                .collect::<Vec<_>>()
         ));
     }
     let face = analyze::face_focus(&sources[0], (0.0, first.duration), 9).unwrap_or(None);
@@ -344,6 +422,7 @@ pub(super) fn podcast(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<(
     }
     keep_captions_off_face(job, &mut p, face);
     cut_summary(job, &plan.removed, first.duration, p.duration());
+    place_broll(job, &dir, &mut p, &transcript)?;
     add_captions(job, &mut p, &transcript)?;
     music_bed(job, &dir, &mut p, true)?;
     text_sfx(job, &dir, &mut p)?;
@@ -361,7 +440,15 @@ fn set_focus(p: &mut Project, face: Option<Point>) {
 }
 
 fn mute_main(p: &mut Project) -> Result<()> {
-    let ops: Vec<Op> = p.main().items.iter().map(|i| Op::Patch { item: i.id.clone(), patch: serde_json::json!({ "muted": true }) }).collect();
+    let ops: Vec<Op> = p
+        .main()
+        .items
+        .iter()
+        .map(|i| Op::Patch {
+            item: i.id.clone(),
+            patch: serde_json::json!({ "muted": true }),
+        })
+        .collect();
     ops::apply_all(p, &ops)?;
     Ok(())
 }
@@ -388,16 +475,27 @@ pub(super) fn clips(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()>
     let cache = job.ws.projects().join(".sources").join(slug(&base));
     std::fs::create_dir_all(&cache)?;
     let mut scratch = Project::new(&base, VideoKind::Clips, canvas.clone());
-    let src_id = job.ws.add_asset(&mut scratch, &cache, &source, AssetRole::Source)?;
+    let src_id = job
+        .ws
+        .add_asset(&mut scratch, &cache, &source, AssetRole::Source)?;
     let transcript = job.transcript(&cache, &scratch, &src_id, progress)?;
     let samples = pcm(&scratch, &cache, &src_id)?;
     let plan = analyze::plan_cuts(&transcript, &samples, SAMPLE_RATE, &job.cut_settings());
     let moments = analyze::highlights(&transcript, 20.0, 60.0, job.req.clips.max(1));
     if moments.is_empty() {
-        bail!("found no self-contained moment between 20 and 60 seconds; is the recording long enough?");
+        bail!(
+            "found no self-contained moment between 20 and 60 seconds; is the recording long enough?"
+        );
     }
     for (n, m) in moments.iter().enumerate() {
-        progress(&format!("Clip {} of {}: {:.0}-{:.0}s, \"{}\"", n + 1, moments.len(), m.start, m.end, m.title));
+        progress(&format!(
+            "Clip {} of {}: {:.0}-{:.0}s, \"{}\"",
+            n + 1,
+            moments.len(),
+            m.start,
+            m.end,
+            m.title
+        ));
         let (dir, mut p) = job.start(&format!("{base} clip {}", n + 1), canvas.clone())?;
         let src = job.ws.add_asset(&mut p, &dir, &source, AssetRole::Source)?;
         let mut t = transcript.clone();
@@ -414,9 +512,22 @@ pub(super) fn clips(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()>
         set_focus(&mut p, face);
         keep_captions_off_face(job, &mut p, face);
         punch_ins(&mut p, &t, 1.2, 2.0, 2.8, 1.15);
-        let title: String = job.req.hook.clone().unwrap_or_else(|| m.title.split_whitespace().take(7).collect::<Vec<_>>().join(" "));
+        let title: String = job.req.hook.clone().unwrap_or_else(|| {
+            m.title
+                .split_whitespace()
+                .take(7)
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
         hook(&mut p, &title, 3.0, face)?;
-        job.report.summary.push(format!("Clip {}: {} ({:.0} s), score {:.2}: {}", n + 1, m.title, m.end - m.start, m.score, m.reason));
+        job.report.summary.push(format!(
+            "Clip {}: {} ({:.0} s), score {:.2}: {}",
+            n + 1,
+            m.title,
+            m.end - m.start,
+            m.score,
+            m.reason
+        ));
         add_captions(job, &mut p, &t)?;
         music_bed(job, &dir, &mut p, true)?;
         text_sfx(job, &dir, &mut p)?;
@@ -426,8 +537,15 @@ pub(super) fn clips(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()>
 }
 
 fn slug(name: &str) -> String {
-    let s: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    s.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-")
+    let s: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    s.split('-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// Faceless explainer: narration on a voice track, one visual per sentence (images drift with a
@@ -444,7 +562,8 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
         }
     }
     visuals.extend(job.req.broll.iter().cloned());
-    let voice = voice.context("an explainer needs a narration recording: pass it with --voice FILE")?;
+    let voice =
+        voice.context("an explainer needs a narration recording: pass it with --voice FILE")?;
     let name = job.req.name.clone().unwrap_or_else(|| stem(&voice));
     let canvas = job.canvas(30.0);
     let (dir, mut p) = job.start(&name, canvas)?;
@@ -458,7 +577,12 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
     let plan = analyze::plan_cuts(&transcript, &samples, SAMPLE_RATE, &job.cut_settings());
     note_reviews(job, &plan.removed);
     lay_voice(&mut p, &voice_id, &plan.keep)?;
-    let total = plan.keep.iter().map(|(a, b)| b - a).filter(|l| *l > 0.1).sum::<f64>();
+    let total = plan
+        .keep
+        .iter()
+        .map(|(a, b)| b - a)
+        .filter(|l| *l > 0.1)
+        .sum::<f64>();
     let to_timeline = |src_t: f64| -> Option<f64> {
         let mut t = 0.0;
         for &(a, b) in plan.keep.iter().filter(|(a, b)| b - a > 0.1) {
@@ -478,7 +602,11 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
             }
         }
     }
-    let shots: Vec<(f64, f64)> = starts.iter().enumerate().map(|(i, &s)| (s, starts.get(i + 1).copied().unwrap_or(total))).collect();
+    let shots: Vec<(f64, f64)> = starts
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| (s, starts.get(i + 1).copied().unwrap_or(total)))
+        .collect();
     if visual_ids.is_empty() {
         // The words are the picture: big centered captions.
         p.captions.position = 0.5;
@@ -505,31 +633,83 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
             } else {
                 0.0
             };
-            let len = if asset.kind == AssetKind::Video { len.min(asset.duration - src_in) } else { len };
-            ops.push(Op::AddClip { asset: asset.id.clone(), track: Some("main".into()), start: None, index: None, src_in, duration: Some(len), frame: None, volume: None, duck: None });
+            let len = if asset.kind == AssetKind::Video {
+                len.min(asset.duration - src_in)
+            } else {
+                len
+            };
+            ops.push(Op::AddClip {
+                asset: asset.id.clone(),
+                track: Some("main".into()),
+                start: None,
+                index: None,
+                src_in,
+                duration: Some(len),
+                frame: None,
+                volume: None,
+                duck: None,
+            });
         }
         ops::apply_all(&mut p, &ops)?;
         let ids: Vec<String> = p.main().items.iter().map(|i| i.id.clone()).collect();
         for (n, id) in ids.iter().enumerate() {
-            let is_image = p.item(id).and_then(|i| i.clip()).and_then(|c| p.asset(&c.asset)).is_some_and(|a| a.kind == AssetKind::Image);
+            let is_image = p
+                .item(id)
+                .and_then(|i| i.clip())
+                .and_then(|c| p.asset(&c.asset))
+                .is_some_and(|a| a.kind == AssetKind::Image);
             let patch = if is_image {
-                let (from, to) = if n % 2 == 0 { (Point::new(0.42, 0.5), Point::new(0.58, 0.5)) } else { (Point::new(0.58, 0.45), Point::new(0.42, 0.55)) };
+                let (from, to) = if n % 2 == 0 {
+                    (Point::new(0.42, 0.5), Point::new(0.58, 0.5))
+                } else {
+                    (Point::new(0.58, 0.45), Point::new(0.42, 0.55))
+                };
                 serde_json::json!({ "ken_burns": KenBurns { from_scale: 1.0, to_scale: 1.12, from_focus: Some(from), to_focus: Some(to) } })
             } else {
                 serde_json::json!({ "muted": true })
             };
-            ops::apply(&mut p, &Op::Patch { item: id.clone(), patch })?;
+            ops::apply(
+                &mut p,
+                &Op::Patch {
+                    item: id.clone(),
+                    patch,
+                },
+            )?;
         }
-        job.report.summary.push(format!("{} shots from {} visuals, one per sentence", ids.len(), visual_ids.len()));
+        job.report.summary.push(format!(
+            "{} shots from {} visuals, one per sentence",
+            ids.len(),
+            visual_ids.len()
+        ));
     }
     if let Some(copy) = &job.req.copy {
         // Heading cards sit at the top; captions move below them when they would collide.
         if p.captions.mode != CaptionMode::Off && p.captions.position < 0.4 {
             p.captions.position = 0.74;
-            job.report.summary.push("Captions moved to the lower third, under the heading cards".into());
+            job.report
+                .summary
+                .push("Captions moved to the lower third, under the heading cards".into());
         }
-        for (line, &(s, e)) in copy.lines().map(str::trim).filter(|l| !l.is_empty()).zip(&shots) {
-            ops::apply(&mut p, &Op::AddText { text: line.into(), start: s, duration: (e - s).min(4.0), preset: TextPreset::Card, position: Some(Point::new(0.5, 0.18)), style: None, anim_in: Some(Anim::SlideUp), anim_out: Some(Anim::Fade), track: None })?;
+        for (line, &(s, e)) in copy
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .zip(&shots)
+        {
+            ops::apply(
+                &mut p,
+                &Op::AddText {
+                    text: line.into(),
+                    start: s,
+                    duration: (e - s).min(4.0),
+                    preset: TextPreset::Card,
+                    position: Some(Point::new(0.5, 0.18)),
+                    style: None,
+                    anim_in: Some(Anim::SlideUp),
+                    anim_out: Some(Anim::Fade),
+                    track: None,
+                },
+            )?;
         }
     }
     cut_summary(job, &plan.removed, transcript.duration, total);
@@ -549,25 +729,71 @@ mod tests {
     #[test]
     fn punch_ins_alternate_and_respect_max_shot() {
         let mut p = Project::new("t", VideoKind::TalkingHeadShort, Canvas::vertical());
-        p.assets.push(Asset { id: "a".into(), path: "a.mp4".into(), kind: AssetKind::Video, role: AssetRole::Source, duration: 30.0, width: 1920, height: 1080, fps: 30.0, has_audio: true });
-        apply(&mut p, &Op::AddClip { asset: "a".into(), track: None, start: None, index: None, src_in: 0.0, duration: Some(12.0), frame: None, volume: None, duck: None }).unwrap();
+        p.assets.push(Asset {
+            id: "a".into(),
+            path: "a.mp4".into(),
+            kind: AssetKind::Video,
+            role: AssetRole::Source,
+            duration: 30.0,
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            has_audio: true,
+        });
+        apply(
+            &mut p,
+            &Op::AddClip {
+                asset: "a".into(),
+                track: None,
+                start: None,
+                index: None,
+                src_in: 0.0,
+                duration: Some(12.0),
+                frame: None,
+                volume: None,
+                duck: None,
+            },
+        )
+        .unwrap();
         // A word every 0.4 s, a phrase boundary every 5 words (2 s).
         let words = (0..30)
             .map(|i| {
                 let start = i as f64 * 0.4;
-                let text = if i % 5 == 4 { "word,".to_string() } else { "word".to_string() };
-                TranscriptWord { text, start, end: start + 0.3, confidence: None }
+                let text = if i % 5 == 4 {
+                    "word,".to_string()
+                } else {
+                    "word".to_string()
+                };
+                TranscriptWord {
+                    text,
+                    start,
+                    end: start + 0.3,
+                    confidence: None,
+                }
             })
             .collect();
-        let t = Transcript { asset: "a".into(), provider: "test".into(), language: None, duration: 12.0, words };
+        let t = Transcript {
+            asset: "a".into(),
+            provider: "test".into(),
+            language: None,
+            duration: 12.0,
+            words,
+        };
         punch_ins(&mut p, &t, 1.2, 2.0, 2.8, 1.15);
         let zooms = &p.main().items[0].clip().unwrap().zooms;
         assert!(zooms.len() >= 2, "{zooms:?}");
         // Wide and punched shots alternate, so punched intervals never touch.
         for pair in zooms.windows(2) {
-            assert!(pair[1].at > pair[0].at + pair[0].duration + 1.0, "{zooms:?}");
+            assert!(
+                pair[1].at > pair[0].at + pair[0].duration + 1.0,
+                "{zooms:?}"
+            );
         }
-        assert!(zooms.iter().all(|z| z.duration <= 2.8 + 1e-6 && z.scale == 1.15));
+        assert!(
+            zooms
+                .iter()
+                .all(|z| z.duration <= 2.8 + 1e-6 && z.scale == 1.15)
+        );
     }
 
     #[test]
@@ -578,10 +804,14 @@ mod tests {
         let (mut one, mut two) = (vec![0.0f32; len], vec![0.0f32; len]);
         let (mut t, mut seed, mut who) = (0.5f64, 7u64, 0);
         while t < 38.0 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let talk = 0.6 + (seed >> 33) as f64 / (1u64 << 31) as f64 * 2.5;
             let target = if who == 0 { &mut one } else { &mut two };
-            for i in (t * SAMPLE_RATE as f64) as usize..((t + talk) * SAMPLE_RATE as f64).min(len as f64) as usize {
+            for i in (t * SAMPLE_RATE as f64) as usize
+                ..((t + talk) * SAMPLE_RATE as f64).min(len as f64) as usize
+            {
                 target[i] = ((i as f32) * 0.3).sin();
             }
             t += talk + 0.3 + (seed >> 40) as f64 / (1u64 << 24) as f64 * 0.9;
@@ -591,6 +821,10 @@ mod tests {
         // Microphone B started recording 1.5 s earlier, so every moment comes 1.5 s later in it.
         let mut mic_b = vec![0.0f32; (1.5 * SAMPLE_RATE as f64) as usize];
         mic_b.extend(one.iter().zip(&two).map(|(x, y)| 0.18 * x + y));
-        assert!((sync_offset(&mic_a, &mic_b) - 1.5).abs() < 0.02, "{}", sync_offset(&mic_a, &mic_b));
+        assert!(
+            (sync_offset(&mic_a, &mic_b) - 1.5).abs() < 0.02,
+            "{}",
+            sync_offset(&mic_a, &mic_b)
+        );
     }
 }

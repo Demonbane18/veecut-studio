@@ -34,14 +34,19 @@ const SLACK: f64 = 0.15;
 /// seconds of the earlier one; further apart it may be a deliberate callback, so it goes to review.
 const RETAKE_GAP: f64 = 12.0;
 
-const FILLERS: &[&str] = &["um", "umm", "uhm", "uh", "uhh", "erm", "er", "err", "ah", "ahh", "hmm", "hm", "mm", "mmm", "ano", "eh"];
+const FILLERS: &[&str] = &[
+    "um", "umm", "uhm", "uh", "uhh", "erm", "er", "err", "ah", "ahh", "hmm", "hm", "mm", "mmm",
+    "ano", "eh",
+];
 /// Doubled words that are usually deliberate ("very very", "no no"), so they go to review.
-const DOUBLING: &[&str] = &["very", "really", "no", "never", "bye", "ha", "haha", "more", "again", "yeah"];
+const DOUBLING: &[&str] = &[
+    "very", "really", "no", "never", "bye", "ha", "haha", "more", "again", "yeah",
+];
 /// Herk Edit Kit's stop words for retake signatures.
 const STOP: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "i", "if", "in", "is", "it", "of", "on", "or",
-    "so", "that", "this", "to", "was", "we", "with", "you", "your", "they", "their", "there", "what", "when", "where",
-    "why", "how", "like", "um", "uh",
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "i", "if", "in", "is",
+    "it", "of", "on", "or", "so", "that", "this", "to", "was", "we", "with", "you", "your", "they",
+    "their", "there", "what", "when", "where", "why", "how", "like", "um", "uh",
 ];
 
 /// How hard `plan_cuts` trims.
@@ -69,16 +74,26 @@ impl Default for CutSettings {
 impl CutSettings {
     /// Herk Edit Kit's default: pauses under 0.55 s stay, which removes about 15-20% of a raw take.
     pub fn natural() -> Self {
-        CutSettings { min_silence: 0.55, pad: 0.08, remove_fillers: true, remove_retakes: true }
+        CutSettings {
+            min_silence: 0.55,
+            pad: 0.08,
+            remove_fillers: true,
+            remove_retakes: true,
+        }
     }
 
     /// The tight reel style: every pause over 0.2 s comes down to a breath.
     pub fn tight() -> Self {
-        CutSettings { min_silence: 0.2, ..Self::natural() }
+        CutSettings {
+            min_silence: 0.2,
+            ..Self::natural()
+        }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CutReason {
     /// Dead air at the ends, or a pause trimmed down to a breath.
@@ -125,22 +140,44 @@ pub struct CutPlan {
 /// 0.20 s after a sentence, else 0.14 s, split 55% after the previous word and 45% before the
 /// next. Dead air before the first word keeps 0.22 s, after the last 0.34 s. Cuts only fall in
 /// pauses, never inside a phrase.
-pub fn plan_cuts(transcript: &Transcript, pcm: &[f32], sample_rate: u32, settings: &CutSettings) -> CutPlan {
+pub fn plan_cuts(
+    transcript: &Transcript,
+    pcm: &[f32],
+    sample_rate: u32,
+    settings: &CutSettings,
+) -> CutPlan {
     let mut words: Vec<&TranscriptWord> = transcript
         .words
         .iter()
         .filter(|w| !w.text.trim().is_empty() && w.start.is_finite() && w.end >= w.start)
         .collect();
     words.sort_by(|a, b| a.start.total_cmp(&b.start));
-    let audio = if sample_rate > 0 { pcm.len() as f64 / sample_rate as f64 } else { 0.0 };
-    let duration = transcript.duration.max(audio).max(words.last().map_or(0.0, |w| w.end));
+    let audio = if sample_rate > 0 {
+        pcm.len() as f64 / sample_rate as f64
+    } else {
+        0.0
+    };
+    let duration = transcript
+        .duration
+        .max(audio)
+        .max(words.last().map_or(0.0, |w| w.end));
     let quiet = audio_quiet(&words, pcm, sample_rate);
-    Planner { words, duration, settings, quiet }.plan()
+    Planner {
+        words,
+        duration,
+        settings,
+        quiet,
+    }
+    .plan()
 }
 
 /// Quiet stretches of the audio, or None when there is no audio or no real pause anywhere in it
 /// (a music bed or a loud room), in which case transcript gaps are trusted instead.
-fn audio_quiet(words: &[&TranscriptWord], pcm: &[f32], sample_rate: u32) -> Option<Vec<(f64, f64)>> {
+fn audio_quiet(
+    words: &[&TranscriptWord],
+    pcm: &[f32],
+    sample_rate: u32,
+) -> Option<Vec<(f64, f64)>> {
     if sample_rate == 0 || pcm.is_empty() {
         return None;
     }
@@ -156,7 +193,9 @@ fn audio_quiet(words: &[&TranscriptWord], pcm: &[f32], sample_rate: u32) -> Opti
         .map(|i| db[i])
         .collect();
     let runs = quiet_runs(&db, hop, threshold_from(speech), MIN_QUIET);
-    runs.iter().any(|(a, b)| b - a >= FILLER_QUIET).then_some(runs)
+    runs.iter()
+        .any(|(a, b)| b - a >= FILLER_QUIET)
+        .then_some(runs)
 }
 
 struct Mistake {
@@ -178,8 +217,15 @@ impl Planner<'_> {
     fn plan(&self) -> CutPlan {
         let w = &self.words;
         if w.is_empty() {
-            let keep = if self.duration > 0.0 { vec![(0.0, self.duration)] } else { Vec::new() };
-            return CutPlan { keep, removed: Vec::new() };
+            let keep = if self.duration > 0.0 {
+                vec![(0.0, self.duration)]
+            } else {
+                Vec::new()
+            };
+            return CutPlan {
+                keep,
+                removed: Vec::new(),
+            };
         }
         let tokens: Vec<String> = w.iter().map(|x| clean_token(&x.text)).collect();
         let mut reason: Vec<Option<CutReason>> = vec![None; w.len()];
@@ -201,7 +247,10 @@ impl Planner<'_> {
         }
         if self.settings.remove_fillers {
             for i in 0..w.len() {
-                if reason[i].is_none() && FILLERS.contains(&tokens[i].as_str()) && self.quiet_around(i) {
+                if reason[i].is_none()
+                    && FILLERS.contains(&tokens[i].as_str())
+                    && self.quiet_around(i)
+                {
                     reason[i] = Some(CutReason::Filler);
                 }
             }
@@ -214,8 +263,14 @@ impl Planner<'_> {
         let mut removed = Vec::new();
         for (p, n) in prevs.zip(nexts) {
             let range = p.map_or(0, |i| i + 1)..n.unwrap_or(w.len());
-            let Some((start, end, pause)) = self.region(p, range.clone(), n) else { continue };
-            let why = range.clone().filter_map(|i| reason[i]).max().unwrap_or(CutReason::Silence);
+            let Some((start, end, pause)) = self.region(p, range.clone(), n) else {
+                continue;
+            };
+            let why = range
+                .clone()
+                .filter_map(|i| reason[i])
+                .max()
+                .unwrap_or(CutReason::Silence);
             let note = match why {
                 CutReason::Silence if p.is_none() => "dead air before the first word".to_string(),
                 CutReason::Silence if n.is_none() => "dead air after the last word".to_string(),
@@ -228,20 +283,36 @@ impl Planner<'_> {
                     .collect::<Vec<_>>()
                     .join("; "),
             };
-            removed.push(Removal { start, end, reason: why, text: self.text(range), review: false, note });
+            removed.push(Removal {
+                start,
+                end,
+                reason: why,
+                text: self.text(range),
+                review: false,
+                note,
+            });
         }
 
         // Suggestions, strongest first, skipping any already cut or overlapping a stronger one.
         let mut taken: Vec<Range<usize>> = Vec::new();
         for m in suggested {
             let r = m.words.clone();
-            if r.clone().all(|i| reason[i].is_some()) || taken.iter().any(|t| t.start < r.end && r.start < t.end) {
+            if r.clone().all(|i| reason[i].is_some())
+                || taken.iter().any(|t| t.start < r.end && r.start < t.end)
+            {
                 continue;
             }
             let p = r.start.checked_sub(1);
             let n = (r.end < w.len()).then_some(r.end);
             if let Some((start, end, _)) = self.region(p, r.clone(), n) {
-                removed.push(Removal { start, end, reason: m.reason, text: self.text(r.clone()), review: true, note: m.note });
+                removed.push(Removal {
+                    start,
+                    end,
+                    reason: m.reason,
+                    text: self.text(r.clone()),
+                    review: true,
+                    note: m.note,
+                });
                 taken.push(r);
             }
         }
@@ -263,14 +334,22 @@ impl Planner<'_> {
     }
 
     fn text(&self, range: Range<usize>) -> String {
-        self.words[range].iter().map(|w| w.text.trim()).collect::<Vec<_>>().join(" ")
+        self.words[range]
+            .iter()
+            .map(|w| w.text.trim())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Quiet stretches of at least `min_len` seconds that belong to the transcript gap
     /// `lo..hi`, trimmed to at most `SLACK` past its edges. Without audio, the gap itself.
     fn quiet_near(&self, lo: f64, hi: f64, min_len: f64) -> Vec<(f64, f64)> {
         let Some(runs) = &self.quiet else {
-            return if hi - lo >= min_len { vec![(lo, hi)] } else { Vec::new() };
+            return if hi - lo >= min_len {
+                vec![(lo, hi)]
+            } else {
+                Vec::new()
+            };
         };
         runs.iter()
             .filter(|(a, b)| *b > lo - TOLERANCE && *a < hi + TOLERANCE)
@@ -282,19 +361,33 @@ impl Planner<'_> {
     /// A filler counts as standalone with quiet before and after it (or a file edge).
     fn quiet_around(&self, i: usize) -> bool {
         let w = &self.words;
-        let before = i == 0 || !self.quiet_near(w[i - 1].end, w[i].start, FILLER_QUIET).is_empty();
-        let after = i + 1 == w.len() || !self.quiet_near(w[i].end, w[i + 1].start, FILLER_QUIET).is_empty();
+        let before = i == 0
+            || !self
+                .quiet_near(w[i - 1].end, w[i].start, FILLER_QUIET)
+                .is_empty();
+        let after = i + 1 == w.len()
+            || !self
+                .quiet_near(w[i].end, w[i + 1].start, FILLER_QUIET)
+                .is_empty();
         before && after
     }
 
     /// The cut between kept word `p` and kept word `n` (None at the file's ends) that removes the
     /// words in `removed` and brings the pause down to a breath: (start, end, pause length).
-    fn region(&self, p: Option<usize>, removed: Range<usize>, n: Option<usize>) -> Option<(f64, f64, f64)> {
+    fn region(
+        &self,
+        p: Option<usize>,
+        removed: Range<usize>,
+        n: Option<usize>,
+    ) -> Option<(f64, f64, f64)> {
         let w = &self.words;
         let lo = p.map_or(0.0, |i| w[i].end);
         let hi = n.map_or(self.duration, |i| w[i].start);
-        let (left_hi, right_lo) =
-            if removed.is_empty() { (hi, lo) } else { (w[removed.start].start, w[removed.end - 1].end) };
+        let (left_hi, right_lo) = if removed.is_empty() {
+            (hi, lo)
+        } else {
+            (w[removed.start].start, w[removed.end - 1].end)
+        };
         let left = p.and_then(|_| self.quiet_near(lo, left_hi, MIN_QUIET).first().copied());
         let right = n.and_then(|_| self.quiet_near(right_lo, hi, MIN_QUIET).last().copied());
         let pause = match (left, right) {
@@ -332,7 +425,14 @@ impl Planner<'_> {
             Some(_) => {
                 let keep = if p.is_some() { 0.45 * breath } else { HEAD_PAD };
                 let (to, limit) = match right {
-                    Some((a, b)) => (b, if removed.is_empty() { f64::NEG_INFINITY } else { a }),
+                    Some((a, b)) => (
+                        b,
+                        if removed.is_empty() {
+                            f64::NEG_INFINITY
+                        } else {
+                            a
+                        },
+                    ),
                     None => (hi, right_lo),
                 };
                 (to - keep).max(limit)
@@ -348,13 +448,24 @@ fn mistakes(w: &[&TranscriptWord], tokens: &[String]) -> Vec<Mistake> {
     for i in 1..w.len() {
         let (a, b) = (w[i - 1], w[i]);
         if !tokens[i].is_empty() && tokens[i - 1] == tokens[i] && b.start - a.end < 0.5 {
-            let emphatic = a.text.trim_end().ends_with([',', ';', '!', '.', '?', '…']) || DOUBLING.contains(&tokens[i].as_str());
+            let emphatic = a.text.trim_end().ends_with([',', ';', '!', '.', '?', '…'])
+                || DOUBLING.contains(&tokens[i].as_str());
             let note = if emphatic {
-                format!("\"{} {}\" may be deliberate emphasis", a.text.trim(), b.text.trim())
+                format!(
+                    "\"{} {}\" may be deliberate emphasis",
+                    a.text.trim(),
+                    b.text.trim()
+                )
             } else {
                 format!("stutter: repeated \"{}\"", tokens[i])
             };
-            out.push(Mistake { words: i - 1..i, reason: CutReason::Stutter, score: 1.0, sure: !emphatic, note });
+            out.push(Mistake {
+                words: i - 1..i,
+                reason: CutReason::Stutter,
+                score: 1.0,
+                sure: !emphatic,
+                note,
+            });
         }
     }
     let segments = segments(w);
@@ -367,12 +478,27 @@ fn mistakes(w: &[&TranscriptWord], tokens: &[String]) -> Vec<Mistake> {
                 break;
             }
             let score = jaccard(&sigs[i], &sigs[j]);
-            let same_opening = (0..4).filter(|&k| matches!((sigs[i].get(k), sigs[j].get(k)), (Some(x), Some(y)) if x == y)).count() >= 2;
+            let same_opening = (0..4)
+                .filter(
+                    |&k| matches!((sigs[i].get(k), sigs[j].get(k)), (Some(x), Some(y)) if x == y),
+                )
+                .count()
+                >= 2;
             if score >= 0.34 || (score >= 0.24 && same_opening) {
                 let first_len = w[si.end - 1].end - w[si.start].start;
                 let false_start = same_opening && first_len < 6.0 && gap < 12.0;
-                let level = if score >= 0.45 { "high" } else if score >= 0.34 { "medium" } else { "low" };
-                let later: Vec<&str> = w[sj.clone()].iter().take(12).map(|x| x.text.trim()).collect();
+                let level = if score >= 0.45 {
+                    "high"
+                } else if score >= 0.34 {
+                    "medium"
+                } else {
+                    "low"
+                };
+                let later: Vec<&str> = w[sj.clone()]
+                    .iter()
+                    .take(12)
+                    .map(|x| x.text.trim())
+                    .collect();
                 let note = format!(
                     "{} ({level} confidence, similarity {score:.2}{}); keeps the later take \"{}\"",
                     if false_start { "false start" } else { "retake" },
@@ -381,7 +507,11 @@ fn mistakes(w: &[&TranscriptWord], tokens: &[String]) -> Vec<Mistake> {
                 );
                 out.push(Mistake {
                     words: si.start..sj.start,
-                    reason: if false_start { CutReason::FalseStart } else { CutReason::Retake },
+                    reason: if false_start {
+                        CutReason::FalseStart
+                    } else {
+                        CutReason::Retake
+                    },
                     score,
                     sure: score >= 0.45 && gap <= RETAKE_GAP,
                     note,
@@ -441,7 +571,9 @@ mod tests {
 
     /// A transcript plus audio: a tone inside every word, near-silence elsewhere.
     fn take(words: &[(&str, f64, f64)], duration: f64) -> (Transcript, Vec<f32>) {
-        let mut pcm: Vec<f32> = (0..(duration * SR as f64) as usize).map(|i| if i % 2 == 0 { 1e-4 } else { -1e-4 }).collect();
+        let mut pcm: Vec<f32> = (0..(duration * SR as f64) as usize)
+            .map(|i| if i % 2 == 0 { 1e-4 } else { -1e-4 })
+            .collect();
         for &(_, start, end) in words {
             for i in (start * SR as f64).round() as usize..(end * SR as f64).round() as usize {
                 pcm[i] = 0.3 * (i as f32 * 220.0 * std::f32::consts::TAU / SR as f32).sin();
@@ -449,9 +581,23 @@ mod tests {
         }
         let words = words
             .iter()
-            .map(|&(text, start, end)| TranscriptWord { text: text.into(), start, end, confidence: None })
+            .map(|&(text, start, end)| TranscriptWord {
+                text: text.into(),
+                start,
+                end,
+                confidence: None,
+            })
             .collect();
-        (Transcript { asset: "a".into(), provider: "test".into(), language: Some("en".into()), duration, words }, pcm)
+        (
+            Transcript {
+                asset: "a".into(),
+                provider: "test".into(),
+                language: Some("en".into()),
+                duration,
+                words,
+            },
+            pcm,
+        )
     }
 
     fn close(a: (f64, f64), b: (f64, f64)) -> bool {
@@ -483,21 +629,28 @@ mod tests {
         let plan = plan_cuts(&t, &pcm, SR, &CutSettings::natural());
         let got: Vec<(f64, f64)> = plan.removed.iter().map(|r| (r.start, r.end)).collect();
         let want = [
-            (0.0, 0.08),                     // head pad 0.22
-            (1.20 + 0.132, 3.70 - 0.108),    // 2.5 s pause keeps 0.24
-            (4.50 + 0.11, 5.50 - 0.09),      // after a sentence keeps 0.20
-            (6.70 + 0.08, 7.70 - 0.063),     // 0.14 breath, but never closer than pad to a word end
-            (8.10 + 0.34, 9.0),              // tail pad 0.34
+            (0.0, 0.08),                  // head pad 0.22
+            (1.20 + 0.132, 3.70 - 0.108), // 2.5 s pause keeps 0.24
+            (4.50 + 0.11, 5.50 - 0.09),   // after a sentence keeps 0.20
+            (6.70 + 0.08, 7.70 - 0.063),  // 0.14 breath, but never closer than pad to a word end
+            (8.10 + 0.34, 9.0),           // tail pad 0.34
         ];
         assert_eq!(got.len(), want.len(), "{got:?}");
         for (g, w) in got.iter().zip(want) {
             assert!(close(*g, w), "got {g:?}, want {w:?}");
         }
-        assert!(plan.removed.iter().all(|r| r.reason == CutReason::Silence && !r.review));
+        assert!(
+            plan.removed
+                .iter()
+                .all(|r| r.reason == CutReason::Silence && !r.review)
+        );
         assert!(kept(&plan, 5.90, 6.30), "a 0.4 s pause stays");
 
         let tight = plan_cuts(&t, &pcm, SR, &CutSettings::tight());
-        assert!(cut(&tight, 6.0, 6.2), "tight style trims the 0.4 s pause too");
+        assert!(
+            cut(&tight, 6.0, 6.2),
+            "tight style trims the 0.4 s pause too"
+        );
     }
 
     #[test]
@@ -516,11 +669,21 @@ mod tests {
             5.0,
         );
         let plan = plan_cuts(&t, &pcm, SR, &CutSettings::natural());
-        let filler = plan.removed.iter().find(|r| r.reason == CutReason::Filler).expect("um removed");
+        let filler = plan
+            .removed
+            .iter()
+            .find(|r| r.reason == CutReason::Filler)
+            .expect("um removed");
         assert_eq!(filler.text, "um");
-        assert!(close((filler.start, filler.end), (0.58, 1.6 - 0.063)), "{filler:?}");
+        assert!(
+            close((filler.start, filler.end), (0.58, 1.6 - 0.063)),
+            "{filler:?}"
+        );
         assert!(cut(&plan, 0.9, 1.2));
-        assert!(kept(&plan, 3.0, 4.6), "uh runs straight into the next word, so it stays");
+        assert!(
+            kept(&plan, 3.0, 4.6),
+            "uh runs straight into the next word, so it stays"
+        );
     }
 
     #[test]
@@ -540,16 +703,31 @@ mod tests {
             3.5,
         );
         let plan = plan_cuts(&t, &pcm, SR, &CutSettings::natural());
-        let stutter = plan.removed.iter().find(|r| r.reason == CutReason::Stutter && !r.review).expect("stutter cut");
-        assert!(stutter.start <= 0.65 && stutter.end >= 0.75 && stutter.end <= 0.85, "{stutter:?}");
+        let stutter = plan
+            .removed
+            .iter()
+            .find(|r| r.reason == CutReason::Stutter && !r.review)
+            .expect("stutter cut");
+        assert!(
+            stutter.start <= 0.65 && stutter.end >= 0.75 && stutter.end <= 0.85,
+            "{stutter:?}"
+        );
         assert!(cut(&plan, 0.65, 0.75) && kept(&plan, 0.85, 1.80));
-        let flagged = plan.removed.iter().find(|r| r.review).expect("emphatic doubling flagged");
+        let flagged = plan
+            .removed
+            .iter()
+            .find(|r| r.review)
+            .expect("emphatic doubling flagged");
         assert_eq!(flagged.text, "Never,");
         assert!(kept(&plan, 2.0, 3.1));
     }
 
     fn sentence(words: &str, from: f64) -> Vec<(&str, f64, f64)> {
-        words.split(' ').enumerate().map(|(i, w)| (w, from + i as f64 * 0.7, from + i as f64 * 0.7 + 0.5)).collect()
+        words
+            .split(' ')
+            .enumerate()
+            .map(|(i, w)| (w, from + i as f64 * 0.7, from + i as f64 * 0.7 + 0.5))
+            .collect()
     }
 
     #[test]
@@ -561,10 +739,21 @@ mod tests {
         let (t, pcm) = take(&words, 16.0);
         for audio in [&pcm[..], &[]] {
             let plan = plan_cuts(&t, audio, SR, &CutSettings::natural());
-            let retake = plan.removed.iter().find(|r| r.reason == CutReason::Retake).expect("retake cut");
-            assert!(!retake.review && retake.text.starts_with("The new pricing"), "{retake:?}");
+            let retake = plan
+                .removed
+                .iter()
+                .find(|r| r.reason == CutReason::Retake)
+                .expect("retake cut");
+            assert!(
+                !retake.review && retake.text.starts_with("The new pricing"),
+                "{retake:?}"
+            );
             assert!(cut(&plan, 0.5, 6.1), "first take gone: {:?}", plan.keep);
-            assert!(kept(&plan, 8.1, 14.2) && kept(&plan, 14.8, 15.2), "last take stays: {:?}", plan.keep);
+            assert!(
+                kept(&plan, 8.1, 14.2) && kept(&plan, 14.8, 15.2),
+                "last take stays: {:?}",
+                plan.keep
+            );
         }
     }
 
@@ -576,8 +765,17 @@ mod tests {
         let plan = plan_cuts(&t, &pcm, SR, &CutSettings::natural());
         let flagged: Vec<&Removal> = plan.removed.iter().filter(|r| r.review).collect();
         assert_eq!(flagged.len(), 1, "{:?}", plan.removed);
-        assert!(matches!(flagged[0].reason, CutReason::Retake | CutReason::FalseStart));
-        assert!(flagged[0].start <= 0.5 && flagged[0].end >= 3.3 && flagged[0].note.contains("medium"));
-        assert!(kept(&plan, 0.5, 3.3), "not cut without review: {:?}", plan.keep);
+        assert!(matches!(
+            flagged[0].reason,
+            CutReason::Retake | CutReason::FalseStart
+        ));
+        assert!(
+            flagged[0].start <= 0.5 && flagged[0].end >= 3.3 && flagged[0].note.contains("medium")
+        );
+        assert!(
+            kept(&plan, 0.5, 3.3),
+            "not cut without review: {:?}",
+            plan.keep
+        );
     }
 }

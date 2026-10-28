@@ -19,7 +19,7 @@ veecut ops -                                         ops from standard input
 - Sizes of text are fractions of the frame height. `0.045` is a medium caption.
 - `veecut status --json` lists every track with its items. Each item has an `id`, a `start` and a `duration`. Clip ids look like `clip-3`, text ids like `text-1`, caption pages like `cap-12`. Assets have ids like `asset-1`.
 - The standard tracks are `main` (the magnetic main track), `broll`, `text`, `captions`, `music` and `sfx`. Some recipes add a `voice` track. On the main track, clips play back to back and their starts are computed, so you change their order, not their start.
-- `cut_range` moves every track together. Other ops that change the main track (`trim`, `delete`, `add_clip`, `move` or `duplicate` on `main`) leave the other tracks where they were. After one of those, run `veecut captions --rebuild` so the captions follow the words again, and check that text, music and any `voice` track still line up (`veecut frames`). When the voice is on its own track (podcasts with `--voice` or several cameras, explainers), prefer `cut_range`, because the voice cannot follow other main-track changes.
+- Edits on the main track keep every track in sync. `cut_range`, deleting a main clip and trimming one shorter cut that time from all tracks. Inserting a main clip before the end (`add_clip` with `index` or `start`, `duplicate`) or trimming one longer pushes later items on every track along; appending at the end moves nothing. Items that start at or after that point move; an item that runs across it stays where it is, so `split` that track there first if its second half should move too. Reordering main clips with `move` does not move the other tracks, so run `veecut captions --rebuild` after reordering. When the voice is on its own track (podcasts with `--voice` or several cameras, explainers), new picture time has no voice under it; add the matching voice piece with `add_clip` on the `voice` track.
 
 ## The ops
 
@@ -42,7 +42,7 @@ Splits items at a time. Without `track`, every item crossing that time is split.
 
 ### trim
 
-Moves an item's edges, in timeline seconds. On the main track later clips shift with it. A trim may also reach outward to bring back source that was cut, as long as the source file is long enough.
+Moves an item's edges, in timeline seconds. On a main-track clip the change ripples through every track: trimmed time is cut everywhere, and added time makes room everywhere. A trim may also reach outward to bring back source that was cut, as long as the source file is long enough.
 
 ```json
 {"op":"trim","item":"clip-4","start":10.2}
@@ -60,7 +60,7 @@ Main-track clips move by `index` (their place in the sequence, 0 is first). Othe
 
 ### delete
 
-Deletes an item. On the main track the gap closes; on other tracks it stays.
+Deletes an item. Deleting a main-track clip also cuts its stretch of time from every other track, music included. On other tracks the gap stays.
 
 ```json
 {"op":"delete","item":"text-1"}
@@ -68,7 +68,7 @@ Deletes an item. On the main track the gap closes; on other tracks it stays.
 
 ### duplicate
 
-Copies an item and places the copy right after it.
+Copies an item and places the copy right after it. On the main track, later items on every track move along.
 
 ```json
 {"op":"duplicate","item":"clip-2"}
@@ -76,7 +76,7 @@ Copies an item and places the copy right after it.
 
 ### add_clip
 
-Puts part of an asset on a track. Without `track` it picks one by the asset's role: the main recording goes on `main`, other footage and images on `broll`, sound effects on `sfx` and other audio on `music`. Without `start` or `index` a main-track clip goes at the end. `src_in` is where in the source file the clip starts; `duration` defaults to the rest of the file, or 3 s for an image. `frame` places the clip on part of the canvas (picture in picture); without it the clip fills the canvas. `volume` is a linear gain (1.0 unchanged, 0.5 about -6 dB). `duck` lowers the clip while someone speaks; music is ducked by default.
+Puts part of an asset on a track. Without `track` it picks one by the asset's role: the main recording goes on `main`, other footage and images on `broll`, sound effects on `sfx` and other audio on `music`. Without `start` or `index` a main-track clip goes at the end; inserted earlier, it pushes later items on every track along. `src_in` is where in the source file the clip starts; `duration` defaults to the rest of the file, or 3 s for an image. `frame` places the clip on part of the canvas (picture in picture); without it the clip fills the canvas. `volume` is a linear gain (1.0 unchanged, 0.5 about -6 dB). `duck` lowers the clip while someone speaks; music is ducked by default.
 
 ```json
 {"op":"add_clip","asset":"asset-1","track":"main","index":5,"src_in":31.2,"duration":2.4}
@@ -170,7 +170,7 @@ Captions (`/captions/...`, one style for every caption page):
 | `/captions/max_words` | most words on screen at once (default 3) |
 | `/captions/max_chars` | most characters per line (default 20) |
 
-After changing `max_words` or `max_chars`, run `veecut captions --rebuild` so the pages are grouped again. `veecut captions --mode pills` changes the mode in one step.
+After changing `max_words` or `max_chars`, run `veecut captions --rebuild` so the pages are grouped again. `veecut captions --mode pills` changes the mode in one step. When the footage behind text or captions would make them hard to read, VeeCut draws a dark (or light) scrim behind them on its own; it never changes the colors the user picked.
 
 Look (`/look/...`): `preset` is `natural`, `warm`, `cool`, `black_white`, `teal_orange`, `vivid` or `matte`. The adjustments `brightness`, `contrast`, `saturation` and `temperature` run from -1 to 1, and `vignette` from 0 to 1. They add to what the preset does.
 
@@ -186,15 +186,14 @@ Tracks (`/tracks/N/...`): `muted` and `hidden`, where N is the track's place in 
 
 ## Bringing in a new file
 
-No op adds a file to a project, so this takes two steps. Use it for one extra shot, a logo or a sound.
+`veecut add FILE... [--role ROLE]` brings files into the project and prints their asset ids. FILE is a path or the name of a file in `inbox/`. Roles are `source`, `broll`, `music`, `sfx`, `voice`, `image` and `logo`; without `--role` a video becomes `broll`, a picture `image` and a sound `music`. Then place it with `add_clip`:
 
-1. `veecut qa FILE --json` reports the file's `duration`, `width`, `height`, `fps` and `has_audio`.
-2. Append the asset with `set`, using an id that `veecut status --json` does not list yet, the file's absolute path, a `kind` (`video`, `audio`, `image`) and a `role` (`source`, `broll`, `music`, `sfx`, `voice`, `image`, `logo`). Then place it with `add_clip`.
-
-```json
-[{"op":"set","path":"/assets/-","value":{"id":"asset-9","path":"/Users/me/videos/inbox/street.mp4","kind":"video","role":"broll","duration":12.0,"width":1920,"height":1080,"fps":30,"has_audio":true}},
- {"op":"add_clip","asset":"asset-9","track":"broll","start":6.0,"duration":2.5}]
 ```
+veecut add inbox/street.mp4 --json
+veecut ops '{"op":"add_clip","asset":"asset-9","track":"broll","start":6.0,"duration":2.5}'
+```
+
+Use the id that `veecut add` printed, not `asset-9`.
 
 Never copy, move or convert files in `inbox/` to do this; the project points at them where they are.
 
@@ -214,14 +213,15 @@ Look up ids with `veecut status --json` and times with `veecut transcript` first
 | "Music too loud", "hinaan mo yung music" | Patch every item on the `music` track, for example `{"op":"patch","item":"clip-30","patch":{"volume":0.18}}`. For more dip only under speech, `{"op":"set","path":"/audio/duck_db","value":18}`. |
 | "No music" | `{"op":"set","path":"/tracks/4/muted","value":true}` after checking that track 4 is `music` |
 | "Add text here" | `{"op":"add_text","text":"...","start":12.0,"duration":2.5,"preset":"card"}` |
+| "Put B-roll here", "lagyan mo ng b-roll dito" | `veecut add FILE`, then `{"op":"add_clip","asset":"ID","track":"broll","start":12.0,"duration":2.5}` with the printed id |
 | "Zoom in on this" | `{"op":"add_zoom","at":12.0,"duration":2.0,"scale":1.15}` |
 | "Remove the zoom" | Patch the clip at that time: `{"op":"patch","item":"clip-6","patch":{"zooms":[]}}` |
 | "Warmer", "mas warm" | `{"op":"set","path":"/look/preset","value":"warm"}`, or a lighter touch: `{"op":"set","path":"/look/temperature","value":0.2}` |
 | "Black and white" | `{"op":"set","path":"/look/preset","value":"black_white"}` |
 | "No captions" | `veecut captions --mode off` |
 | "Different caption style" | `veecut captions --mode word_pop` (or `highlight`, `pills`, `subtitle`) |
-| "You cut off my word" | Trim the clip before that cut outward by a little: `{"op":"trim","item":"clip-4","end":12.6}` (its old end plus about 0.1 s), then `veecut captions --rebuild` |
-| "Put back the part you cut" | `add_clip` with the source time from `veecut transcript` (see the add_clip example), then `veecut captions --rebuild` |
+| "You cut off my word" | Trim the clip before that cut outward by a little: `{"op":"trim","item":"clip-4","end":12.6}` (its old end plus about 0.1 s) |
+| "Put back the part you cut" | `add_clip` with the source time from `veecut transcript` (see the add_clip example) |
 | "Vertical version" | `veecut render --aspect 9:16` |
 | "Horizontal version" | `veecut render --aspect 16:9` |
 | "Undo that", "ibalik mo" | `veecut undo` |

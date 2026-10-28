@@ -96,18 +96,22 @@ pub struct LockedRepo {
 impl Lock {
     pub fn load(path: &Path) -> Result<Lock> {
         match fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).with_context(|| format!("{} is not valid JSON", path.display())),
+            Ok(text) => serde_json::from_str(&text)
+                .with_context(|| format!("{} is not valid JSON", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Lock::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        fs::write(path, serde_json::to_string_pretty(self)? + "\n").with_context(|| format!("writing {}", path.display()))
+        fs::write(path, serde_json::to_string_pretty(self)? + "\n")
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     pub fn get(&self, repo: &str) -> Option<&LockedRepo> {
-        self.repos.iter().find(|r| r.repo.eq_ignore_ascii_case(repo))
+        self.repos
+            .iter()
+            .find(|r| r.repo.eq_ignore_ascii_case(repo))
     }
 }
 
@@ -136,18 +140,34 @@ pub struct UpdateReport {
 pub fn sync() -> Result<SyncReport> {
     let commit = head_commit(LIST_REPO, "main")?;
     let url = format!("https://raw.githubusercontent.com/{LIST_REPO}/{commit}/README.md");
-    let readme = fetch(&url, "text/plain")?.body_mut().read_to_string().with_context(|| format!("reading {url}"))?;
+    let readme = fetch(&url, "text/plain")?
+        .body_mut()
+        .read_to_string()
+        .with_context(|| format!("reading {url}"))?;
     let (categories, entries) = parse_readme(&readme);
     if entries.is_empty() {
-        bail!("no entries found in {url}; the list's format may have changed. Update VeeCut or report it.");
+        bail!(
+            "no entries found in {url}; the list's format may have changed. Update VeeCut or report it."
+        );
     }
-    let catalog = Catalog { source_commit: commit, fetched_at: Utc::now(), categories, entries };
+    let catalog = Catalog {
+        source_commit: commit,
+        fetched_at: Utc::now(),
+        categories,
+        entries,
+    };
     let path = catalog_path();
-    fs::create_dir_all(config::home()).with_context(|| format!("creating {}", config::home().display()))?;
+    fs::create_dir_all(config::home())
+        .with_context(|| format!("creating {}", config::home().display()))?;
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(&catalog)?).with_context(|| format!("writing {}", tmp.display()))?;
+    fs::write(&tmp, serde_json::to_string_pretty(&catalog)?)
+        .with_context(|| format!("writing {}", tmp.display()))?;
     fs::rename(&tmp, &path).with_context(|| format!("saving {}", path.display()))?;
-    Ok(SyncReport { commit: catalog.source_commit, entries: catalog.entries.len(), categories: catalog.categories.len() })
+    Ok(SyncReport {
+        commit: catalog.source_commit,
+        entries: catalog.entries.len(),
+        categories: catalog.categories.len(),
+    })
 }
 
 fn catalog_path() -> PathBuf {
@@ -158,9 +178,12 @@ fn catalog_path() -> PathBuf {
 pub fn load_catalog() -> Result<Option<Catalog>> {
     let path = catalog_path();
     match fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(Some)
-            .with_context(|| format!("{} is damaged; run `veecut skills sync` to rebuild it", path.display())),
+        Ok(text) => serde_json::from_str(&text).map(Some).with_context(|| {
+            format!(
+                "{} is damaged; run `veecut skills sync` to rebuild it",
+                path.display()
+            )
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
@@ -179,10 +202,17 @@ pub fn auto_sync_if_stale(config: &Config) -> Option<Result<SyncReport>> {
 
 /// [`auto_sync_if_stale`], then, when `auto_update` is on, updates the workspace's installed
 /// SAFE skills whose upstream moved.
-pub fn auto_sync_and_update(ws: &Workspace, config: &Config) -> Option<Result<(SyncReport, Vec<UpdateReport>)>> {
+pub fn auto_sync_and_update(
+    ws: &Workspace,
+    config: &Config,
+) -> Option<Result<(SyncReport, Vec<UpdateReport>)>> {
     let synced = auto_sync_if_stale(config)?;
     Some(synced.and_then(|report| {
-        let updates = if config.skills.auto_update { update_where(ws, None, true)? } else { Vec::new() };
+        let updates = if config.skills.auto_update {
+            update_where(ws, None, true)?
+        } else {
+            Vec::new()
+        };
         Ok((report, updates))
     }))
 }
@@ -217,7 +247,10 @@ pub fn search<'a>(catalog: &'a Catalog, query: &str, category: Option<&str>) -> 
 /// follows the catalog as it updates.
 pub fn recommended<'a>(catalog: &'a Catalog, kind: VideoKind, n: usize) -> Vec<&'a Entry> {
     let wanted: &[&str] = match kind {
-        VideoKind::TalkingHeadShort | VideoKind::TalkingHeadLong | VideoKind::Podcast | VideoKind::Clips => &["editing", "shorts"],
+        VideoKind::TalkingHeadShort
+        | VideoKind::TalkingHeadLong
+        | VideoKind::Podcast
+        | VideoKind::Clips => &["editing", "shorts"],
         VideoKind::Tutorial => &["explainer", "editing"],
         VideoKind::Explainer => &["explainer", "motion"],
         VideoKind::Promo => &["promo", "motion"],
@@ -245,7 +278,11 @@ pub fn install(ws: &Workspace, repo: &str, force: bool) -> Result<InstallReport>
     let repo = normalize_repo(repo)?;
     let config = Config::load()?;
     let catalog = load_catalog()?;
-    let entry = catalog.as_ref().and_then(|c| c.entries.iter().find(|e| e.repo.eq_ignore_ascii_case(&repo)));
+    let entry = catalog.as_ref().and_then(|c| {
+        c.entries
+            .iter()
+            .find(|e| e.repo.eq_ignore_ascii_case(&repo))
+    });
     let security = entry.map(|e| e.security.clone()).unwrap_or_default();
     if config.skills.safe_only && !force && !is_safe(&security) {
         match entry {
@@ -254,13 +291,23 @@ pub fn install(ws: &Workspace, repo: &str, force: bool) -> Result<InstallReport>
             ),
             Some(e) => bail!(
                 "{repo} is graded {} on Agent Skills Hub, not SAFE (https://agentskillshub.top/skill/{repo}/). Install it anyway with --force only if you trust it.",
-                if e.security.is_empty() { "nothing" } else { &e.security }
+                if e.security.is_empty() {
+                    "nothing"
+                } else {
+                    &e.security
+                }
             ),
         }
     }
     let info = repo_info(&repo)?;
     let commit = head_commit(&info.full_name, &info.default_branch)?;
-    install_at(ws, &info.full_name, &commit, info.license.map(|l| l.spdx_id), security)
+    install_at(
+        ws,
+        &info.full_name,
+        &commit,
+        info.license.map(|l| l.spdx_id),
+        security,
+    )
 }
 
 /// Reinstalls installed repos (all, or one) whose default branch moved past the locked commit.
@@ -273,7 +320,11 @@ fn update_where(ws: &Workspace, repo: Option<&str>, safe_only: bool) -> Result<V
     let wanted: Vec<LockedRepo> = match repo {
         Some(r) => {
             let r = normalize_repo(r)?;
-            vec![lock.get(&r).cloned().ok_or_else(|| anyhow!("{r} is not installed in this workspace"))?]
+            vec![
+                lock.get(&r)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("{r} is not installed in this workspace"))?,
+            ]
         }
         None => lock.repos.clone(),
     };
@@ -282,18 +333,33 @@ fn update_where(ws: &Workspace, repo: Option<&str>, safe_only: bool) -> Result<V
     for locked in wanted {
         let security = catalog
             .as_ref()
-            .and_then(|c| c.entries.iter().find(|e| e.repo.eq_ignore_ascii_case(&locked.repo)))
+            .and_then(|c| {
+                c.entries
+                    .iter()
+                    .find(|e| e.repo.eq_ignore_ascii_case(&locked.repo))
+            })
             .map_or_else(|| locked.security.clone(), |e| e.security.clone());
         if safe_only && !is_safe(&security) {
             continue;
         }
-        let mut report =
-            UpdateReport { repo: locked.repo.clone(), from: locked.commit.clone(), to: locked.commit.clone(), updated: false, error: None };
+        let mut report = UpdateReport {
+            repo: locked.repo.clone(),
+            from: locked.commit.clone(),
+            to: locked.commit.clone(),
+            updated: false,
+            error: None,
+        };
         let result = (|| -> Result<()> {
             let info = repo_info(&locked.repo)?;
             report.to = head_commit(&locked.repo, &info.default_branch)?;
             if report.to != locked.commit {
-                install_at(ws, &locked.repo, &report.to, info.license.map(|l| l.spdx_id), security)?;
+                install_at(
+                    ws,
+                    &locked.repo,
+                    &report.to,
+                    info.license.map(|l| l.spdx_id),
+                    security,
+                )?;
                 report.updated = true;
             }
             Ok(())
@@ -314,7 +380,11 @@ pub fn remove(ws: &Workspace, repo: &str) -> Result<()> {
     let repo = normalize_repo(repo)?;
     let path = ws.root.join(LOCK_FILE);
     let mut lock = Lock::load(&path)?;
-    let Some(i) = lock.repos.iter().position(|r| r.repo.eq_ignore_ascii_case(&repo)) else {
+    let Some(i) = lock
+        .repos
+        .iter()
+        .position(|r| r.repo.eq_ignore_ascii_case(&repo))
+    else {
         bail!("{repo} is not installed in this workspace");
     };
     let locked = lock.repos.remove(i);
@@ -338,11 +408,21 @@ fn remove_skill_dirs(ws: &Workspace, names: &[String]) -> Result<()> {
 }
 
 /// Downloads `repo` at `commit`, swaps in its skill folders and records it in the lock file.
-fn install_at(ws: &Workspace, repo: &str, commit: &str, license: Option<String>, security: String) -> Result<InstallReport> {
+fn install_at(
+    ws: &Workspace,
+    repo: &str,
+    commit: &str,
+    license: Option<String>,
+    security: String,
+) -> Result<InstallReport> {
     let mut archive = tempfile::tempfile().context("creating a temporary file for the download")?;
     let url = format!("https://codeload.github.com/{repo}/tar.gz/{commit}");
-    let mut body = fetch(&url, "application/octet-stream")?.into_body().into_reader().take(MAX_ARCHIVE + 1);
-    let size = std::io::copy(&mut body, &mut archive).with_context(|| format!("downloading {url}"))?;
+    let mut body = fetch(&url, "application/octet-stream")?
+        .into_body()
+        .into_reader()
+        .take(MAX_ARCHIVE + 1);
+    let size =
+        std::io::copy(&mut body, &mut archive).with_context(|| format!("downloading {url}"))?;
     if size > MAX_ARCHIVE {
         bail!("{repo} is over 200 MB as an archive; VeeCut does not install repos that large");
     }
@@ -359,26 +439,41 @@ fn install_at(ws: &Workspace, repo: &str, commit: &str, license: Option<String>,
         Ok(())
     })?;
     if skills.is_empty() {
-        bail!("{repo} has no SKILL.md, so it is not an agent skill VeeCut can install. See how to use it: https://github.com/{repo}#readme");
+        bail!(
+            "{repo} has no SKILL.md, so it is not an agent skill VeeCut can install. See how to use it: https://github.com/{repo}#readme"
+        );
     }
 
     // Folder names: frontmatter `name:`, else the folder name; `<owner>-<name>` on a clash.
     let lock_path = ws.root.join(LOCK_FILE);
     let mut lock = Lock::load(&lock_path)?;
-    let mine: HashSet<String> = lock.get(repo).map(|r| r.skills.iter().cloned().collect()).unwrap_or_default();
+    let mine: HashSet<String> = lock
+        .get(repo)
+        .map(|r| r.skills.iter().cloned().collect())
+        .unwrap_or_default();
     let mut taken: HashSet<String> = HashSet::from(["veecut".to_string()]);
     for base in ws.skill_dirs() {
         if let Ok(entries) = fs::read_dir(&base) {
             taken.extend(entries.filter_map(|e| e.ok()?.file_name().into_string().ok()));
         }
     }
-    taken.extend(lock.repos.iter().filter(|r| !r.repo.eq_ignore_ascii_case(repo)).flat_map(|r| r.skills.iter().cloned()));
+    taken.extend(
+        lock.repos
+            .iter()
+            .filter(|r| !r.repo.eq_ignore_ascii_case(repo))
+            .flat_map(|r| r.skills.iter().cloned()),
+    );
     taken.retain(|n| !mine.contains(n));
-    let (owner, repo_name) = repo.split_once('/').expect("normalized repos are owner/name");
+    let (owner, repo_name) = repo
+        .split_once('/')
+        .expect("normalized repos are owner/name");
     let mut names = Vec::new();
     for (dir, text) in &skills {
         let base = frontmatter_name(text)
-            .or_else(|| dir.file_name().and_then(|n| safe_name(&n.to_string_lossy())))
+            .or_else(|| {
+                dir.file_name()
+                    .and_then(|n| safe_name(&n.to_string_lossy()))
+            })
             .or_else(|| safe_name(repo_name))
             .unwrap_or_else(|| "skill".into());
         let mut name = base.clone();
@@ -401,7 +496,9 @@ fn install_at(ws: &Workspace, repo: &str, commit: &str, license: Option<String>,
     let mut skipped = Vec::new();
     archive.rewind()?;
     for_each_file(&archive, |rel, size, reader| {
-        let owners: Vec<usize> = (0..skills.len()).filter(|&i| rel.starts_with(&skills[i].0)).collect();
+        let owners: Vec<usize> = (0..skills.len())
+            .filter(|&i| rel.starts_with(&skills[i].0))
+            .collect();
         if owners.is_empty() {
             return Ok(());
         }
@@ -412,7 +509,10 @@ fn install_at(ws: &Workspace, repo: &str, commit: &str, license: Option<String>,
         let mut data = Vec::new();
         reader.read_to_end(&mut data)?;
         for i in owners {
-            let dest = staging.path().join(&names[i]).join(rel.strip_prefix(&skills[i].0).expect("checked above"));
+            let dest = staging
+                .path()
+                .join(&names[i])
+                .join(rel.strip_prefix(&skills[i].0).expect("checked above"));
             fs::create_dir_all(dest.parent().expect("files sit in a folder"))?;
             fs::write(&dest, &data).with_context(|| format!("writing {}", dest.display()))?;
         }
@@ -435,22 +535,39 @@ fn install_at(ws: &Workspace, repo: &str, commit: &str, license: Option<String>,
         installed_at: Utc::now(),
     });
     lock.save(&lock_path)?;
-    Ok(InstallReport { repo: repo.to_string(), commit: commit.to_string(), skills: names, license, skipped })
+    Ok(InstallReport {
+        repo: repo.to_string(),
+        commit: commit.to_string(),
+        skills: names,
+        license,
+        skipped,
+    })
 }
 
 /// Calls `f(path inside the repo, size, contents)` for every regular file in a GitHub tarball,
 /// skipping `.git`, `node_modules`, links and any path that tries to leave the repo.
-fn for_each_file(archive: &fs::File, mut f: impl FnMut(&Path, u64, &mut dyn Read) -> Result<()>) -> Result<()> {
+fn for_each_file(
+    archive: &fs::File,
+    mut f: impl FnMut(&Path, u64, &mut dyn Read) -> Result<()>,
+) -> Result<()> {
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
-    for entry in tar.entries().context("the download is not a valid tar.gz archive")? {
+    for entry in tar
+        .entries()
+        .context("the download is not a valid tar.gz archive")?
+    {
         let mut entry = entry.context("reading the archive")?;
         if !entry.header().entry_type().is_file() {
             continue;
         }
-        let path = entry.path().context("reading a path in the archive")?.into_owned();
+        let path = entry
+            .path()
+            .context("reading a path in the archive")?
+            .into_owned();
         // The first component is the `<repo>-<commit>/` folder GitHub wraps everything in.
         let rel: PathBuf = path.components().skip(1).collect();
-        let safe = rel.components().all(|c| matches!(c, Component::Normal(n) if n != ".git" && n != "node_modules"));
+        let safe = rel
+            .components()
+            .all(|c| matches!(c, Component::Normal(n) if n != ".git" && n != "node_modules"));
         if !safe || rel.as_os_str().is_empty() {
             continue;
         }
@@ -468,7 +585,8 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         if entry.file_type()?.is_dir() {
             copy_dir(&entry.path(), &target)?;
         } else {
-            fs::copy(entry.path(), &target).with_context(|| format!("copying to {}", target.display()))?;
+            fs::copy(entry.path(), &target)
+                .with_context(|| format!("copying to {}", target.display()))?;
         }
     }
     Ok(())
@@ -491,7 +609,13 @@ fn safe_name(raw: &str) -> Option<String> {
     let name: String = raw
         .trim()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let name = name.trim_matches(['-', '.']);
     (!name.is_empty()).then(|| name.to_string())
@@ -500,12 +624,24 @@ fn safe_name(raw: &str) -> Option<String> {
 /// `owner/name` from `owner/name`, a GitHub URL or `owner/name.git`.
 fn normalize_repo(input: &str) -> Result<String> {
     let s = input.trim();
-    let s = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")).unwrap_or(s);
+    let s = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
     let s = s.strip_prefix("www.").unwrap_or(s);
     let s = s.strip_prefix("github.com/").unwrap_or(s);
     let mut parts = s.split('/');
-    let valid = |p: &str| !p.is_empty() && p != "." && p != ".." && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    match (parts.next(), parts.next().map(|r| r.trim_end_matches(".git"))) {
+    let valid = |p: &str| {
+        !p.is_empty()
+            && p != "."
+            && p != ".."
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    match (
+        parts.next(),
+        parts.next().map(|r| r.trim_end_matches(".git")),
+    ) {
         (Some(owner), Some(name)) if valid(owner) && valid(name) => Ok(format!("{owner}/{name}")),
         _ => bail!("{input:?} is not a GitHub repository; write it as owner/name"),
     }
@@ -525,7 +661,10 @@ static HTTP: LazyLock<ureq::Agent> = LazyLock::new(|| {
 fn fetch(url: &str, accept: &str) -> Result<ureq::http::Response<ureq::Body>> {
     let mut req = HTTP.get(url).header("Accept", accept);
     if url.starts_with("https://api.github.com/") {
-        if let Some(token) = std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.trim().is_empty()) {
+        if let Some(token) = std::env::var("GITHUB_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+        {
             req = req.header("Authorization", format!("Bearer {}", token.trim()));
         }
     }
@@ -542,7 +681,9 @@ fn fetch(url: &str, accept: &str) -> Result<ureq::http::Response<ureq::Body>> {
 /// The commit sha a branch or tag points to.
 fn head_commit(repo: &str, git_ref: &str) -> Result<String> {
     let url = format!("https://api.github.com/repos/{repo}/commits/{git_ref}");
-    let sha = fetch(&url, "application/vnd.github.sha")?.body_mut().read_to_string()?;
+    let sha = fetch(&url, "application/vnd.github.sha")?
+        .body_mut()
+        .read_to_string()?;
     let sha = sha.trim();
     if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
         bail!("GitHub returned an unexpected commit id for {repo}");
@@ -587,7 +728,10 @@ fn parse_readme(text: &str) -> (Vec<Category>, Vec<Entry>) {
     let mut columns: Option<Vec<String>> = None;
     for line in text.lines() {
         let line = line.trim();
-        if let Some(id) = line.strip_prefix("<a id=\"").and_then(|r| r.split('"').next()) {
+        if let Some(id) = line
+            .strip_prefix("<a id=\"")
+            .and_then(|r| r.split('"').next())
+        {
             anchor = Some(id.to_string());
             continue;
         }
@@ -597,7 +741,10 @@ fn parse_readme(text: &str) -> (Vec<Category>, Vec<Entry>) {
                 Some(id) if id.starts_with("made-with") => Section::Opus,
                 Some(id) if id.starts_with("type-") => {
                     let id = id["type-".len()..].to_string();
-                    categories.push(Category { id: id.clone(), title: title.trim().to_string() });
+                    categories.push(Category {
+                        id: id.clone(),
+                        title: title.trim().to_string(),
+                    });
                     Section::Category(id)
                 }
                 _ => Section::Other,
@@ -616,17 +763,32 @@ fn parse_readme(text: &str) -> (Vec<Category>, Vec<Entry>) {
             columns = Some(cells.iter().map(|c| c.to_lowercase()).collect());
             continue;
         };
-        if cells.iter().all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':'))) {
+        if cells
+            .iter()
+            .all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':')))
+        {
             continue;
         }
-        let col = |names: &[&str]| cols.iter().position(|c| names.contains(&c.as_str())).and_then(|i| cells.get(i));
-        let Some(url) = col(&["repo", "skill"]).and_then(|c| link_target(c)) else { continue };
-        let Ok(repo) = normalize_repo(&url) else { continue };
+        let col = |names: &[&str]| {
+            cols.iter()
+                .position(|c| names.contains(&c.as_str()))
+                .and_then(|i| cells.get(i))
+        };
+        let Some(url) = col(&["repo", "skill"]).and_then(|c| link_target(c)) else {
+            continue;
+        };
+        let Ok(repo) = normalize_repo(&url) else {
+            continue;
+        };
         let entry = Entry {
             url: format!("https://github.com/{repo}"),
             repo,
-            stars: col(&["stars", "★"]).and_then(|c| parse_stars(c)).unwrap_or(0),
-            description: col(&["what it does", "description"]).cloned().unwrap_or_default(),
+            stars: col(&["stars", "★"])
+                .and_then(|c| parse_stars(c))
+                .unwrap_or(0),
+            description: col(&["what it does", "description"])
+                .cloned()
+                .unwrap_or_default(),
             security: col(&["security"]).map(|c| grade(c)).unwrap_or_default(),
             categories: match &section {
                 Section::Category(id) => vec![id.clone()],
@@ -663,7 +825,10 @@ fn parse_readme(text: &str) -> (Vec<Category>, Vec<Entry>) {
 /// Cells of a markdown table row, with `\|` turned back into `|`.
 fn split_row(line: &str) -> Vec<String> {
     let inner = line.trim().trim_start_matches('|');
-    let inner = inner.strip_suffix('|').filter(|s| !s.ends_with('\\')).unwrap_or(inner);
+    let inner = inner
+        .strip_suffix('|')
+        .filter(|s| !s.ends_with('\\'))
+        .unwrap_or(inner);
     let mut cells = vec![String::new()];
     let mut chars = inner.chars().peekable();
     while let Some(c) = chars.next() {
@@ -705,7 +870,10 @@ fn parse_stars(cell: &str) -> Option<u32> {
             None => (s.as_str(), 1.0),
         },
     };
-    num.trim().parse::<f64>().ok().map(|n| (n * scale).round() as u32)
+    num.trim()
+        .parse::<f64>()
+        .ok()
+        .map(|n| (n * scale).round() as u32)
 }
 
 #[cfg(test)]
@@ -771,32 +939,66 @@ mod tests {
         assert_eq!(
             categories,
             vec![
-                Category { id: "general".into(), title: "🧱 Frameworks & toolkits".into() },
-                Category { id: "promo".into(), title: "📣 Promo & demos".into() },
+                Category {
+                    id: "general".into(),
+                    title: "🧱 Frameworks & toolkits".into()
+                },
+                Category {
+                    id: "promo".into(),
+                    title: "📣 Promo & demos".into()
+                },
             ]
         );
         let get = |repo: &str| entries.iter().find(|e| e.repo == repo).unwrap();
         assert_eq!(entries.len(), 7, "{entries:#?}");
         let hyper = get("heygen-com/hyperframes");
-        assert_eq!((hyper.stars, hyper.security.as_str(), hyper.tested), (73_600, "SAFE", false));
+        assert_eq!(
+            (hyper.stars, hyper.security.as_str(), hyper.tested),
+            (73_600, "SAFE", false)
+        );
         assert_eq!(hyper.url, "https://github.com/heygen-com/hyperframes");
         let vibe = get("vibe-motion/skills");
         assert_eq!((vibe.stars, vibe.tested), (1_400, true));
         assert_eq!(vibe.categories, vec!["general", "promo"]);
         assert_eq!(vibe.description, "agent skills for vibe motion");
         let explainroo = get("vincentsch/explainroo");
-        assert_eq!((explainroo.stars, explainroo.tested, explainroo.categories.clone()), (600, true, vec!["promo".to_string()]));
-        assert_eq!(get("kangarooking/director-skills").description, "导演Skill | Director Skills: Open-source Agent Skills");
+        assert_eq!(
+            (
+                explainroo.stars,
+                explainroo.tested,
+                explainroo.categories.clone()
+            ),
+            (600, true, vec!["promo".to_string()])
+        );
+        assert_eq!(
+            get("kangarooking/director-skills").description,
+            "导演Skill | Director Skills: Open-source Agent Skills"
+        );
         assert_eq!(get("someone/risky").security, "CAUTION");
         assert_eq!(get("someone/new").security, "pending");
         let opus = get("JohnHeibel/PDoomVideo");
         assert_eq!((opus.stars, opus.categories.is_empty()), (2_600, true));
         assert_eq!(parse_stars("1,315"), Some(1_315));
 
-        let catalog = Catalog { source_commit: "x".into(), fetched_at: Utc::now(), categories, entries };
-        let promo: Vec<&str> = recommended(&catalog, VideoKind::Promo, 10).iter().map(|e| e.repo.as_str()).collect();
-        assert_eq!(promo, ["vibe-motion/skills", "vincentsch/explainroo"], "SAFE only, tested first, then stars");
-        let found: Vec<&str> = search(&catalog, "director", Some("frameworks")).iter().map(|e| e.repo.as_str()).collect();
+        let catalog = Catalog {
+            source_commit: "x".into(),
+            fetched_at: Utc::now(),
+            categories,
+            entries,
+        };
+        let promo: Vec<&str> = recommended(&catalog, VideoKind::Promo, 10)
+            .iter()
+            .map(|e| e.repo.as_str())
+            .collect();
+        assert_eq!(
+            promo,
+            ["vibe-motion/skills", "vincentsch/explainroo"],
+            "SAFE only, tested first, then stars"
+        );
+        let found: Vec<&str> = search(&catalog, "director", Some("frameworks"))
+            .iter()
+            .map(|e| e.repo.as_str())
+            .collect();
         assert_eq!(found, ["kangarooking/director-skills"]);
     }
 
@@ -823,9 +1025,15 @@ mod tests {
 
     #[test]
     fn names_and_repos_are_sanitized() {
-        assert_eq!(frontmatter_name("---\nname: \"My Skill/../x\"\ndescription: d\n---\n# x"), Some("My-Skill-..-x".into()));
+        assert_eq!(
+            frontmatter_name("---\nname: \"My Skill/../x\"\ndescription: d\n---\n# x"),
+            Some("My-Skill-..-x".into())
+        );
         assert_eq!(frontmatter_name("# no frontmatter\nname: x"), None);
-        assert_eq!(normalize_repo("https://github.com/remotion-dev/skills.git").unwrap(), "remotion-dev/skills");
+        assert_eq!(
+            normalize_repo("https://github.com/remotion-dev/skills.git").unwrap(),
+            "remotion-dev/skills"
+        );
         assert_eq!(normalize_repo("github.com/a/b/tree/main").unwrap(), "a/b");
         assert!(normalize_repo("../etc").is_err());
         assert!(normalize_repo("justone").is_err());

@@ -67,16 +67,29 @@ pub struct Workspace {
 
 impl Workspace {
     /// Creates the workspace layout in `root`. Safe to run again: it never overwrites the user's
-    /// style, rules, `.env` or `.gitignore`, keeps their own text in AGENTS.md, CLAUDE.md and
-    /// opencode.json, and refreshes the built-in skill.
+    /// style, rules, `.env` or `.gitignore`, keeps their own text in AGENTS.md, CLAUDE.md,
+    /// GEMINI.md and opencode.json, and refreshes the built-in skill.
     pub fn init(root: &Path) -> Result<Workspace> {
-        let root = std::path::absolute(root).with_context(|| format!("resolving {}", root.display()))?;
+        let root =
+            std::path::absolute(root).with_context(|| format!("resolving {}", root.display()))?;
         let ws = Workspace { root };
-        for dir in [".veecut", "inbox", "outbox", "projects", "my-sounds/music", "my-sounds/sfx", ".agents/skills", ".claude/skills"] {
+        for dir in [
+            ".veecut",
+            "inbox",
+            "outbox",
+            "projects",
+            "my-sounds/music",
+            "my-sounds/sfx",
+            ".agents/skills",
+            ".claude/skills",
+        ] {
             let dir = ws.root.join(dir);
             fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        write_new(&ws.root.join(MARKER), "# Marks this folder as a VeeCut workspace.\nversion = 1\n")?;
+        write_new(
+            &ws.root.join(MARKER),
+            "# Marks this folder as a VeeCut workspace.\nversion = 1\n",
+        )?;
         if !ws.style_path().exists() {
             Style::default().save(&ws.style_path())?;
         }
@@ -85,6 +98,8 @@ impl Workspace {
         write_new(&ws.root.join(".gitignore"), GITIGNORE)?;
         upsert_block(&ws.root.join("AGENTS.md"), AGENTS_BLOCK)?;
         ensure_line(&ws.root.join("CLAUDE.md"), "@AGENTS.md")?;
+        // Gemini CLI reads GEMINI.md and follows its @file imports.
+        ensure_line(&ws.root.join("GEMINI.md"), "@./AGENTS.md")?;
         register_opencode_mcp(&ws.root.join("opencode.json"))?;
         ws.refresh_skill()?;
         Ok(ws)
@@ -92,9 +107,12 @@ impl Workspace {
 
     /// The workspace holding `start`, found by walking up to the folder with `.veecut/workspace.toml`.
     pub fn open(start: &Path) -> Result<Workspace> {
-        let start = std::path::absolute(start).with_context(|| format!("resolving {}", start.display()))?;
+        let start =
+            std::path::absolute(start).with_context(|| format!("resolving {}", start.display()))?;
         match start.ancestors().find(|dir| dir.join(MARKER).is_file()) {
-            Some(root) => Ok(Workspace { root: root.to_path_buf() }),
+            Some(root) => Ok(Workspace {
+                root: root.to_path_buf(),
+            }),
             None => bail!(
                 "{} is not inside a VeeCut workspace. Run `veecut init` in your videos folder first.",
                 start.display()
@@ -124,7 +142,10 @@ impl Workspace {
 
     /// Skill folders: `.agents/skills` (OpenCode, Codex, Gemini) and `.claude/skills` (Claude Code).
     pub fn skill_dirs(&self) -> [PathBuf; 2] {
-        [self.root.join(".agents/skills"), self.root.join(".claude/skills")]
+        [
+            self.root.join(".agents/skills"),
+            self.root.join(".claude/skills"),
+        ]
     }
 
     /// Rewrites `<skills dir>/veecut/` from the copy built into VeeCut, removing stale files.
@@ -148,17 +169,31 @@ impl Workspace {
 
     /// A new, saved project in `projects/<slug>/`. The slug is the name plus today's date, with
     /// `-2`, `-3`... when taken. The workspace style is not applied; see [`Style::apply_to`].
-    pub fn create_project(&self, name: &str, kind: VideoKind, canvas: Canvas) -> Result<(PathBuf, Project)> {
+    pub fn create_project(
+        &self,
+        name: &str,
+        kind: VideoKind,
+        canvas: Canvas,
+    ) -> Result<(PathBuf, Project)> {
         let name = match name.trim() {
             "" => "Untitled",
             n => n,
         };
-        let base = format!("{}-{}", slugify(name), chrono::Local::now().format("%Y-%m-%d"));
+        let base = format!(
+            "{}-{}",
+            slugify(name),
+            chrono::Local::now().format("%Y-%m-%d")
+        );
         let projects = self.projects();
-        fs::create_dir_all(&projects).with_context(|| format!("creating {}", projects.display()))?;
+        fs::create_dir_all(&projects)
+            .with_context(|| format!("creating {}", projects.display()))?;
         let mut n = 1;
         let dir = loop {
-            let slug = if n == 1 { base.clone() } else { format!("{base}-{n}") };
+            let slug = if n == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
+            };
             let dir = projects.join(slug);
             match fs::create_dir(&dir) {
                 Ok(()) => break dir,
@@ -173,8 +208,15 @@ impl Workspace {
 
     /// Probes `file` and adds it to the project as `asset-N`; returns the id. Files inside the
     /// workspace are stored relative to the project folder so the workspace can move. Does not save.
-    pub fn add_asset(&self, project: &mut Project, project_dir: &Path, file: &Path, role: AssetRole) -> Result<String> {
-        let file = std::path::absolute(file).with_context(|| format!("resolving {}", file.display()))?;
+    pub fn add_asset(
+        &self,
+        project: &mut Project,
+        project_dir: &Path,
+        file: &Path,
+        role: AssetRole,
+    ) -> Result<String> {
+        let file =
+            std::path::absolute(file).with_context(|| format!("resolving {}", file.display()))?;
         let info = media::probe(&file)?;
         let project_dir = std::path::absolute(project_dir)?;
         let path = if file.starts_with(&self.root) && project_dir.starts_with(&self.root) {
@@ -208,7 +250,9 @@ impl Workspace {
             let history = project_dir.join(".history");
             push_snapshot(&history, &file)?;
             match fs::remove_dir_all(history.join("redo")) {
-                Err(e) if e.kind() != ErrorKind::NotFound => return Err(e).context("clearing redo steps"),
+                Err(e) if e.kind() != ErrorKind::NotFound => {
+                    return Err(e).context("clearing redo steps");
+                }
                 _ => {}
             }
         }
@@ -232,12 +276,17 @@ impl Workspace {
         let mut found = Vec::new();
         for entry in read_dir_or_empty(&self.projects())? {
             let dir = entry.path();
-            let Ok(meta) = fs::metadata(dir.join(PROJECT_FILE)) else { continue };
+            let Ok(meta) = fs::metadata(dir.join(PROJECT_FILE)) else {
+                continue;
+            };
             let slug = entry.file_name().to_string_lossy().into_owned();
             found.push((meta.modified().ok(), slug, dir));
         }
         found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        Ok(found.into_iter().map(|(_, slug, dir)| (slug, dir)).collect())
+        Ok(found
+            .into_iter()
+            .map(|(_, slug, dir)| (slug, dir))
+            .collect())
     }
 
     /// The most recently modified video file directly in `inbox/`.
@@ -252,7 +301,16 @@ impl Workspace {
                     .and_then(|e| e.to_str())
                     .is_some_and(|e| VIDEO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
             })
-            .filter_map(|p| Some((fs::metadata(&p).ok().filter(|m| m.is_file())?.modified().ok()?, p)))
+            .filter_map(|p| {
+                Some((
+                    fs::metadata(&p)
+                        .ok()
+                        .filter(|m| m.is_file())?
+                        .modified()
+                        .ok()?,
+                    p,
+                ))
+            })
             .max_by(|a, b| a.0.cmp(&b.0))
             .map(|(_, p)| p)
     }
@@ -265,7 +323,10 @@ impl Workspace {
             .iter()
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                name.strip_prefix(&prefix)?.strip_suffix(".mp4")?.parse::<u32>().ok()
+                name.strip_prefix(&prefix)?
+                    .strip_suffix(".mp4")?
+                    .parse::<u32>()
+                    .ok()
             })
             .max()
             .unwrap_or(0);
@@ -275,7 +336,9 @@ impl Workspace {
 
 /// Moves the newest snapshot in `from` into project.json after saving the current version to `to`.
 fn step(project_dir: &Path, from: &Path, to: &Path, what: &str) -> Result<Project> {
-    let Some(snapshot) = snapshots(from)?.pop() else { bail!("nothing to {what} in {}", project_dir.display()) };
+    let Some(snapshot) = snapshots(from)?.pop() else {
+        bail!("nothing to {what} in {}", project_dir.display())
+    };
     let project = Project::load(&snapshot)?;
     let file = project_dir.join(PROJECT_FILE);
     if file.exists() {
@@ -290,7 +353,12 @@ fn snapshots(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut found: Vec<(u64, PathBuf)> = read_dir_or_empty(dir)?
         .into_iter()
         .filter_map(|e| {
-            let n = e.file_name().to_str()?.strip_suffix(".json")?.parse().ok()?;
+            let n = e
+                .file_name()
+                .to_str()?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()?;
             Some((n, e.path()))
         })
         .collect();
@@ -307,7 +375,8 @@ fn push_snapshot(dir: &Path, file: &Path) -> Result<()> {
         .unwrap_or(0)
         + 1;
     let target = dir.join(format!("{next:06}.json"));
-    fs::copy(file, &target).with_context(|| format!("saving undo snapshot {}", target.display()))?;
+    fs::copy(file, &target)
+        .with_context(|| format!("saving undo snapshot {}", target.display()))?;
     let over = (existing.len() + 1).saturating_sub(HISTORY_KEEP);
     for old in &existing[..over] {
         fs::remove_file(old).with_context(|| format!("pruning {}", old.display()))?;
@@ -326,8 +395,14 @@ fn read_dir_or_empty(dir: &Path) -> Result<Vec<fs::DirEntry>> {
 /// Writes `text` only when `path` does not exist yet.
 fn write_new(path: &Path, text: &str) -> Result<()> {
     use std::io::Write;
-    match fs::OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(mut f) => f.write_all(text.as_bytes()).with_context(|| format!("writing {}", path.display())),
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut f) => f
+            .write_all(text.as_bytes())
+            .with_context(|| format!("writing {}", path.display())),
         Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e).with_context(|| format!("creating {}", path.display())),
     }
@@ -359,7 +434,11 @@ fn ensure_line(path: &Path, line: &str) -> Result<()> {
     if old.lines().any(|l| l.trim() == line) {
         return Ok(());
     }
-    let new = if old.trim().is_empty() { format!("{line}\n") } else { format!("{}\n\n{line}\n", old.trim_end()) };
+    let new = if old.trim().is_empty() {
+        format!("{line}\n")
+    } else {
+        format!("{}\n\n{line}\n", old.trim_end())
+    };
     fs::write(path, new).with_context(|| format!("writing {}", path.display()))
 }
 
@@ -376,8 +455,14 @@ fn register_opencode_mcp(path: &Path) -> Result<()> {
             _ => return Ok(()),
         }
     };
-    let mcp = config.as_object_mut().expect("checked above").entry("mcp").or_insert_with(|| serde_json::json!({}));
-    let Some(mcp) = mcp.as_object_mut() else { return Ok(()) };
+    let mcp = config
+        .as_object_mut()
+        .expect("checked above")
+        .entry("mcp")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(mcp) = mcp.as_object_mut() else {
+        return Ok(());
+    };
     mcp.insert(
         "veecut".into(),
         serde_json::json!({ "type": "local", "command": ["veecut", "mcp"], "enabled": true }),
@@ -401,7 +486,11 @@ fn slugify(name: &str) -> String {
     }
     slug.truncate(40);
     let slug = slug.trim_end_matches('-');
-    if slug.is_empty() { "video".into() } else { slug.into() }
+    if slug.is_empty() {
+        "video".into()
+    } else {
+        slug.into()
+    }
 }
 
 /// `to` written relative to the folder `from` (both absolute and sharing a root).
@@ -426,30 +515,57 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ws = Workspace::init(tmp.path()).unwrap();
         for kind in VideoKind::ALL {
-            assert!(ws.root.join(format!(".agents/skills/veecut/workflows/{}.md", kind.slug())).is_file());
+            assert!(
+                ws.root
+                    .join(format!(
+                        ".agents/skills/veecut/workflows/{}.md",
+                        kind.slug()
+                    ))
+                    .is_file()
+            );
         }
         fs::write(ws.style_path(), "pace = \"tight\"\n").unwrap();
         fs::write(ws.root.join(".env"), "GROQ_API_KEY=mine\n").unwrap();
         fs::write(ws.root.join(".gitignore"), "custom\n").unwrap();
-        fs::write(ws.root.join("AGENTS.md"), format!("My notes.\n\n{AGENTS_BLOCK}")).unwrap();
+        fs::write(
+            ws.root.join("AGENTS.md"),
+            format!("My notes.\n\n{AGENTS_BLOCK}"),
+        )
+        .unwrap();
         let skill = ws.root.join(".claude/skills/veecut/SKILL.md");
         fs::write(&skill, "edited").unwrap();
         fs::write(ws.root.join(".agents/skills/veecut/stale.md"), "old").unwrap();
 
         let again = Workspace::init(&ws.root).unwrap();
         assert_eq!(again, ws);
-        assert_eq!(fs::read_to_string(ws.style_path()).unwrap(), "pace = \"tight\"\n");
-        assert_eq!(fs::read_to_string(ws.root.join(".env")).unwrap(), "GROQ_API_KEY=mine\n");
-        assert_eq!(fs::read_to_string(ws.root.join(".gitignore")).unwrap(), "custom\n");
+        assert_eq!(
+            fs::read_to_string(ws.style_path()).unwrap(),
+            "pace = \"tight\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.root.join(".env")).unwrap(),
+            "GROQ_API_KEY=mine\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.root.join(".gitignore")).unwrap(),
+            "custom\n"
+        );
         let agents = fs::read_to_string(ws.root.join("AGENTS.md")).unwrap();
         assert!(agents.starts_with("My notes."));
         assert_eq!(agents.matches(BLOCK_START).count(), 1);
-        assert_eq!(fs::read_to_string(ws.root.join("CLAUDE.md")).unwrap(), "@AGENTS.md\n");
+        assert_eq!(
+            fs::read_to_string(ws.root.join("CLAUDE.md")).unwrap(),
+            "@AGENTS.md\n"
+        );
         assert_eq!(fs::read_to_string(&skill).unwrap(), SKILL_FILES[0].1);
         assert!(!ws.root.join(".agents/skills/veecut/stale.md").exists());
         let opencode: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(ws.root.join("opencode.json")).unwrap()).unwrap();
-        assert_eq!(opencode["mcp"]["veecut"]["command"], serde_json::json!(["veecut", "mcp"]));
+            serde_json::from_str(&fs::read_to_string(ws.root.join("opencode.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            opencode["mcp"]["veecut"]["command"],
+            serde_json::json!(["veecut", "mcp"])
+        );
         assert_eq!(Workspace::open(&ws.inbox()).unwrap(), ws);
     }
 
@@ -457,8 +573,16 @@ mod tests {
     fn undo_then_redo_walks_the_history() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = Workspace::init(tmp.path()).unwrap();
-        let (dir, mut project) = ws.create_project("My Talk!", VideoKind::Podcast, Canvas::landscape()).unwrap();
-        assert!(dir.file_name().unwrap().to_str().unwrap().starts_with("my-talk-"));
+        let (dir, mut project) = ws
+            .create_project("My Talk!", VideoKind::Podcast, Canvas::landscape())
+            .unwrap();
+        assert!(
+            dir.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("my-talk-")
+        );
         assert!(ws.undo(&dir).is_err());
         for name in ["two", "three"] {
             project.name = name.into();
@@ -476,7 +600,13 @@ mod tests {
         ws.save_project(&dir, &project).unwrap();
         assert!(ws.redo(&dir).is_err(), "a new save clears redo");
         assert_eq!(Project::load(&dir.join(PROJECT_FILE)).unwrap().name, "four");
-        assert_eq!(ws.list_projects().unwrap(), vec![(dir.file_name().unwrap().to_string_lossy().into_owned(), dir.clone())]);
+        assert_eq!(
+            ws.list_projects().unwrap(),
+            vec![(
+                dir.file_name().unwrap().to_string_lossy().into_owned(),
+                dir.clone()
+            )]
+        );
         assert_eq!(ws.next_draft_path("talk"), ws.outbox().join("talk-v1.mp4"));
         fs::write(ws.outbox().join("talk-v3.mp4"), "").unwrap();
         assert_eq!(ws.next_draft_path("talk"), ws.outbox().join("talk-v4.mp4"));
@@ -489,15 +619,30 @@ mod tests {
         let ws = Workspace::init(tmp.path()).unwrap();
         let clip = ws.inbox().join("clip.mp4");
         let made = std::process::Command::new(ffmpeg)
-            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=64x64:duration=1", "-f", "lavfi", "-i", "sine=duration=1"])
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=duration=1",
+            ])
             .args(["-shortest", "-pix_fmt", "yuv420p"])
             .arg(&clip)
             .status()
             .unwrap();
         assert!(made.success());
         assert_eq!(ws.newest_inbox_video(), Some(clip.clone()));
-        let (dir, mut project) = ws.create_project("a", VideoKind::Vlog, Canvas::vertical()).unwrap();
-        let id = ws.add_asset(&mut project, &dir, &clip, AssetRole::Source).unwrap();
+        let (dir, mut project) = ws
+            .create_project("a", VideoKind::Vlog, Canvas::vertical())
+            .unwrap();
+        let id = ws
+            .add_asset(&mut project, &dir, &clip, AssetRole::Source)
+            .unwrap();
         let asset = project.asset(&id).unwrap();
         assert_eq!(asset.path, Path::new("../../inbox/clip.mp4"));
         assert!(project.asset_path(&dir, asset).is_file());

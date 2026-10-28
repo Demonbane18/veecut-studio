@@ -32,8 +32,23 @@ pub fn mix_audio(
     if normalize {
         let tmp = tempfile::NamedTempFile::new().context("creating a temp wav for loudness")?;
         run_mix(&clips, tmp.path(), dur, project)?;
-        let measured = measure(tmp.path(), project.audio.target_lufs, project.audio.true_peak_db)?;
-        apply_loudnorm(tmp.path(), out_wav, &measured, project.audio.target_lufs, project.audio.true_peak_db)?;
+        let measured = measure(
+            tmp.path(),
+            project.audio.target_lufs,
+            project.audio.true_peak_db,
+        )?;
+        apply_loudnorm(
+            tmp.path(),
+            out_wav,
+            &measured,
+            project.audio.target_lufs,
+            project.audio.true_peak_db,
+        )?;
+        makeup_shortfall(
+            out_wav,
+            project.audio.target_lufs,
+            project.audio.true_peak_db,
+        )?;
     } else {
         run_mix(&clips, out_wav, dur, project)?;
     }
@@ -79,9 +94,15 @@ fn collect(project: &Project, dir: &Path, start: f64, end: f64) -> Result<Vec<Au
                 continue;
             }
             let Some(asset) = project.asset(&clip.asset) else {
-                bail!("clip {} uses asset {:?}, which the project does not have", item.id, clip.asset);
+                bail!(
+                    "clip {} uses asset {:?}, which the project does not have",
+                    item.id,
+                    clip.asset
+                );
             };
-            if asset.kind == AssetKind::Image || (asset.kind == AssetKind::Video && !asset.has_audio) {
+            if asset.kind == AssetKind::Image
+                || (asset.kind == AssetKind::Video && !asset.has_audio)
+            {
                 continue;
             }
             let hear_start = item.start.max(start);
@@ -94,8 +115,13 @@ fn collect(project: &Project, dir: &Path, start: f64, end: f64) -> Result<Vec<Au
             // Narration and podcast mics live on audio tracks with role Voice. They are speech:
             // side-chain key and voice cleanup, never ducked.
             let voice = main || asset.role == AssetRole::Voice;
-            let (overlap_in, overlap_out) = if main { overlaps(&track.items, i) } else { (0.0, 0.0) };
-            let (fade_in, fade_out_st, fade_out) = window_fades(item, clip, local, hear_dur, overlap_in, overlap_out);
+            let (overlap_in, overlap_out) = if main {
+                overlaps(&track.items, i)
+            } else {
+                (0.0, 0.0)
+            };
+            let (fade_in, fade_out_st, fade_out) =
+                window_fades(item, clip, local, hear_dur, overlap_in, overlap_out);
             let path = project.asset_path(dir, asset);
             if !path.is_file() {
                 bail!("{} does not exist (asset {})", path.display(), asset.id);
@@ -120,12 +146,26 @@ fn collect(project: &Project, dir: &Path, start: f64, end: f64) -> Result<Vec<Au
 
 fn overlaps(items: &[Item], i: usize) -> (f64, f64) {
     let item = &items[i];
-    let inn = if i > 0 { (items[i - 1].end() - item.start).max(0.0) } else { 0.0 };
-    let out = items.get(i + 1).map(|n| (item.end() - n.start).max(0.0)).unwrap_or(0.0);
+    let inn = if i > 0 {
+        (items[i - 1].end() - item.start).max(0.0)
+    } else {
+        0.0
+    };
+    let out = items
+        .get(i + 1)
+        .map(|n| (item.end() - n.start).max(0.0))
+        .unwrap_or(0.0);
     (inn, out)
 }
 
-fn window_fades(item: &Item, clip: &Clip, local: f64, hear_dur: f64, overlap_in: f64, overlap_out: f64) -> (f64, f64, f64) {
+fn window_fades(
+    item: &Item,
+    clip: &Clip,
+    local: f64,
+    hear_dur: f64,
+    overlap_in: f64,
+    overlap_out: f64,
+) -> (f64, f64, f64) {
     let fade_in_len = clip.fade_in.max(overlap_in);
     let fade_out_len = clip.fade_out.max(overlap_out);
     let in_d = (fade_in_len - local).clamp(0.0, hear_dur);
@@ -143,7 +183,12 @@ fn window_fades(item: &Item, clip: &Clip, local: f64, hear_dur: f64, overlap_in:
 }
 
 fn run_mix(clips: &[Aud], out: &Path, dur: f64, project: &Project) -> Result<()> {
-    let graph = graph(clips, dur, project.audio.voice_cleanup, project.audio.duck_db);
+    let graph = graph(
+        clips,
+        dur,
+        project.audio.voice_cleanup,
+        project.audio.duck_db,
+    );
     let mut cmd = media::ffmpeg_command()?;
     cmd.arg("-y");
     for c in clips {
@@ -210,7 +255,9 @@ fn graph(clips: &[Aud], dur: f64, cleanup: bool, duck_db: f32) -> String {
         tails.push(y);
     }
     let mixed = mix_into(&mut parts, &tails, "mix").unwrap_or_else(|| "[c0]".into());
-    parts.push(format!("{mixed}apad,atrim=start=0:end={dur:.6},asetpts=PTS-STARTPTS[out]"));
+    parts.push(format!(
+        "{mixed}apad,atrim=start=0:end={dur:.6},asetpts=PTS-STARTPTS[out]"
+    ));
     parts.join(";")
 }
 
@@ -230,7 +277,9 @@ fn mix_into(parts: &mut Vec<String>, labels: &[String], name: &str) -> Option<St
 }
 
 fn clip_chain(i: usize, c: &Aud, label: &str) -> String {
-    let mut chain = vec![format!("[{i}:a]aformat=sample_rates=48000:channel_layouts=stereo")];
+    let mut chain = vec![format!(
+        "[{i}:a]aformat=sample_rates=48000:channel_layouts=stereo"
+    )];
     for t in atempo_chain(c.speed) {
         chain.push(format!("atempo={t:.6}"));
     }
@@ -239,7 +288,11 @@ fn clip_chain(i: usize, c: &Aud, label: &str) -> String {
         chain.push(format!("afade=t=in:st=0:d={:.6}", c.fade_in));
     }
     if c.fade_out > 1e-4 {
-        chain.push(format!("afade=t=out:st={:.6}:d={:.6}", c.fade_out_st.max(0.0), c.fade_out));
+        chain.push(format!(
+            "afade=t=out:st={:.6}:d={:.6}",
+            c.fade_out_st.max(0.0),
+            c.fade_out
+        ));
     }
     let ms = (c.delay * 1000.0).round().max(0.0) as i64;
     if ms > 0 {
@@ -260,20 +313,40 @@ struct Measured {
 fn measure(path: &Path, target: f32, tp: f32) -> Result<Measured> {
     let mut cmd = Command::new(ffmpeg()?);
     cmd.args(["-hide_banner", "-nostdin", "-i"]).arg(path);
-    cmd.arg("-af").arg(format!("loudnorm=I={target}:TP={tp}:LRA=11:print_format=json"));
+    cmd.arg("-af").arg(format!(
+        "loudnorm=I={target}:TP={tp}:LRA=11:print_format=json"
+    ));
     cmd.args(["-f", "null", "-"]);
-    let out = cmd.output().with_context(|| format!("measuring loudness of {}", path.display()))?;
+    let out = cmd
+        .output()
+        .with_context(|| format!("measuring loudness of {}", path.display()))?;
     let err = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
-        bail!("measuring loudness of {} failed: {}", path.display(), tail(&err));
+        bail!(
+            "measuring loudness of {} failed: {}",
+            path.display(),
+            tail(&err)
+        );
     }
-    let start = err.find('{').ok_or_else(|| anyhow!("loudnorm did not print measurements for {}", path.display()))?;
-    let end = err.rfind('}').ok_or_else(|| anyhow!("loudnorm measurements were cut off"))?;
+    parse_measured(&err)
+}
+
+fn parse_measured(err: &str) -> Result<Measured> {
+    let start = err
+        .find('{')
+        .ok_or_else(|| anyhow!("loudnorm did not print measurements"))?;
+    let end = err
+        .rfind('}')
+        .ok_or_else(|| anyhow!("loudnorm measurements were cut off"))?;
     let json: serde_json::Value = serde_json::from_str(&err[start..=end])
         .context("loudnorm measurements were not valid JSON")?;
     let num = |k: &str| -> Result<f64> {
         json.get(k)
-            .and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64()))
+            .and_then(|v| {
+                v.as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| v.as_f64())
+            })
             .ok_or_else(|| anyhow!("loudnorm did not report {k}"))
     };
     Ok(Measured {
@@ -286,15 +359,171 @@ fn measure(path: &Path, target: f32, tp: f32) -> Result<Measured> {
 }
 
 fn apply_loudnorm(src: &Path, dst: &Path, m: &Measured, target: f32, tp: f32) -> Result<()> {
+    // AAC reconstructs transients above the PCM peak. Leave 1 dB under the ceiling, and
+    // compress when a straight gain cannot hit both loudness and that safer peak.
+    let safe_tp = tp - 1.0;
+    let linear = linear_fits(m.i, m.tp, target, safe_tp);
+    let loud_tp = if linear { tp } else { safe_tp }.clamp(-9.0, -0.1);
     let filter = format!(
-        "loudnorm=I={target}:TP={tp}:LRA=11:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset={}:linear=true",
-        m.i, m.tp, m.lra, m.thresh, m.offset
+        "loudnorm=I={target}:TP={loud_tp}:LRA=11:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset={}:linear={},{}",
+        m.i,
+        m.tp,
+        m.lra,
+        m.thresh,
+        m.offset,
+        if linear { "true" } else { "false" },
+        limiter_chain(safe_tp)
     );
     let mut cmd = media::ffmpeg_command()?;
     cmd.args(["-y", "-i"]).arg(src);
-    cmd.args(["-af", &filter, "-f", "wav", "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le"]);
+    cmd.args([
+        "-af",
+        &filter,
+        "-f",
+        "wav",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-c:a",
+        "pcm_s16le",
+    ]);
     cmd.arg(dst);
     media::run(&mut cmd).with_context(|| format!("normalizing loudness to {}", dst.display()))?;
+    Ok(())
+}
+
+/// Gain that moves loudness toward `target_i` without crossing `ceiling`.
+/// Zero when the file is already within 0.4 LU, or when the peak has no room.
+fn makeup_db(measured_i: f64, measured_tp: f64, target_i: f32, ceiling: f32) -> f64 {
+    let gap = target_i as f64 - measured_i;
+    if gap <= 0.4 {
+        return 0.0;
+    }
+    // 0.4 dB under the ceiling so the encode is not sitting on the limit.
+    let room = (ceiling as f64 - 0.4) - measured_tp;
+    if room < 0.15 {
+        return 0.0;
+    }
+    gap.min(room)
+}
+
+fn makeup_shortfall(wav: &Path, target: f32, ceiling: f32) -> Result<()> {
+    let m = measure_wav(wav, target, ceiling)?;
+    let gain = makeup_db(m.i, m.tp, target, ceiling);
+    if gain < 0.15 {
+        return Ok(());
+    }
+    let tmp = tempfile::NamedTempFile::new().context("creating a temp wav for makeup gain")?;
+    let mut cmd = media::ffmpeg_command()?;
+    cmd.args(["-y", "-f", "wav", "-i"]).arg(wav);
+    cmd.args([
+        "-af",
+        &format!("volume={gain:.3}dB"),
+        "-f",
+        "wav",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+    ]);
+    cmd.arg(tmp.path());
+    media::run(&mut cmd).with_context(|| format!("raising {} by {gain:.1} dB", wav.display()))?;
+    std::fs::copy(tmp.path(), wav).with_context(|| format!("replacing {}", wav.display()))?;
+    Ok(())
+}
+
+fn measure_wav(path: &Path, target: f32, tp: f32) -> Result<Measured> {
+    let mut cmd = Command::new(ffmpeg()?);
+    cmd.args(["-hide_banner", "-nostdin", "-f", "wav", "-i"])
+        .arg(path);
+    cmd.arg("-af").arg(format!(
+        "loudnorm=I={target}:TP={tp}:LRA=11:print_format=json"
+    ));
+    cmd.args(["-f", "null", "-"]);
+    let out = cmd
+        .output()
+        .with_context(|| format!("measuring loudness of {}", path.display()))?;
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        bail!(
+            "measuring loudness of {} failed: {}",
+            path.display(),
+            tail(&err)
+        );
+    }
+    parse_measured(&err)
+}
+fn linear_fits(measured_i: f64, measured_tp: f64, target_i: f32, safe_tp: f32) -> bool {
+    let predicted = measured_tp + (target_i as f64 - measured_i);
+    predicted <= safe_tp as f64 + 0.05
+}
+
+fn limiter_chain(limit_db: f32) -> String {
+    let limit = 10f64.powf(limit_db as f64 / 20.0).clamp(0.0625, 1.0);
+    format!(
+        "aresample=192000,alimiter=limit={limit:.6}:attack=1:release=50:level=disabled:latency=true,aresample=48000"
+    )
+}
+
+/// If AAC pushed the file over `ceiling_db`, limit the mix lower and remux until it fits.
+pub(crate) fn fit_true_peak(mp4: &Path, wav: &Path, ceiling_db: f32) -> Result<()> {
+    let mut limit_db = ceiling_db - 1.0;
+    for _ in 0..3 {
+        let Some(tp) = file_peak(mp4)? else {
+            return Ok(());
+        };
+        if tp <= ceiling_db + 0.05 {
+            return Ok(());
+        }
+        limit_db -= (tp - ceiling_db) + 0.5;
+        remux_limited(mp4, wav, limit_db)?;
+    }
+    if let Some(tp) = file_peak(mp4)? {
+        if tp > ceiling_db + 0.1 {
+            bail!(
+                "exported audio true peak is {tp:.1} dBTP, above the {ceiling_db:.1} dBTP ceiling"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn file_peak(path: &Path) -> Result<Option<f32>> {
+    Ok(crate::qa::check(path)?.true_peak_db)
+}
+
+fn remux_limited(mp4: &Path, wav: &Path, limit_db: f32) -> Result<()> {
+    let tmp = tempfile::Builder::new()
+        .suffix(".mp4")
+        .tempfile()
+        .context("creating a temp file to remux limited audio")?;
+    let filter = format!("[1:a]{}[a]", limiter_chain(limit_db));
+    let mut cmd = media::ffmpeg_command()?;
+    cmd.args(["-y", "-i"])
+        .arg(mp4)
+        .args(["-f", "wav", "-i"])
+        .arg(wav);
+    cmd.args([
+        "-filter_complex",
+        &filter,
+        "-map",
+        "0:v:0",
+        "-map",
+        "[a]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+    ]);
+    cmd.arg(tmp.path());
+    media::run(&mut cmd)
+        .with_context(|| format!("remuxing {} under {limit_db:.1} dBTP", mp4.display()))?;
+    std::fs::copy(tmp.path(), mp4).with_context(|| format!("replacing {}", mp4.display()))?;
     Ok(())
 }
 
@@ -318,7 +547,8 @@ fn write_silence(path: &Path, seconds: f64) -> Result<()> {
     hdr.extend_from_slice(&16u16.to_le_bytes());
     hdr.extend_from_slice(b"data");
     hdr.extend_from_slice(&data_len.to_le_bytes());
-    let mut f = std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    let mut f =
+        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
     use std::io::Write;
     f.write_all(&hdr)?;
     let zeros = [0u8; 8192];
@@ -332,5 +562,103 @@ fn write_silence(path: &Path, seconds: f64) -> Result<()> {
 }
 
 fn tail(s: &str) -> String {
-    s.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+    s.lines()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{linear_fits, makeup_db};
+
+    #[test]
+    fn linear_gain_fits_only_when_the_peak_stays_under_the_ceiling() {
+        // -10 LUFS at -1 dBTP, pulled down to -14, lands at -5. Under a -2 ceiling.
+        assert!(linear_fits(-10.0, -1.0, -14.0, -2.0));
+        // -20 LUFS at -1 dBTP, pushed up to -14, lands at +5. Linear cannot do both.
+        assert!(!linear_fits(-20.0, -1.0, -14.0, -2.0));
+    }
+
+    #[test]
+    fn makeup_uses_unused_peak_room_and_leaves_speech() {
+        // Vlog: -15.8 LUFS, -3.9 dBTP, ceiling -1. 1.8 dB of gain still fits.
+        let gain = makeup_db(-15.8, -3.9, -14.0, -1.0);
+        assert!((gain - 1.8).abs() < 0.05, "{gain}");
+        // Speech already on target. Do not touch it.
+        assert_eq!(makeup_db(-14.1, -3.2, -14.0, -1.0), 0.0);
+        // Peak already against the ceiling. Stay quieter.
+        assert_eq!(makeup_db(-18.0, -1.2, -14.0, -1.0), 0.0);
+    }
+
+    #[test]
+    fn fit_true_peak_lowers_a_hot_aac_file() {
+        if crate::media::ffmpeg().is_err() {
+            return;
+        }
+        let dir = std::path::Path::new("/tmp/veecut-fixtures");
+        let _ = std::fs::create_dir_all(dir);
+        let wav = dir.join("hot-fit.wav");
+        let mp4 = dir.join("hot-fit.mp4");
+        let mut cmd = crate::media::ffmpeg_command().unwrap();
+        cmd.args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc=0.99*sin(2*PI*1000*t):s=48000:d=3",
+            "-f",
+            "wav",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+        ]);
+        cmd.arg(&wav);
+        crate::media::run(&mut cmd).unwrap();
+        let mut cmd = crate::media::ffmpeg_command().unwrap();
+        cmd.args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=320x180:r=30:d=4",
+            "-f",
+            "wav",
+            "-i",
+        ]);
+        cmd.arg(&wav);
+        cmd.args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+        ]);
+        cmd.arg(&mp4);
+        crate::media::run(&mut cmd).unwrap();
+        let before = crate::qa::check(&mp4).unwrap().true_peak_db.unwrap();
+        let ceiling = before - 1.5;
+        super::fit_true_peak(&mp4, &wav, ceiling).unwrap();
+        let after = crate::qa::check(&mp4).unwrap();
+        println!(
+            "hot file before {before:.1} dBTP, ceiling {ceiling:.1}, after {:?} lufs {:?}",
+            after.true_peak_db, after.integrated_lufs
+        );
+        assert!(
+            after.true_peak_db.unwrap() <= ceiling + 0.05,
+            "{:?}",
+            after.true_peak_db
+        );
+    }
 }

@@ -82,13 +82,24 @@ pub(crate) fn max_decode_scale(clip: &Clip) -> f32 {
         .as_ref()
         .map(|k| k.from_scale.max(k.to_scale).max(1.0))
         .unwrap_or(1.0);
-    let z = clip.zooms.iter().map(|z| z.scale.max(1.0)).fold(1.0, f32::max);
+    let z = clip
+        .zooms
+        .iter()
+        .map(|z| z.scale.max(1.0))
+        .fold(1.0, f32::max);
     (kb * z).clamp(1.0, 4.0)
 }
 
 /// Cover crop of a source picture into an output aspect, centered on `focus` and clamped
 /// so the window stays inside the source.
-pub(crate) fn cover_crop(src_w: f64, src_h: f64, out_w: f64, out_h: f64, focus_x: f64, focus_y: f64) -> CropRect {
+pub(crate) fn cover_crop(
+    src_w: f64,
+    src_h: f64,
+    out_w: f64,
+    out_h: f64,
+    focus_x: f64,
+    focus_y: f64,
+) -> CropRect {
     let src_w = src_w.max(1.0);
     let src_h = src_h.max(1.0);
     let out_aspect = out_w.max(1.0) / out_h.max(1.0);
@@ -121,7 +132,13 @@ pub(crate) fn crop_px(c: CropRect, src_w: u32, src_h: u32) -> (u32, u32, u32, u3
 }
 
 /// Window inside a decoded frame for `scale` (1 = the whole frame), centered on a pixel.
-pub(crate) fn zoom_window(dec_w: f64, dec_h: f64, scale: f64, fx: f64, fy: f64) -> (f64, f64, f64, f64) {
+pub(crate) fn zoom_window(
+    dec_w: f64,
+    dec_h: f64,
+    scale: f64,
+    fx: f64,
+    fy: f64,
+) -> (f64, f64, f64, f64) {
     let scale = scale.max(1.0);
     let w = (dec_w / scale).clamp(1.0, dec_w.max(1.0));
     let h = (dec_h / scale).clamp(1.0, dec_h.max(1.0));
@@ -144,7 +161,11 @@ pub(crate) fn peak_at_cut(t: f64, cut: f64, duration: f64) -> f32 {
     }
     let half = duration * 0.5;
     let d = (t - cut).abs();
-    if d >= half { 0.0 } else { (1.0 - d / half) as f32 }
+    if d >= half {
+        0.0
+    } else {
+        (1.0 - d / half) as f32
+    }
 }
 
 pub(crate) fn fade_gain(local: f64, duration: f64, fade_in: f64, fade_out: f64) -> f32 {
@@ -299,7 +320,13 @@ mod tests {
     use crate::project::LookPreset;
 
     fn zoom(at: f64, duration: f64, scale: f32, ease: f64) -> Zoom {
-        Zoom { at, duration, scale, focus: None, ease }
+        Zoom {
+            at,
+            duration,
+            scale,
+            focus: None,
+            ease,
+        }
     }
 
     #[test]
@@ -323,7 +350,11 @@ mod tests {
     fn cover_crop_clamps_focus_near_edge() {
         let edge = cover_crop(1920.0, 1080.0, 1080.0, 1920.0, 0.95, 0.5);
         let aspect = 1080.0 / 1920.0;
-        assert!((edge.w / edge.h - aspect).abs() < 1e-6, "crop aspect {}", edge.w / edge.h);
+        assert!(
+            (edge.w / edge.h - aspect).abs() < 1e-6,
+            "crop aspect {}",
+            edge.w / edge.h
+        );
         assert!(
             (edge.x + edge.w - 1920.0).abs() < 1e-4,
             "focus 0.95 should pin the crop to the right edge, got x={}",
@@ -331,7 +362,10 @@ mod tests {
         );
         assert!(edge.y.abs() < 1e-4);
         let mid = cover_crop(1920.0, 1080.0, 1080.0, 1920.0, 0.5, 0.5);
-        assert!(mid.x > 1.0 && mid.x + mid.w < 1919.0, "center crop should have side margins");
+        assert!(
+            mid.x > 1.0 && mid.x + mid.w < 1919.0,
+            "center crop should have side margins"
+        );
     }
 
     #[test]
@@ -341,8 +375,17 @@ mod tests {
             assert_eq!(map_color(&natural, [c, c, c]), [c, c, c]);
             assert_eq!(map_color(&natural, [c, 20, 200]), [c, 20, 200]);
         }
-        let bw = Look { preset: LookPreset::BlackWhite, ..Look::default() };
-        for rgb in [[0, 0, 0], [255, 0, 0], [0, 255, 0], [10, 20, 30], [255, 128, 16]] {
+        let bw = Look {
+            preset: LookPreset::BlackWhite,
+            ..Look::default()
+        };
+        for rgb in [
+            [0, 0, 0],
+            [255, 0, 0],
+            [0, 255, 0],
+            [10, 20, 30],
+            [255, 128, 16],
+        ] {
             let out = map_color(&bw, rgb);
             assert_eq!(out[0], out[1], "{rgb:?} -> {out:?}");
             assert_eq!(out[1], out[2]);
@@ -365,7 +408,10 @@ mod tests {
         for speed in [0.25, 0.3, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0] {
             let chain = atempo_chain(speed);
             let product: f64 = chain.iter().product();
-            assert!((product - speed).abs() < 1e-6, "{speed} -> {chain:?} = {product}");
+            assert!(
+                (product - speed).abs() < 1e-6,
+                "{speed} -> {chain:?} = {product}"
+            );
             for s in &chain {
                 assert!((0.5..=2.0).contains(s), "{speed} stage {s}");
             }

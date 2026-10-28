@@ -4,7 +4,10 @@
 //!
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args_os().skip(1);
-    let workspace = args.next().map(std::path::PathBuf::from).unwrap_or(std::env::current_dir()?);
+    let workspace = args
+        .next()
+        .map(std::path::PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
     let project = args.next().map(std::path::PathBuf::from);
     veecut_studio::run(veecut_studio::StudioOptions { workspace, project })
 }

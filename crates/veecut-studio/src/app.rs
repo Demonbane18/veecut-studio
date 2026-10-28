@@ -1,7 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -9,12 +13,33 @@ use std::{
 use anyhow::{Context, Result};
 use eframe::egui::{self, Color32, Key};
 use serde_json::json;
-use veecut_engine::{media, ops::{self, Op}, project::*, recipes::{self, EditReport, EditRequest}, render::{self, Quality, RenderOptions}, workspace::Workspace};
+use veecut_engine::{
+    media,
+    ops::{self, Op},
+    project::*,
+    recipes::{self, EditReport, EditRequest},
+    render::{self, Quality, RenderOptions},
+    workspace::Workspace,
+};
 
-use crate::{StudioOptions, capture::{self, Capture}, inspector, playback::{self, Playback}, services::Services, timeline::Timeline};
+use crate::{
+    StudioOptions,
+    capture::{self, Capture},
+    inspector,
+    playback::{self, Playback},
+    services::Services,
+    timeline::Timeline,
+};
 
 #[derive(Clone, Copy, PartialEq)]
-enum Tab { Media, Text, Captions, LookAudio, Skills, Agent }
+enum Tab {
+    Media,
+    Text,
+    Captions,
+    LookAudio,
+    Skills,
+    Agent,
+}
 
 struct Document {
     project: Project,
@@ -25,7 +50,9 @@ struct Document {
     redo: Vec<Project>,
 }
 impl Document {
-    fn dir(&self) -> &Path { self.path.parent().unwrap_or(Path::new(".")) }
+    fn dir(&self) -> &Path {
+        self.path.parent().unwrap_or(Path::new("."))
+    }
 }
 
 struct Export {
@@ -41,8 +68,17 @@ struct Export {
 }
 impl Default for Export {
     fn default() -> Self {
-        Self { open: false, canvas: Canvas::vertical(), final_quality: false, path: String::new(), running: false,
-            progress: Arc::new(std::sync::Mutex::new((String::new(), 0.0))), cancel: Arc::new(AtomicBool::new(false)), rx: None, result: None }
+        Self {
+            open: false,
+            canvas: Canvas::vertical(),
+            final_quality: false,
+            path: String::new(),
+            running: false,
+            progress: Arc::new(std::sync::Mutex::new((String::new(), 0.0))),
+            cancel: Arc::new(AtomicBool::new(false)),
+            rx: None,
+            result: None,
+        }
     }
 }
 
@@ -95,42 +131,90 @@ pub(crate) struct Studio {
 
 impl Studio {
     pub fn new(opts: StudioOptions) -> Result<Self> {
-        let workspace = Workspace::open(&opts.workspace).or_else(|_| Workspace::init(&opts.workspace))?;
+        let workspace =
+            Workspace::open(&opts.workspace).or_else(|_| Workspace::init(&opts.workspace))?;
         let services = Services::new(&workspace.root);
         let (wave_tx, wave_jobs) = mpsc::channel::<WaveJob>();
         let (wave_results, wave_rx) = mpsc::channel();
         thread::spawn(move || {
             while let Ok((epoch, id, path)) = wave_jobs.recv() {
-                let result = media::pcm_mono(&path, 8_000, None).map(|pcm| {
-                    pcm.chunks(80).map(|chunk| chunk.iter().fold(0.0_f32, |peak, sample| peak.max(sample.abs()))).collect()
-                }).map_err(|error| format!("waveform for {}: {error:#}", path.display()));
-                if wave_results.send((epoch, id, result)).is_err() { break; }
+                let result = media::pcm_mono(&path, 8_000, None)
+                    .map(|pcm| {
+                        pcm.chunks(80)
+                            .map(|chunk| {
+                                chunk
+                                    .iter()
+                                    .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+                            })
+                            .collect()
+                    })
+                    .map_err(|error| format!("waveform for {}: {error:#}", path.display()));
+                if wave_results.send((epoch, id, result)).is_err() {
+                    break;
+                }
             }
         });
         let projects = workspace.list_projects()?;
         let inbox = inbox_files(&workspace);
         let mut studio = Self {
-            workspace, document: None, selection: HashSet::new(), clipboard: Vec::new(), tab: Tab::Media,
-            timeline: Timeline::default(), playhead: 0.0, timecode: String::new(), playback: Playback::new(),
-            texture: None, preview_due: None, preview_size: [480, 270], last_poll: Instant::now(), notice: None,
-            services, export: Export::default(), waveforms: HashMap::new(), wave_pending: HashSet::new(),
-            wave_tx, wave_rx, epoch: 0, projects, inbox, new_name: "My edit".into(), new_kind: VideoKind::default(),
-            new_canvas: Canvas::vertical(), new_source: None, close_error: None, capture: None, auto: None,
+            workspace,
+            document: None,
+            selection: HashSet::new(),
+            clipboard: Vec::new(),
+            tab: Tab::Media,
+            timeline: Timeline::default(),
+            playhead: 0.0,
+            timecode: String::new(),
+            playback: Playback::new(),
+            texture: None,
+            preview_due: None,
+            preview_size: [480, 270],
+            last_poll: Instant::now(),
+            notice: None,
+            services,
+            export: Export::default(),
+            waveforms: HashMap::new(),
+            wave_pending: HashSet::new(),
+            wave_tx,
+            wave_rx,
+            epoch: 0,
+            projects,
+            inbox,
+            new_name: "My edit".into(),
+            new_kind: VideoKind::default(),
+            new_canvas: Canvas::vertical(),
+            new_source: None,
+            close_error: None,
+            capture: None,
+            auto: None,
         };
         if let Some(path) = opts.project {
-            let path = if path.is_absolute() || path.exists() { path } else { studio.workspace.root.join(path) };
+            let path = if path.is_absolute() || path.exists() {
+                path
+            } else {
+                studio.workspace.root.join(path)
+            };
             studio.open_project(path)?;
         }
-        studio.capture = Capture::from_env(studio.document.as_ref().map(|doc| doc.project.duration()))?;
+        studio.capture =
+            Capture::from_env(studio.document.as_ref().map(|doc| doc.project.duration()))?;
         Ok(studio)
     }
 
-    fn notice(&mut self, message: impl Into<String>) { self.notice = Some((message.into(), Instant::now())); }
+    fn notice(&mut self, message: impl Into<String>) {
+        self.notice = Some((message.into(), Instant::now()));
+    }
 
     fn open_project(&mut self, path: PathBuf) -> Result<()> {
         self.save()?;
-        let path = if path.is_dir() { path.join(PROJECT_FILE) } else { path };
-        let path = path.canonicalize().with_context(|| format!("finding project {}", path.display()))?;
+        let path = if path.is_dir() {
+            path.join(PROJECT_FILE)
+        } else {
+            path
+        };
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("finding project {}", path.display()))?;
         let project = Project::load(&path)?;
         project.validate()?;
         self.playback.stop();
@@ -141,7 +225,14 @@ impl Studio {
         self.epoch += 1;
         self.texture = None;
         self.playhead = 0.0;
-        self.document = Some(Document { project, modified: mtime(&path), path, dirty: None, undo: Vec::new(), redo: Vec::new() });
+        self.document = Some(Document {
+            project,
+            modified: mtime(&path),
+            path,
+            dirty: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        });
         self.invalidate_preview();
         self.queue_waveforms();
         Ok(())
@@ -155,8 +246,14 @@ impl Studio {
     fn queue_waveforms(&mut self) {
         if let Some(doc) = &self.document {
             for asset in &doc.project.assets {
-                if (asset.has_audio || asset.kind == AssetKind::Audio) && self.wave_pending.insert(asset.id.clone()) {
-                    let path = if asset.path.is_absolute() { asset.path.clone() } else { doc.dir().join(&asset.path) };
+                if (asset.has_audio || asset.kind == AssetKind::Audio)
+                    && self.wave_pending.insert(asset.id.clone())
+                {
+                    let path = if asset.path.is_absolute() {
+                        asset.path.clone()
+                    } else {
+                        doc.dir().join(&asset.path)
+                    };
                     let _ = self.wave_tx.send((self.epoch, asset.id.clone(), path));
                 }
             }
@@ -164,14 +261,22 @@ impl Studio {
     }
 
     fn apply(&mut self, changes: Vec<Op>) {
-        if changes.is_empty() { return; }
-        let Some(doc) = &mut self.document else { return; };
+        if changes.is_empty() {
+            return;
+        }
+        let Some(doc) = &mut self.document else {
+            return;
+        };
         let before = doc.project.clone();
         match ops::apply_all(&mut doc.project, &changes) {
             Ok(_) => {
-                if doc.project == before { return; }
+                if doc.project == before {
+                    return;
+                }
                 // ponytail: 100 in-memory undo steps; older saves remain in the workspace history.
-                if doc.undo.len() == 100 { doc.undo.remove(0); }
+                if doc.undo.len() == 100 {
+                    doc.undo.remove(0);
+                }
                 doc.undo.push(before);
                 doc.redo.clear();
                 doc.dirty = Some(Instant::now());
@@ -185,11 +290,17 @@ impl Studio {
     }
 
     fn undo(&mut self, redo: bool) {
-        let Some(doc) = &mut self.document else { return; };
+        let Some(doc) = &mut self.document else {
+            return;
+        };
         let snapshot = if redo { doc.redo.pop() } else { doc.undo.pop() };
         if let Some(snapshot) = snapshot {
             let current = std::mem::replace(&mut doc.project, snapshot);
-            if redo { doc.undo.push(current); } else { doc.redo.push(current); }
+            if redo {
+                doc.undo.push(current);
+            } else {
+                doc.redo.push(current);
+            }
             doc.dirty = Some(Instant::now());
             self.selection.retain(|id| doc.project.find(id).is_some());
             self.playhead = self.playhead.min(doc.project.duration());
@@ -210,21 +321,37 @@ impl Studio {
     }
 
     fn reload_external(&mut self, force: bool) -> Result<()> {
-        let Some(doc) = &mut self.document else { return Ok(()); };
+        let Some(doc) = &mut self.document else {
+            return Ok(());
+        };
         let modified = mtime(&doc.path);
-        if !force && modified == doc.modified { return Ok(()); }
+        if !force && modified == doc.modified {
+            return Ok(());
+        }
         let next = Project::load(&doc.path)?;
         next.validate()?;
         doc.modified = modified;
-        if next == doc.project { return Ok(()); }
+        if next == doc.project {
+            return Ok(());
+        }
         let mut message = "Updated by agent or CLI".to_owned();
         if doc.dirty.is_some() {
-            let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
-            let recovery = doc.dir().join(".history").join(format!("studio-unsaved-{stamp}.json"));
+            let stamp = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_nanos();
+            let recovery = doc
+                .dir()
+                .join(".history")
+                .join(format!("studio-unsaved-{stamp}.json"));
             doc.project.save(&recovery)?;
-            message = format!("Updated by agent. Your unsaved edit is in {}", recovery.display());
+            message = format!(
+                "Updated by agent. Your unsaved edit is in {}",
+                recovery.display()
+            );
         }
-        if doc.undo.len() == 100 { doc.undo.remove(0); }
+        if doc.undo.len() == 100 {
+            doc.undo.remove(0);
+        }
         doc.undo.push(std::mem::replace(&mut doc.project, next));
         doc.redo.clear();
         doc.dirty = None;
@@ -238,71 +365,140 @@ impl Studio {
 
     fn seek(&mut self, at: f64) {
         if let Some(doc) = &self.document {
-            self.playhead = doc.project.canvas.snap(at).clamp(0.0, doc.project.duration());
+            self.playhead = doc
+                .project
+                .canvas
+                .snap(at)
+                .clamp(0.0, doc.project.duration());
             self.invalidate_preview();
         }
     }
 
     fn toggle_play(&mut self, ctx: &egui::Context) {
         if self.playback.playing {
-            if let Some(at) = self.playback.position() { self.playhead = at; }
+            if let Some(at) = self.playback.position() {
+                self.playhead = at;
+            }
             self.invalidate_preview();
         } else if let Some(doc) = &self.document {
-            if doc.project.duration() <= 0.0 { return; }
-            if self.playhead >= doc.project.duration() { self.playhead = 0.0; }
+            if doc.project.duration() <= 0.0 {
+                return;
+            }
+            if self.playhead >= doc.project.duration() {
+                self.playhead = 0.0;
+            }
             self.preview_due = None;
-            self.playback.request(&doc.project, doc.dir(), self.playhead, self.preview_size, true, ctx);
+            self.playback.request(
+                &doc.project,
+                doc.dir(),
+                self.playhead,
+                self.preview_size,
+                true,
+                ctx,
+            );
         }
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
         let reload = self.services.poll();
-        if let Some(notice) = self.services.notice.take() { self.notice(notice); }
+        if let Some(notice) = self.services.notice.take() {
+            self.notice(notice);
+        }
         if reload {
-            if let Err(error) = self.reload_external(true) { self.notice(format!("{error:#}")); }
+            if let Err(error) = self.reload_external(true) {
+                self.notice(format!("{error:#}"));
+            }
         }
         while let Ok((epoch, id, result)) = self.wave_rx.try_recv() {
             if epoch == self.epoch {
-                match result { Ok(peaks) => { self.waveforms.insert(id, peaks); }, Err(error) => self.notice(error) }
+                match result {
+                    Ok(peaks) => {
+                        self.waveforms.insert(id, peaks);
+                    }
+                    Err(error) => self.notice(error),
+                }
             }
         }
         while let Ok(event) = self.playback.events.try_recv() {
             match event {
-                playback::Event::Ready(generation, player, from) if generation == self.playback.generation() => {
-                    self.playback.player = Some(player); self.playback.from = from;
+                playback::Event::Ready(generation, player, from)
+                    if generation == self.playback.generation() =>
+                {
+                    self.playback.player = Some(player);
+                    self.playback.from = from;
                 }
-                playback::Event::End(generation, at) if generation == self.playback.generation() => {
+                playback::Event::End(generation, at)
+                    if generation == self.playback.generation() =>
+                {
                     self.playhead = at;
                     self.playback.stop();
                 }
-                playback::Event::Error(generation, error) if generation == self.playback.generation() => {
-                    self.playback.stop(); self.notice(error);
+                playback::Event::Error(generation, error)
+                    if generation == self.playback.generation() =>
+                {
+                    self.playback.stop();
+                    self.notice(error);
                 }
                 _ => {}
             }
         }
-        let frame = self.playback.frame.lock().ok().and_then(|mut frame| frame.take());
+        let frame = self
+            .playback
+            .frame
+            .lock()
+            .ok()
+            .and_then(|mut frame| frame.take());
         if let Some(frame) = frame {
             if frame.generation == self.playback.generation() {
-                let image = egui::ColorImage::from_rgba_premultiplied([frame.pixels.width() as usize, frame.pixels.height() as usize], frame.pixels.data());
-                if let Some(texture) = &mut self.texture { texture.set(image, egui::TextureOptions::LINEAR); }
-                else { self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR)); }
+                let image = egui::ColorImage::from_rgba_premultiplied(
+                    [
+                        frame.pixels.width() as usize,
+                        frame.pixels.height() as usize,
+                    ],
+                    frame.pixels.data(),
+                );
+                if let Some(texture) = &mut self.texture {
+                    texture.set(image, egui::TextureOptions::LINEAR);
+                } else {
+                    self.texture =
+                        Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
+                }
             }
         }
         if let Some(at) = self.playback.position() {
-            self.playhead = self.document.as_ref().map(|doc| at.min(doc.project.duration())).unwrap_or(at);
+            self.playhead = self
+                .document
+                .as_ref()
+                .map(|doc| at.min(doc.project.duration()))
+                .unwrap_or(at);
         }
         if self.last_poll.elapsed() >= Duration::from_millis(500) {
             self.last_poll = Instant::now();
-            if let Err(error) = self.reload_external(false) { self.notice(format!("{error:#}")); }
+            if let Err(error) = self.reload_external(false) {
+                self.notice(format!("{error:#}"));
+            }
         }
-        if self.document.as_ref().and_then(|doc| doc.dirty).is_some_and(|dirty| dirty.elapsed() >= Duration::from_millis(800)) {
-            if let Err(error) = self.save() { self.notice(format!("Autosave failed: {error:#}")); }
+        if self
+            .document
+            .as_ref()
+            .and_then(|doc| doc.dirty)
+            .is_some_and(|dirty| dirty.elapsed() >= Duration::from_millis(800))
+        {
+            if let Err(error) = self.save() {
+                self.notice(format!("Autosave failed: {error:#}"));
+            }
         }
         if self.preview_due.is_some_and(|due| Instant::now() >= due) {
             self.preview_due = None;
             if let Some(doc) = &self.document {
-                self.playback.request(&doc.project, doc.dir(), self.playhead, self.preview_size, false, ctx);
+                self.playback.request(
+                    &doc.project,
+                    doc.dir(),
+                    self.playhead,
+                    self.preview_size,
+                    false,
+                    ctx,
+                );
             }
         }
         let auto = self.auto.as_mut().map(|auto| {
@@ -321,45 +517,102 @@ impl Studio {
             match result {
                 Ok(report) => {
                     let mut message = report.summary.join(" | ");
-                    if !report.review.is_empty() { message += &format!(" | {} item(s) need a look: {}", report.review.len(), report.review.join(" ")); }
+                    if !report.review.is_empty() {
+                        message += &format!(
+                            " | {} item(s) need a look: {}",
+                            report.review.len(),
+                            report.review.join(" ")
+                        );
+                    }
                     if let Some(dir) = report.projects.first() {
-                        if let Err(error) = self.open_project(dir.clone()) { message = format!("{error:#}"); }
+                        if let Err(error) = self.open_project(dir.clone()) {
+                            message = format!("{error:#}");
+                        }
                     }
                     self.notice(message);
                 }
                 Err(error) => self.notice(format!("Auto-edit failed: {error}")),
             }
         }
-        if self.auto.is_some() { ctx.request_repaint_after(Duration::from_millis(200)); }
-        if let Some(rx) = &self.export.rx {
-            if let Ok(result) = rx.try_recv() { self.export.running = false; self.export.result = Some(result); self.export.rx = None; }
+        if self.auto.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
-        ctx.request_repaint_after(Duration::from_millis(if self.playback.playing { 16 } else { 100 }));
+        if let Some(rx) = &self.export.rx {
+            if let Ok(result) = rx.try_recv() {
+                self.export.running = false;
+                self.export.result = Some(result);
+                self.export.rx = None;
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(if self.playback.playing {
+            16
+        } else {
+            100
+        }));
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("top").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("VeeCut Studio").clicked() {
-                    match self.save() { Ok(()) => { self.playback.stop(); self.document = None; self.projects = self.workspace.list_projects().unwrap_or_default(); self.inbox = inbox_files(&self.workspace); }, Err(error) => self.notice(format!("{error:#}")) }
+                    match self.save() {
+                        Ok(()) => {
+                            self.playback.stop();
+                            self.document = None;
+                            self.projects = self.workspace.list_projects().unwrap_or_default();
+                            self.inbox = inbox_files(&self.workspace);
+                        }
+                        Err(error) => self.notice(format!("{error:#}")),
+                    }
                 }
                 if let Some(doc) = &self.document {
-                    ui.separator(); ui.strong(&doc.project.name);
-                    let mut canvas = doc.project.canvas.clone();
-                    if canvas_combo(ui, "top_canvas", &mut canvas) { self.apply(vec![Op::Set { path: "/canvas".into(), value: json!(canvas) }]); }
-                    let undo = self.document.as_ref().is_some_and(|doc| !doc.undo.is_empty());
-                    let redo = self.document.as_ref().is_some_and(|doc| !doc.redo.is_empty());
-                    if ui.add_enabled(undo, egui::Button::new("Undo")).clicked() { self.undo(false); }
-                    if ui.add_enabled(redo, egui::Button::new("Redo")).clicked() { self.undo(true); }
-                    if ui.button("Export").clicked() { self.open_export(); }
                     ui.separator();
-                    let response = ui.add_sized([ui.available_width().max(120.0) - 60.0, 24.0], egui::TextEdit::singleline(&mut self.services.prompt).hint_text("Ask AI to edit this video..."));
-                    let enter = response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-                    if ui.add_enabled(!self.services.agent_busy, egui::Button::new("Ask AI")).clicked() || enter { self.run_agent(); }
+                    ui.strong(&doc.project.name);
+                    let mut canvas = doc.project.canvas.clone();
+                    if canvas_combo(ui, "top_canvas", &mut canvas) {
+                        self.apply(vec![Op::Set {
+                            path: "/canvas".into(),
+                            value: json!(canvas),
+                        }]);
+                    }
+                    let undo = self
+                        .document
+                        .as_ref()
+                        .is_some_and(|doc| !doc.undo.is_empty());
+                    let redo = self
+                        .document
+                        .as_ref()
+                        .is_some_and(|doc| !doc.redo.is_empty());
+                    if ui.add_enabled(undo, egui::Button::new("Undo")).clicked() {
+                        self.undo(false);
+                    }
+                    if ui.add_enabled(redo, egui::Button::new("Redo")).clicked() {
+                        self.undo(true);
+                    }
+                    if ui.button("Export").clicked() {
+                        self.open_export();
+                    }
+                    ui.separator();
+                    let response = ui.add_sized(
+                        [ui.available_width().max(120.0) - 60.0, 24.0],
+                        egui::TextEdit::singleline(&mut self.services.prompt)
+                            .hint_text("Ask AI to edit this video..."),
+                    );
+                    let enter =
+                        response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+                    if ui
+                        .add_enabled(!self.services.agent_busy, egui::Button::new("Ask AI"))
+                        .clicked()
+                        || enter
+                    {
+                        self.run_agent();
+                    }
                 }
             });
             if let Some((message, when)) = &self.notice {
-                if when.elapsed() < Duration::from_secs(12) { ui.colored_label(Color32::from_rgb(240, 202, 125), message); }
+                if when.elapsed() < Duration::from_secs(12) {
+                    ui.colored_label(Color32::from_rgb(240, 202, 125), message);
+                }
             }
         });
     }
@@ -412,8 +665,14 @@ impl Studio {
 
     fn create_project(&mut self) -> Result<()> {
         let source = self.new_source.as_ref().context("choose a source video")?;
-        let (dir, mut project) = self.workspace.create_project(self.new_name.trim(), self.new_kind, self.new_canvas.clone())?;
-        let asset = self.workspace.add_asset(&mut project, &dir, source, AssetRole::Source)?;
+        let (dir, mut project) = self.workspace.create_project(
+            self.new_name.trim(),
+            self.new_kind,
+            self.new_canvas.clone(),
+        )?;
+        let asset = self
+            .workspace
+            .add_asset(&mut project, &dir, source, AssetRole::Source)?;
         ops::apply(&mut project, &add_clip(asset, 0.0))?;
         self.workspace.save_project(&dir, &project)?;
         self.open_project(dir)
@@ -421,7 +680,9 @@ impl Studio {
 
     /// Runs the recipe for the chosen kind on a worker thread; `poll` opens the result.
     fn start_auto_edit(&mut self) {
-        let Some(source) = self.new_source.clone() else { return };
+        let Some(source) = self.new_source.clone() else {
+            return;
+        };
         let mut request = EditRequest::new(self.new_kind);
         request.sources = vec![source];
         request.canvas = Some(self.new_canvas.clone());
@@ -432,46 +693,102 @@ impl Studio {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let progress_tx = tx.clone();
-            let result = recipes::edit(&workspace, &request, &mut |line| { let _ = progress_tx.send(AutoMessage::Progress(line.to_string())); })
-                .map_err(|error| format!("{error:#}"));
+            let result = recipes::edit(&workspace, &request, &mut |line| {
+                let _ = progress_tx.send(AutoMessage::Progress(line.to_string()));
+            })
+            .map_err(|error| format!("{error:#}"));
             let _ = tx.send(AutoMessage::Done(result));
         });
-        self.auto = Some(AutoEdit { rx, last: "starting".into() });
+        self.auto = Some(AutoEdit {
+            rx,
+            last: "starting".into(),
+        });
     }
 
     fn left_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("library").default_size(260.0).size_range(210.0..=400.0).resizable(true).show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (tab, label) in [(Tab::Media,"Media"),(Tab::Text,"Text"),(Tab::Captions,"Captions"),(Tab::LookAudio,"Look & Audio"),(Tab::Skills,"Skills"),(Tab::Agent,"Agent")] {
-                    ui.selectable_value(&mut self.tab, tab, label);
-                }
-            });
-            ui.separator();
-            egui::ScrollArea::vertical().id_salt("library_scroll").show(ui, |ui| {
-                match self.tab {
-                    Tab::Media => self.media_ui(ui),
-                    Tab::Text => {
-                        ui.heading("Text presets");
-                        for (preset, label) in text_presets() {
-                            if ui.button(label).clicked() {
-                                self.apply(vec![Op::AddText { text: label.into(), start: self.playhead, duration: 3.0, preset, position: None, style: None, anim_in: None, anim_out: None, track: None }]);
+        egui::Panel::left("library")
+            .default_size(260.0)
+            .size_range(210.0..=400.0)
+            .resizable(true)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (tab, label) in [
+                        (Tab::Media, "Media"),
+                        (Tab::Text, "Text"),
+                        (Tab::Captions, "Captions"),
+                        (Tab::LookAudio, "Look & Audio"),
+                        (Tab::Skills, "Skills"),
+                        (Tab::Agent, "Agent"),
+                    ] {
+                        ui.selectable_value(&mut self.tab, tab, label);
+                    }
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt("library_scroll")
+                    .show(ui, |ui| match self.tab {
+                        Tab::Media => self.media_ui(ui),
+                        Tab::Text => {
+                            ui.heading("Text presets");
+                            for (preset, label) in text_presets() {
+                                if ui.button(label).clicked() {
+                                    self.apply(vec![Op::AddText {
+                                        text: label.into(),
+                                        start: self.playhead,
+                                        duration: 3.0,
+                                        preset,
+                                        position: None,
+                                        style: None,
+                                        anim_in: None,
+                                        anim_out: None,
+                                        track: None,
+                                    }]);
+                                }
                             }
                         }
-                    }
-                    Tab::Captions => { if let Some(doc) = &self.document { let changes = inspector::captions(ui, &doc.project); self.apply(changes); } }
-                    Tab::LookAudio => { if let Some(doc) = &self.document { let changes = inspector::look_audio(ui, &doc.project); self.apply(changes); } }
-                    Tab::Skills => { if let Some(doc) = &self.document { self.services.skills_ui(ui, &self.workspace, doc.project.kind); } }
-                    Tab::Agent => { if self.services.agent_ui(ui) { self.run_agent(); } }
-                }
+                        Tab::Captions => {
+                            if let Some(doc) = &self.document {
+                                let changes = inspector::captions(ui, &doc.project);
+                                self.apply(changes);
+                            }
+                        }
+                        Tab::LookAudio => {
+                            if let Some(doc) = &self.document {
+                                let changes = inspector::look_audio(ui, &doc.project);
+                                self.apply(changes);
+                            }
+                        }
+                        Tab::Skills => {
+                            if let Some(doc) = &self.document {
+                                self.services
+                                    .skills_ui(ui, &self.workspace, doc.project.kind);
+                            }
+                        }
+                        Tab::Agent => {
+                            if self.services.agent_ui(ui) {
+                                self.run_agent();
+                            }
+                        }
+                    });
             });
-        });
     }
 
     fn media_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Media library");
         if ui.button("Import files...").clicked() {
-            if let Some(paths) = rfd::FileDialog::new().add_filter("Media", &["mp4","mov","mkv","webm","m4v","mp3","wav","m4a","aac","flac","png","jpg","jpeg","webp"]).pick_files() {
-                if let Err(error) = self.import_files(paths) { self.notice(format!("{error:#}")); }
+            if let Some(paths) = rfd::FileDialog::new()
+                .add_filter(
+                    "Media",
+                    &[
+                        "mp4", "mov", "mkv", "webm", "m4v", "mp3", "wav", "m4a", "aac", "flac",
+                        "png", "jpg", "jpeg", "webp",
+                    ],
+                )
+                .pick_files()
+            {
+                if let Err(error) = self.import_files(paths) {
+                    self.notice(format!("{error:#}"));
+                }
             }
         }
         ui.small("Drag a file onto a track, or add at the playhead.");
@@ -479,97 +796,232 @@ impl Studio {
         if let Some(doc) = &self.document {
             for asset in &doc.project.assets {
                 ui.group(|ui| {
-                    ui.dnd_drag_source(egui::Id::unique(("asset", &asset.id)), asset.id.clone(), |ui| { ui.strong(filename(&asset.path)); });
-                    ui.small(format!("{:?} · {:.1}s · {}x{}", asset.kind, asset.duration, asset.width, asset.height));
-                    if ui.button("Add at playhead").clicked() { add = Some(asset.id.clone()); }
+                    ui.dnd_drag_source(
+                        egui::Id::unique(("asset", &asset.id)),
+                        asset.id.clone(),
+                        |ui| {
+                            ui.strong(filename(&asset.path));
+                        },
+                    );
+                    ui.small(format!(
+                        "{:?} · {:.1}s · {}x{}",
+                        asset.kind, asset.duration, asset.width, asset.height
+                    ));
+                    if ui.button("Add at playhead").clicked() {
+                        add = Some(asset.id.clone());
+                    }
                 });
             }
         }
-        if let Some(asset) = add { self.apply(vec![add_clip(asset, self.playhead)]); }
+        if let Some(asset) = add {
+            self.apply(vec![add_clip(asset, self.playhead)]);
+        }
     }
 
     fn import_files(&mut self, paths: Vec<PathBuf>) -> Result<()> {
-        let Some(doc) = &self.document else { return Ok(()); };
+        let Some(doc) = &self.document else {
+            return Ok(());
+        };
         let mut next = doc.project.clone();
         for path in paths {
-            let role = match path.extension().and_then(|extension| extension.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+            let role = match path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str()
+            {
                 "wav" | "mp3" | "m4a" | "aac" | "flac" => AssetRole::Music,
                 "png" | "jpg" | "jpeg" | "webp" => AssetRole::Image,
                 _ => AssetRole::Source,
             };
-            self.workspace.add_asset(&mut next, doc.dir(), &path, role)?;
+            self.workspace
+                .add_asset(&mut next, doc.dir(), &path, role)?;
         }
-        self.apply(vec![Op::Set { path: "/assets".into(), value: json!(next.assets) }]);
+        self.apply(vec![Op::Set {
+            path: "/assets".into(),
+            value: json!(next.assets),
+        }]);
         Ok(())
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         egui::CentralPanel::default().show(ui, |ui| {
-            let Some(doc) = &self.document else { return; };
+            let Some(doc) = &self.document else {
+                return;
+            };
             let aspect = doc.project.canvas.width as f32 / doc.project.canvas.height as f32;
             let fps = doc.project.canvas.fps;
             let duration = doc.project.duration();
-            let available = egui::vec2(ui.available_width(), (ui.available_height() - 48.0).max(40.0));
+            let available = egui::vec2(
+                ui.available_width(),
+                (ui.available_height() - 48.0).max(40.0),
+            );
             let width = available.x.min(available.y * aspect);
             let size = egui::vec2(width, width / aspect);
             let render_width = size.x.min(640.0).max(64.0) as u32;
             let render_height = (render_width as f32 / aspect).max(64.0) as u32;
             let new_size = [render_width, render_height];
-            if self.preview_size != new_size && !self.playback.playing { self.preview_size = new_size; self.preview_due = Some(Instant::now() + Duration::from_millis(120)); }
-            ui.allocate_ui_with_layout(available, egui::Layout::centered_and_justified(egui::Direction::TopDown), |ui| {
-                if let Some(texture) = &self.texture { ui.add(egui::Image::new(texture).fit_to_exact_size(size)); }
-                else { ui.label("Preparing preview..."); }
-            });
+            if self.preview_size != new_size && !self.playback.playing {
+                self.preview_size = new_size;
+                self.preview_due = Some(Instant::now() + Duration::from_millis(120));
+            }
+            ui.allocate_ui_with_layout(
+                available,
+                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                |ui| {
+                    if let Some(texture) = &self.texture {
+                        ui.add(egui::Image::new(texture).fit_to_exact_size(size));
+                    } else {
+                        ui.label("Preparing preview...");
+                    }
+                },
+            );
             ui.horizontal(|ui| {
-                if ui.button("|<").on_hover_text("Go to start").clicked() { self.seek(0.0); }
-                if ui.button("<").on_hover_text("Previous frame").clicked() { self.seek(self.playhead - 1.0 / fps); }
-                if ui.button(if self.playback.playing { "Pause" } else { "Play" }).clicked() { self.toggle_play(&ctx); }
-                if ui.button(">").on_hover_text("Next frame").clicked() { self.seek(self.playhead + 1.0 / fps); }
+                if ui.button("|<").on_hover_text("Go to start").clicked() {
+                    self.seek(0.0);
+                }
+                if ui.button("<").on_hover_text("Previous frame").clicked() {
+                    self.seek(self.playhead - 1.0 / fps);
+                }
+                if ui
+                    .button(if self.playback.playing {
+                        "Pause"
+                    } else {
+                        "Play"
+                    })
+                    .clicked()
+                {
+                    self.toggle_play(&ctx);
+                }
+                if ui.button(">").on_hover_text("Next frame").clicked() {
+                    self.seek(self.playhead + 1.0 / fps);
+                }
                 let id = egui::Id::unique("timecode");
-                if !ui.memory(|memory| memory.has_focus(id)) { self.timecode = format_timecode(self.playhead, fps); }
-                let response = ui.add(egui::TextEdit::singleline(&mut self.timecode).id(id).desired_width(105.0));
+                if !ui.memory(|memory| memory.has_focus(id)) {
+                    self.timecode = format_timecode(self.playhead, fps);
+                }
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.timecode)
+                        .id(id)
+                        .desired_width(105.0),
+                );
                 if response.lost_focus() {
-                    match parse_timecode(&self.timecode, fps) { Some(at) => self.seek(at), None => self.notice("Use timecode HH:MM:SS:FF") }
+                    match parse_timecode(&self.timecode, fps) {
+                        Some(at) => self.seek(at),
+                        None => self.notice("Use timecode HH:MM:SS:FF"),
+                    }
                 }
                 ui.label(format!("/ {}", format_timecode(duration, fps)));
-                if self.playback.playing && self.playback.player.is_none() { ui.spinner(); ui.small("Preparing audio..."); }
+                if self.playback.playing && self.playback.player.is_none() {
+                    ui.spinner();
+                    ui.small("Preparing audio...");
+                }
             });
         });
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.document.is_none() { return; }
-        let (mut pressed, modifiers, copied, pasted) = ctx.input(|input| (
-            input.events.iter().filter_map(|event| match event { egui::Event::Key { key, pressed: true, .. } => Some(*key), _ => None }).collect::<Vec<_>>(),
-            input.modifiers,
-            input.events.iter().any(|event| matches!(event, egui::Event::Copy)),
-            input.events.iter().any(|event| matches!(event, egui::Event::Paste(_))),
-        ));
-        if pressed.is_empty() && !copied && !pasted { return; }
-        if ctx.memory(|memory| memory.focused()).is_some_and(|id| egui::text_edit::TextEditState::load(ctx, id).is_some()) { return; }
-        if copied { self.copy(); pressed.retain(|key| *key != Key::C); }
-        if pasted { self.paste(); pressed.retain(|key| *key != Key::V); }
-        let fps = self.document.as_ref().map(|doc| doc.project.canvas.fps).unwrap_or(30.0);
+        if self.document.is_none() {
+            return;
+        }
+        let (mut pressed, modifiers, copied, pasted) = ctx.input(|input| {
+            (
+                input
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::Key {
+                            key, pressed: true, ..
+                        } => Some(*key),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                input.modifiers,
+                input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Copy)),
+                input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Paste(_))),
+            )
+        });
+        if pressed.is_empty() && !copied && !pasted {
+            return;
+        }
+        if ctx
+            .memory(|memory| memory.focused())
+            .is_some_and(|id| egui::text_edit::TextEditState::load(ctx, id).is_some())
+        {
+            return;
+        }
+        if copied {
+            self.copy();
+            pressed.retain(|key| *key != Key::C);
+        }
+        if pasted {
+            self.paste();
+            pressed.retain(|key| *key != Key::V);
+        }
+        let fps = self
+            .document
+            .as_ref()
+            .map(|doc| doc.project.canvas.fps)
+            .unwrap_or(30.0);
         for key in pressed {
             if modifiers.command {
                 match key {
-                    Key::Z => self.undo(modifiers.shift), Key::Y => self.undo(true),
-                    Key::A => if let Some(doc) = &self.document { self.selection = doc.project.tracks.iter().flat_map(|track| track.items.iter().map(|item| item.id.clone())).collect(); },
-                    Key::C => self.copy(), Key::V => self.paste(),
-                    Key::D => self.apply(self.selection.iter().map(|item| Op::Duplicate { item: item.clone() }).collect()),
+                    Key::Z => self.undo(modifiers.shift),
+                    Key::Y => self.undo(true),
+                    Key::A => {
+                        if let Some(doc) = &self.document {
+                            self.selection = doc
+                                .project
+                                .tracks
+                                .iter()
+                                .flat_map(|track| track.items.iter().map(|item| item.id.clone()))
+                                .collect();
+                        }
+                    }
+                    Key::C => self.copy(),
+                    Key::V => self.paste(),
+                    Key::D => self.apply(
+                        self.selection
+                            .iter()
+                            .map(|item| Op::Duplicate { item: item.clone() })
+                            .collect(),
+                    ),
                     _ => {}
                 }
             } else {
                 match key {
                     Key::Space | Key::K => self.toggle_play(ctx),
-                    Key::J => self.seek(self.playhead - 1.0), Key::L => self.seek(self.playhead + 1.0),
-                    Key::ArrowLeft => self.seek(self.playhead - if modifiers.shift { 5.0 } else { 1.0 / fps }),
-                    Key::ArrowRight => self.seek(self.playhead + if modifiers.shift { 5.0 } else { 1.0 / fps }),
+                    Key::J => self.seek(self.playhead - 1.0),
+                    Key::L => self.seek(self.playhead + 1.0),
+                    Key::ArrowLeft => {
+                        self.seek(self.playhead - if modifiers.shift { 5.0 } else { 1.0 / fps })
+                    }
+                    Key::ArrowRight => {
+                        self.seek(self.playhead + if modifiers.shift { 5.0 } else { 1.0 / fps })
+                    }
                     Key::Home | Key::Enter => self.seek(0.0),
-                    Key::End => if let Some(doc) = &self.document { self.seek(doc.project.duration()); },
-                    Key::S => self.split(None), Key::Q => self.split(Some(true)), Key::W => self.split(Some(false)),
-                    Key::Delete | Key::Backspace => self.apply(self.selection.iter().map(|item| Op::Delete { item: item.clone() }).collect()),
+                    Key::End => {
+                        if let Some(doc) = &self.document {
+                            self.seek(doc.project.duration());
+                        }
+                    }
+                    Key::S => self.split(None),
+                    Key::Q => self.split(Some(true)),
+                    Key::W => self.split(Some(false)),
+                    Key::Delete | Key::Backspace => self.apply(
+                        self.selection
+                            .iter()
+                            .map(|item| Op::Delete { item: item.clone() })
+                            .collect(),
+                    ),
                     Key::N => self.timeline.snapping = !self.timeline.snapping,
                     Key::Escape => self.selection.clear(),
                     _ => {}
@@ -580,29 +1032,66 @@ impl Studio {
 
     fn copy(&mut self) {
         if let Some(doc) = &self.document {
-            self.clipboard = doc.project.tracks.iter().flat_map(|track| track.items.iter().filter(|item| self.selection.contains(&item.id)).map(|item| (track.id.clone(), item.clone()))).collect();
+            self.clipboard = doc
+                .project
+                .tracks
+                .iter()
+                .flat_map(|track| {
+                    track
+                        .items
+                        .iter()
+                        .filter(|item| self.selection.contains(&item.id))
+                        .map(|item| (track.id.clone(), item.clone()))
+                })
+                .collect();
         }
     }
 
     fn paste(&mut self) {
-        let Some(doc) = &self.document else { return; };
+        let Some(doc) = &self.document else {
+            return;
+        };
         let mut scratch = doc.project.clone();
-        let start = self.clipboard.iter().map(|(_, item)| item.start).fold(f64::INFINITY, f64::min);
+        let start = self
+            .clipboard
+            .iter()
+            .map(|(_, item)| item.start)
+            .fold(f64::INFINITY, f64::min);
         let mut changes = Vec::new();
         let mut ids = HashSet::new();
         for (track, original) in &self.clipboard {
-            let Some(index) = scratch.track_index(track) else { continue; };
+            let Some(index) = scratch.track_index(track) else {
+                continue;
+            };
             let mut copy = original.clone();
             copy.id = scratch.new_id("copy");
             copy.start = self.playhead + original.start - start;
             let id = copy.id.clone();
-            let insertion = scratch.tracks[index].items.iter().position(|item| item.start >= copy.start).unwrap_or(scratch.tracks[index].items.len());
-            let op = Op::Set { path: format!("/tracks/{index}/items/-"), value: json!(copy) };
-            if let Err(error) = ops::apply(&mut scratch, &op) { self.notice(format!("{error:#}")); return; }
+            let insertion = scratch.tracks[index]
+                .items
+                .iter()
+                .position(|item| item.start >= copy.start)
+                .unwrap_or(scratch.tracks[index].items.len());
+            let op = Op::Set {
+                path: format!("/tracks/{index}/items/-"),
+                value: json!(copy),
+            };
+            if let Err(error) = ops::apply(&mut scratch, &op) {
+                self.notice(format!("{error:#}"));
+                return;
+            }
             changes.push(op);
             if index == 0 {
-                let op = Op::Move { item: id.clone(), start: None, track: None, index: Some(insertion) };
-                if let Err(error) = ops::apply(&mut scratch, &op) { self.notice(format!("{error:#}")); return; }
+                let op = Op::Move {
+                    item: id.clone(),
+                    start: None,
+                    track: None,
+                    index: Some(insertion),
+                };
+                if let Err(error) = ops::apply(&mut scratch, &op) {
+                    self.notice(format!("{error:#}"));
+                    return;
+                }
                 changes.push(op);
             }
             ids.insert(id);
@@ -612,20 +1101,45 @@ impl Studio {
     }
 
     fn split(&mut self, delete_left: Option<bool>) {
-        let Some(doc) = &self.document else { return; };
+        let Some(doc) = &self.document else {
+            return;
+        };
         let mut scratch = doc.project.clone();
         let mut changes = Vec::new();
         for track in &doc.project.tracks {
-            let crossing: Vec<_> = track.items.iter().filter(|item| item.start < self.playhead && item.end() > self.playhead && (self.selection.is_empty() || self.selection.contains(&item.id))).map(|item| item.id.clone()).collect();
-            if crossing.is_empty() { continue; }
-            let op = Op::Split { at: self.playhead, track: Some(track.id.clone()) };
-            let applied = match ops::apply(&mut scratch, &op) { Ok(applied) => applied, Err(error) => { self.notice(format!("{error:#}")); return; } };
+            let crossing: Vec<_> = track
+                .items
+                .iter()
+                .filter(|item| {
+                    item.start < self.playhead
+                        && item.end() > self.playhead
+                        && (self.selection.is_empty() || self.selection.contains(&item.id))
+                })
+                .map(|item| item.id.clone())
+                .collect();
+            if crossing.is_empty() {
+                continue;
+            }
+            let op = Op::Split {
+                at: self.playhead,
+                track: Some(track.id.clone()),
+            };
+            let applied = match ops::apply(&mut scratch, &op) {
+                Ok(applied) => applied,
+                Err(error) => {
+                    self.notice(format!("{error:#}"));
+                    return;
+                }
+            };
             changes.push(op);
             if let Some(left) = delete_left {
                 let delete = if left { crossing } else { applied.items };
                 for item in delete {
                     let op = Op::Delete { item };
-                    if let Err(error) = ops::apply(&mut scratch, &op) { self.notice(format!("{error:#}")); return; }
+                    if let Err(error) = ops::apply(&mut scratch, &op) {
+                        self.notice(format!("{error:#}"));
+                        return;
+                    }
                     changes.push(op);
                 }
             }
@@ -634,61 +1148,134 @@ impl Studio {
     }
 
     fn run_agent(&mut self) {
-        if let Err(error) = self.save() { self.notice(format!("Save before asking the agent: {error:#}")); return; }
-        if let Some(doc) = &self.document { self.services.run_agent(&self.workspace, &doc.path); self.tab = Tab::Agent; }
+        if let Err(error) = self.save() {
+            self.notice(format!("Save before asking the agent: {error:#}"));
+            return;
+        }
+        if let Some(doc) = &self.document {
+            self.services.run_agent(&self.workspace, &doc.path);
+            self.tab = Tab::Agent;
+        }
     }
 
     fn open_export(&mut self) {
-        if self.export.running { self.export.open = true; return; }
+        if self.export.running {
+            self.export.open = true;
+            return;
+        }
         if let Some(doc) = &self.document {
-            let slug = doc.dir().file_name().and_then(|name| name.to_str()).unwrap_or("edit");
-            self.export = Export { open: true, canvas: doc.project.canvas.clone(), path: self.workspace.next_draft_path(slug).display().to_string(), ..Export::default() };
+            let slug = doc
+                .dir()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("edit");
+            self.export = Export {
+                open: true,
+                canvas: doc.project.canvas.clone(),
+                path: self.workspace.next_draft_path(slug).display().to_string(),
+                ..Export::default()
+            };
         }
     }
 
     fn export_dialog(&mut self, ctx: &egui::Context) {
-        if !self.export.open { return; }
+        if !self.export.open {
+            return;
+        }
         let mut open = true;
         let mut start = false;
-        egui::Window::new("Export video").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-            ui.add_enabled_ui(!self.export.running, |ui| {
-                ui.label("Canvas preset");
-                canvas_combo(ui, "export_canvas", &mut self.export.canvas);
-                ui.small("9:16 Reels/TikTok/Shorts · 16:9 YouTube · 4:5 Feed · 1:1 Square");
-                ui.horizontal(|ui| { ui.radio_value(&mut self.export.final_quality, false, "Draft"); ui.radio_value(&mut self.export.final_quality, true, "Final"); });
-                ui.label("Output MP4"); ui.text_edit_singleline(&mut self.export.path);
-                if ui.button("Choose output...").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().set_file_name("edit.mp4").add_filter("MP4 video", &["mp4"]).save_file() { self.export.path = path.display().to_string(); }
-                }
-                if ui.button("Export").clicked() { start = true; }
-            });
-            if self.export.running {
-                if let Ok(progress) = self.export.progress.lock() { ui.add(egui::ProgressBar::new(progress.1 as f32).show_percentage().text(&progress.0)); }
-                if ui.button("Cancel export").clicked() { self.export.cancel.store(true, Ordering::Relaxed); }
-            }
-            if let Some(result) = self.export.result.clone() {
-                match result {
-                    Ok(path) => {
-                        ui.label(format!("Saved {}", path.display()));
-                        if ui.button("Open video").clicked() { if let Err(error) = open::that(&path) { self.notice(format!("{error:#}")); } }
-                        if ui.button("Show in folder").clicked() { if let Err(error) = reveal(&path) { self.notice(format!("{error:#}")); } }
+        egui::Window::new("Export video")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.add_enabled_ui(!self.export.running, |ui| {
+                    ui.label("Canvas preset");
+                    canvas_combo(ui, "export_canvas", &mut self.export.canvas);
+                    ui.small("9:16 Reels/TikTok/Shorts · 16:9 YouTube · 4:5 Feed · 1:1 Square");
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut self.export.final_quality, false, "Draft");
+                        ui.radio_value(&mut self.export.final_quality, true, "Final");
+                    });
+                    ui.label("Output MP4");
+                    ui.text_edit_singleline(&mut self.export.path);
+                    if ui.button("Choose output...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_file_name("edit.mp4")
+                            .add_filter("MP4 video", &["mp4"])
+                            .save_file()
+                        {
+                            self.export.path = path.display().to_string();
+                        }
                     }
-                    Err(error) => { ui.colored_label(Color32::LIGHT_RED, error); }
+                    if ui.button("Export").clicked() {
+                        start = true;
+                    }
+                });
+                if self.export.running {
+                    if let Ok(progress) = self.export.progress.lock() {
+                        ui.add(
+                            egui::ProgressBar::new(progress.1 as f32)
+                                .show_percentage()
+                                .text(&progress.0),
+                        );
+                    }
+                    if ui.button("Cancel export").clicked() {
+                        self.export.cancel.store(true, Ordering::Relaxed);
+                    }
                 }
-            }
-        });
+                if let Some(result) = self.export.result.clone() {
+                    match result {
+                        Ok(path) => {
+                            ui.label(format!("Saved {}", path.display()));
+                            if ui.button("Open video").clicked() {
+                                if let Err(error) = open::that(&path) {
+                                    self.notice(format!("{error:#}"));
+                                }
+                            }
+                            if ui.button("Show in folder").clicked() {
+                                if let Err(error) = reveal(&path) {
+                                    self.notice(format!("{error:#}"));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            ui.colored_label(Color32::LIGHT_RED, error);
+                        }
+                    }
+                }
+            });
         self.export.open = open;
-        if start { self.start_export(ctx); }
+        if start {
+            self.start_export(ctx);
+        }
     }
 
     fn start_export(&mut self, ctx: &egui::Context) {
-        let Some(doc) = &self.document else { return; };
+        let Some(doc) = &self.document else {
+            return;
+        };
         let out = PathBuf::from(self.export.path.trim());
-        if out.as_os_str().is_empty() { self.notice("Choose an output path"); return; }
-        if out.exists() { self.notice("Output already exists. Choose a new filename to keep the previous export."); return; }
+        if out.as_os_str().is_empty() {
+            self.notice("Choose an output path");
+            return;
+        }
+        if out.exists() {
+            self.notice(
+                "Output already exists. Choose a new filename to keep the previous export.",
+            );
+            return;
+        }
         let project = doc.project.clone();
         let dir = doc.dir().to_owned();
-        let opts = RenderOptions::for_canvas(&self.export.canvas, if self.export.final_quality { Quality::Final } else { Quality::Draft });
+        let opts = RenderOptions::for_canvas(
+            &self.export.canvas,
+            if self.export.final_quality {
+                Quality::Final
+            } else {
+                Quality::Draft
+            },
+        );
         let (tx, rx) = mpsc::channel();
         self.export.rx = Some(rx);
         self.export.cancel.store(false, Ordering::Relaxed);
@@ -699,10 +1286,21 @@ impl Studio {
         let ctx = ctx.clone();
         thread::spawn(move || {
             let result = render::export(&project, &dir, &out, &opts, &mut |update| {
-                if let Ok(mut state) = progress.lock() { *state = (update.stage.into(), if update.total > 0.0 { (update.done / update.total).clamp(0.0, 1.0) } else { 0.0 }); }
+                if let Ok(mut state) = progress.lock() {
+                    *state = (
+                        update.stage.into(),
+                        if update.total > 0.0 {
+                            (update.done / update.total).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        },
+                    );
+                }
                 ctx.request_repaint();
                 !cancel.load(Ordering::Relaxed)
-            }).map(|report| report.path).map_err(|error| format!("{error:#}"));
+            })
+            .map(|report| report.path)
+            .map_err(|error| format!("{error:#}"));
             let _ = tx.send(result);
             ctx.request_repaint();
         });
@@ -716,29 +1314,53 @@ impl eframe::App for Studio {
         self.shortcuts(&ctx);
         self.top_bar(ui);
         if self.document.is_some() {
-            egui::Panel::bottom("timeline").default_size(320.0).min_size(170.0).resizable(true).show(ui, |ui| {
-                if let Some(doc) = &self.document {
-                    let before = self.playhead;
-                    let changes = self.timeline.show(ui, &doc.project, &mut self.selection, &mut self.playhead, &self.waveforms);
-                    self.apply(changes);
-                    if self.playhead != before { self.invalidate_preview(); }
-                }
-            });
-            self.left_panel(ui);
-            egui::Panel::right("inspector").default_size(270.0).size_range(220.0..=420.0).resizable(true).show(ui, |ui| {
-                egui::ScrollArea::vertical().id_salt("inspector_scroll").show(ui, |ui| {
+            egui::Panel::bottom("timeline")
+                .default_size(320.0)
+                .min_size(170.0)
+                .resizable(true)
+                .show(ui, |ui| {
                     if let Some(doc) = &self.document {
-                        let selected = self.selection.iter().next().map(String::as_str);
-                        let changes = inspector::show(ui, &doc.project, selected);
+                        let before = self.playhead;
+                        let changes = self.timeline.show(
+                            ui,
+                            &doc.project,
+                            &mut self.selection,
+                            &mut self.playhead,
+                            &self.waveforms,
+                        );
                         self.apply(changes);
+                        if self.playhead != before {
+                            self.invalidate_preview();
+                        }
                     }
                 });
-            });
+            self.left_panel(ui);
+            egui::Panel::right("inspector")
+                .default_size(270.0)
+                .size_range(220.0..=420.0)
+                .resizable(true)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("inspector_scroll")
+                        .show(ui, |ui| {
+                            if let Some(doc) = &self.document {
+                                let selected = self.selection.iter().next().map(String::as_str);
+                                let changes = inspector::show(ui, &doc.project, selected);
+                                self.apply(changes);
+                            }
+                        });
+                });
             self.preview(ui);
-        } else { self.welcome(ui); }
+        } else {
+            self.welcome(ui);
+        }
         self.export_dialog(&ctx);
         if let Some(capture) = &mut self.capture {
-            let preview_ready = self.texture.is_some() && self.wave_pending.iter().all(|id| self.waveforms.contains_key(id));
+            let preview_ready = self.texture.is_some()
+                && self
+                    .wave_pending
+                    .iter()
+                    .all(|id| self.waveforms.contains_key(id));
             match capture.advance(&ctx, preview_ready, self.playback.position()) {
                 Ok(capture::Action::Play) => self.toggle_play(&ctx),
                 Ok(capture::Action::Close) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -751,64 +1373,152 @@ impl eframe::App for Studio {
             }
         }
         if ctx.input(|input| input.viewport().close_requested()) {
-            if let Err(error) = self.save() { ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose); self.close_error = Some(format!("{error:#}")); }
-            else { self.playback.stop(); self.export.cancel.store(true, Ordering::Relaxed); }
+            if let Err(error) = self.save() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.close_error = Some(format!("{error:#}"));
+            } else {
+                self.playback.stop();
+                self.export.cancel.store(true, Ordering::Relaxed);
+            }
         }
         if let Some(error) = self.close_error.clone() {
-            egui::Window::new("Project was not saved").collapsible(false).show(&ctx, |ui| {
-                ui.label(error);
-                ui.label("Keep the editor open to preserve your changes.");
-                if ui.button("Keep editing").clicked() { self.close_error = None; }
-            });
+            egui::Window::new("Project was not saved")
+                .collapsible(false)
+                .show(&ctx, |ui| {
+                    ui.label(error);
+                    ui.label("Keep the editor open to preserve your changes.");
+                    if ui.button("Keep editing").clicked() {
+                        self.close_error = None;
+                    }
+                });
         }
     }
 }
 
-fn mtime(path: &Path) -> Option<SystemTime> { std::fs::metadata(path).ok()?.modified().ok() }
-fn filename(path: &Path) -> String { path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned() }
+fn mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+fn filename(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
 fn inbox_files(workspace: &Workspace) -> Vec<PathBuf> {
-    let mut paths: Vec<_> = std::fs::read_dir(workspace.inbox()).into_iter().flatten().filter_map(Result::ok).map(|entry| entry.path())
-        .filter(|path| path.is_file() && path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| ["mp4","mov","mkv","webm","m4v"].contains(&extension.to_ascii_lowercase().as_str()))).collect();
-    paths.sort(); paths
+    let mut paths: Vec<_> = std::fs::read_dir(workspace.inbox())
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        ["mp4", "mov", "mkv", "webm", "m4v"]
+                            .contains(&extension.to_ascii_lowercase().as_str())
+                    })
+        })
+        .collect();
+    paths.sort();
+    paths
 }
 fn add_clip(asset: String, start: f64) -> Op {
-    Op::AddClip { asset, track: None, start: Some(start), index: None, src_in: 0.0, duration: None, frame: None, volume: None, duck: None }
+    Op::AddClip {
+        asset,
+        track: None,
+        start: Some(start),
+        index: None,
+        src_in: 0.0,
+        duration: None,
+        frame: None,
+        volume: None,
+        duck: None,
+    }
 }
 fn canvas_combo(ui: &mut egui::Ui, id: &str, canvas: &mut Canvas) -> bool {
     let mut changed = false;
-    egui::ComboBox::from_id_salt(id).selected_text(canvas.aspect_name()).show_ui(ui, |ui| {
-        for aspect in ["9:16","16:9","4:5","1:1"] {
-            if ui.selectable_label(canvas.aspect_name() == aspect, aspect).clicked() {
-                let fps = canvas.fps; let background = canvas.background;
-                *canvas = Canvas::from_aspect(aspect).expect("listed aspect"); canvas.fps = fps; canvas.background = background;
-                changed = true;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(canvas.aspect_name())
+        .show_ui(ui, |ui| {
+            for aspect in ["9:16", "16:9", "4:5", "1:1"] {
+                if ui
+                    .selectable_label(canvas.aspect_name() == aspect, aspect)
+                    .clicked()
+                {
+                    let fps = canvas.fps;
+                    let background = canvas.background;
+                    *canvas = Canvas::from_aspect(aspect).expect("listed aspect");
+                    canvas.fps = fps;
+                    canvas.background = background;
+                    changed = true;
+                }
             }
-        }
-    });
+        });
     changed
 }
 fn text_presets() -> [(TextPreset, &'static str); 11] {
-    [(TextPreset::Hook,"Hook"),(TextPreset::Title,"Title"),(TextPreset::Card,"Card"),(TextPreset::LowerThird,"Lower third"),
-     (TextPreset::Callout,"Callout"),(TextPreset::Counter,"Counter"),(TextPreset::Label,"Label"),(TextPreset::Quote,"Quote"),
-     (TextPreset::List,"List"),(TextPreset::Kinetic,"Kinetic"),(TextPreset::Cta,"Call to action")]
+    [
+        (TextPreset::Hook, "Hook"),
+        (TextPreset::Title, "Title"),
+        (TextPreset::Card, "Card"),
+        (TextPreset::LowerThird, "Lower third"),
+        (TextPreset::Callout, "Callout"),
+        (TextPreset::Counter, "Counter"),
+        (TextPreset::Label, "Label"),
+        (TextPreset::Quote, "Quote"),
+        (TextPreset::List, "List"),
+        (TextPreset::Kinetic, "Kinetic"),
+        (TextPreset::Cta, "Call to action"),
+    ]
 }
 fn format_timecode(seconds: f64, fps: f64) -> String {
     let nominal = fps.round().max(1.0) as u64;
     let frames = (seconds.max(0.0) * fps).round() as u64;
     let seconds = frames / nominal;
-    format!("{:02}:{:02}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60, frames % nominal)
+    format!(
+        "{:02}:{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60,
+        frames % nominal
+    )
 }
 fn parse_timecode(text: &str, fps: f64) -> Option<f64> {
-    let parts: Vec<u64> = text.split(':').map(str::parse).collect::<std::result::Result<_, _>>().ok()?;
-    if parts.len() != 4 || parts[1] >= 60 || parts[2] >= 60 || parts[3] >= fps.round().max(1.0) as u64 { return None; }
-    let frames = parts[0].checked_mul(3600)?.checked_add(parts[1] * 60)?.checked_add(parts[2])?.checked_mul(fps.round().max(1.0) as u64)?.checked_add(parts[3])?;
+    let parts: Vec<u64> = text
+        .split(':')
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()
+        .ok()?;
+    if parts.len() != 4
+        || parts[1] >= 60
+        || parts[2] >= 60
+        || parts[3] >= fps.round().max(1.0) as u64
+    {
+        return None;
+    }
+    let frames = parts[0]
+        .checked_mul(3600)?
+        .checked_add(parts[1] * 60)?
+        .checked_add(parts[2])?
+        .checked_mul(fps.round().max(1.0) as u64)?
+        .checked_add(parts[3])?;
     Some(frames as f64 / fps)
 }
 fn reveal(path: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
-    { let status = std::process::Command::new("open").arg("-R").arg(path).status()?; anyhow::ensure!(status.success(), "Finder could not reveal the video"); }
+    {
+        let status = std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .status()?;
+        anyhow::ensure!(status.success(), "Finder could not reveal the video");
+    }
     #[cfg(not(target_os = "macos"))]
-    { open::that(path.parent().unwrap_or(Path::new(".")))?; }
+    {
+        open::that(path.parent().unwrap_or(Path::new(".")))?;
+    }
     Ok(())
 }
 

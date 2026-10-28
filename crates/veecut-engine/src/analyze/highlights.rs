@@ -21,15 +21,23 @@ pub struct Highlight {
     pub reason: String,
 }
 
-const CONNECTORS: &[&str] = &["and", "but", "so", "because", "also", "then", "or", "um", "uh", "like", "which", "it", "that", "this", "they", "he", "she", "those", "these"];
-const CLAIMS: &[&str] = &[
-    "never", "always", "best", "worst", "secret", "mistake", "mistakes", "biggest", "nobody", "everyone", "stop", "truth",
-    "why", "how", "here's", "most", "only", "every", "wrong", "need", "must",
+const CONNECTORS: &[&str] = &[
+    "and", "but", "so", "because", "also", "then", "or", "um", "uh", "like", "which", "it", "that",
+    "this", "they", "he", "she", "those", "these",
 ];
-const NUMBER_WORDS: &[&str] = &["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "hundred", "thousand", "million", "billion", "half", "double"];
+const CLAIMS: &[&str] = &[
+    "never", "always", "best", "worst", "secret", "mistake", "mistakes", "biggest", "nobody",
+    "everyone", "stop", "truth", "why", "how", "here's", "most", "only", "every", "wrong", "need",
+    "must",
+];
+const NUMBER_WORDS: &[&str] = &[
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "hundred",
+    "thousand", "million", "billion", "half", "double",
+];
 const STOP: &[&str] = &[
-    "the", "and", "that", "this", "with", "have", "from", "they", "were", "what", "when", "your", "just", "like", "about",
-    "there", "their", "then", "than", "into", "some", "because", "really", "going", "know", "it's", "that's", "don't",
+    "the", "and", "that", "this", "with", "have", "from", "they", "were", "what", "when", "your",
+    "just", "like", "about", "there", "their", "then", "than", "into", "some", "because", "really",
+    "going", "know", "it's", "that's", "don't",
 ];
 
 /// The best `count` clips between `min_len` and `max_len` seconds, best first, not overlapping.
@@ -38,7 +46,12 @@ const STOP: &[&str] = &[
 /// question, a number, a bold claim, talking to "you"; not opening on "and" or "it"), density of
 /// the video's topic words (content words said more than once), lively delivery (words per second
 /// against the video's average, exclamations, no long dead air) and ending on a full sentence.
-pub fn highlights(transcript: &Transcript, min_len: f64, max_len: f64, count: usize) -> Vec<Highlight> {
+pub fn highlights(
+    transcript: &Transcript,
+    min_len: f64,
+    max_len: f64,
+    count: usize,
+) -> Vec<Highlight> {
     let sentences = transcript.sentences();
     let words = &transcript.words;
     if sentences.is_empty() || count == 0 {
@@ -66,13 +79,25 @@ pub fn highlights(transcript: &Transcript, min_len: f64, max_len: f64, count: us
                 continue;
             }
             let window = &words[first.first..last.end_word];
-            let content: Vec<String> = window.iter().map(|w| clean_token(&w.text)).filter(|t| is_content(t)).collect();
-            let mut topics: Vec<&str> = content.iter().filter(|t| freq[*t] >= 2).map(String::as_str).collect();
+            let content: Vec<String> = window
+                .iter()
+                .map(|w| clean_token(&w.text))
+                .filter(|t| is_content(t))
+                .collect();
+            let mut topics: Vec<&str> = content
+                .iter()
+                .filter(|t| freq[*t] >= 2)
+                .map(String::as_str)
+                .collect();
             let density = topics.len() as f64 / content.len().max(1) as f64;
-            let dead_air: f64 = window.windows(2).map(|p| (p[1].start - p[0].end - 1.0).max(0.0)).sum();
+            let dead_air: f64 = window
+                .windows(2)
+                .map(|p| (p[1].start - p[0].end - 1.0).max(0.0))
+                .sum();
             let rate = window.len() as f64 / len.max(1e-6);
             let shouts = window.iter().filter(|w| w.text.ends_with('!')).count() as f64;
-            let energy = ((rate / mean_rate - 0.7) / 0.6 + 0.1 * shouts - dead_air / len).clamp(0.0, 1.0);
+            let energy =
+                ((rate / mean_rate - 0.7) / 0.6 + 0.1 * shouts - dead_air / len).clamp(0.0, 1.0);
             let complete = if ends_sentence(&last.text) { 1.0 } else { 0.0 };
             let score = 0.45 * hook.0 + 0.25 * density.min(1.0) + 0.2 * energy + 0.1 * complete;
 
@@ -80,7 +105,15 @@ pub fn highlights(transcript: &Transcript, min_len: f64, max_len: f64, count: us
             topics.sort_unstable();
             topics.dedup();
             if !topics.is_empty() {
-                reason.push(format!("topic words: {}", topics.iter().take(4).copied().collect::<Vec<_>>().join(", ")));
+                reason.push(format!(
+                    "topic words: {}",
+                    topics
+                        .iter()
+                        .take(4)
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
             if energy >= 0.6 {
                 reason.push("lively delivery".into());
@@ -90,11 +123,19 @@ pub fn highlights(transcript: &Transcript, min_len: f64, max_len: f64, count: us
                 end: last.end,
                 score: score as f32,
                 title: title(&first.text),
-                reason: if reason.is_empty() { "steady section".into() } else { reason.join("; ") },
+                reason: if reason.is_empty() {
+                    "steady section".into()
+                } else {
+                    reason.join("; ")
+                },
             });
         }
     }
-    candidates.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.start.total_cmp(&b.start)));
+    candidates.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then(a.start.total_cmp(&b.start))
+    });
     let mut out: Vec<Highlight> = Vec::new();
     for c in candidates {
         if out.len() == count {
@@ -133,7 +174,10 @@ fn hook(sentence: &str) -> (f64, Vec<String>) {
         score += 0.25;
         why.push("bold claim".into());
     }
-    if tokens.first().is_some_and(|t| CONNECTORS.contains(&t.as_str())) {
+    if tokens
+        .first()
+        .is_some_and(|t| CONNECTORS.contains(&t.as_str()))
+    {
         score -= 0.4;
         why.push("opens mid-thought".into());
     }
@@ -172,9 +216,20 @@ mod tests {
         let words: Vec<TranscriptWord> = text
             .split_whitespace()
             .enumerate()
-            .map(|(i, w)| TranscriptWord { text: w.into(), start: i as f64 * 0.4, end: i as f64 * 0.4 + 0.3, confidence: None })
+            .map(|(i, w)| TranscriptWord {
+                text: w.into(),
+                start: i as f64 * 0.4,
+                end: i as f64 * 0.4 + 0.3,
+                confidence: None,
+            })
             .collect();
-        let t = Transcript { asset: "a".into(), provider: "test".into(), language: None, duration: 20.0, words };
+        let t = Transcript {
+            asset: "a".into(),
+            provider: "test".into(),
+            language: None,
+            duration: 20.0,
+            words,
+        };
         let found = highlights(&t, 3.0, 8.0, 2);
         assert_eq!(found.len(), 2);
         assert!(found[0].title.starts_with("Why do 90%"), "{found:?}");

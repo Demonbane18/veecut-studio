@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::project::{CaptionMode, Canvas, Color, LookPreset, Project};
+use crate::project::{Canvas, CaptionMode, Color, LookPreset, Project};
 
 /// The choices from style setup, saved as `my-style.toml`. Missing keys take their defaults.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -177,7 +177,9 @@ impl Style {
     /// Reads `my-style.toml`; defaults when the file does not exist.
     pub fn load(path: &Path) -> Result<Style> {
         match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text).with_context(|| format!("{} is not valid; fix the line named above", path.display())),
+            Ok(text) => toml::from_str(&text).with_context(|| {
+                format!("{} is not valid; fix the line named above", path.display())
+            }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Style::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -260,7 +262,8 @@ pub fn add_rule(path: &Path, rule: &str, user_words: &str) -> Result<()> {
     }
     let date = chrono::Local::now().format("%Y-%m-%d");
     text.push_str(&format!("- {rule} (\"{words}\", {date})\n"));
-    file.write_all(text.as_bytes()).with_context(|| format!("writing {}", path.display()))
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// The bullet lines of `my-rules.md` without their `- ` marker. Empty when the file is missing.
@@ -272,7 +275,11 @@ pub fn rules(path: &Path) -> Result<Vec<String>> {
     };
     Ok(text
         .lines()
-        .filter_map(|l| l.trim_start().strip_prefix("- ").or_else(|| l.trim_start().strip_prefix("* ")))
+        .filter_map(|l| {
+            l.trim_start()
+                .strip_prefix("- ")
+                .or_else(|| l.trim_start().strip_prefix("* "))
+        })
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect())

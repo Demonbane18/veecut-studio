@@ -178,6 +178,9 @@ pub fn run(
     let mut child = Command::new(&program)
         .args(&argv[1..])
         .current_dir(&ws.root)
+        // OpenCode takes its project folder from PWD, which the child would otherwise inherit
+        // from wherever the editor or CLI was started.
+        .env("PWD", &ws.root)
         .env("PATH", search_path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -280,7 +283,7 @@ fn search_path() -> OsString {
         .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
 }
 
-fn find_program(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
     let direct = Path::new(name);
     if direct.components().count() > 1 {
         return direct.is_file().then(|| direct.to_path_buf());

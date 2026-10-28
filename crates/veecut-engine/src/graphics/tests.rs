@@ -1,5 +1,7 @@
 use super::*;
-use crate::project::{Caption, TextStyle, VideoKind};
+use crate::project::{
+    Asset, AssetKind, AssetRole, Caption, Clip, FaceSample, TextStyle, VideoKind, Zoom,
+};
 use tiny_skia::Pixmap;
 
 #[test]
@@ -411,4 +413,355 @@ fn contrast_proof() {
             }
         }
     }
+}
+
+/// A 16:9 clip in a 9:16 canvas, aimed at (0.5, 0.45) and punched in 1.15x from `zoom_at`, with
+/// one face box (x, y, w, h as fractions of the source) every half second. By hand: a source row
+/// `y` lands on the canvas at `1.15 * y - 0.0175` once punched in, and at `y` before.
+fn face_project(face: (f32, f32, f32, f32), zoom_at: f64) -> Project {
+    let mut p = Project::new("faces", VideoKind::default(), Canvas::vertical());
+    p.assets.push(Asset {
+        id: "a".into(),
+        path: "a.mp4".into(),
+        kind: AssetKind::Video,
+        role: AssetRole::Source,
+        duration: 10.0,
+        width: 1920,
+        height: 1080,
+        fps: 30.0,
+        has_audio: true,
+    });
+    let mut clip = Clip::new("a", 0.0);
+    clip.focus = Some(Point::new(0.5, 0.45));
+    clip.zooms.push(Zoom {
+        at: zoom_at,
+        duration: 10.0 - zoom_at,
+        scale: 1.15,
+        focus: None,
+        ease: 0.0,
+    });
+    p.main_mut().items.push(Item {
+        id: "clip-1".into(),
+        start: 0.0,
+        duration: 10.0,
+        body: ItemBody::Clip(clip),
+    });
+    p.faces.insert(
+        "a".into(),
+        (0..20)
+            .map(|k| FaceSample {
+                t: k as f64 * 0.5,
+                x: face.0,
+                y: face.1,
+                w: face.2,
+                h: face.3,
+            })
+            .collect(),
+    );
+    p.captions.size = 0.06;
+    p.captions.position = 0.74;
+    p
+}
+
+/// A three-word caption page, 1.2 s long.
+fn page(id: &str, start: f64) -> Item {
+    Item {
+        id: id.into(),
+        start,
+        duration: 1.2,
+        body: ItemBody::Caption(Caption {
+            words: ["Make", "every", "word"]
+                .iter()
+                .enumerate()
+                .map(|(i, s)| Word {
+                    text: (*s).into(),
+                    start: i as f64 * 0.4,
+                    end: (i + 1) as f64 * 0.4,
+                    emphasis: false,
+                })
+                .collect(),
+        }),
+    }
+}
+
+/// Canvas rows (top, bottom) of the mouth-to-chin zone of `face` in a punched-in `face_project`:
+/// from 55% of the box height to 12% below its bottom.
+fn punched_in_zone(face: (f32, f32, f32, f32)) -> (f32, f32) {
+    let on_canvas = |y: f32| 1.15 * y - 0.0175;
+    (
+        on_canvas(face.1 + face.3 * 0.55),
+        on_canvas(face.1 + face.3 * 1.12),
+    )
+}
+
+/// First and last pixel row with any paint.
+fn painted_rows(frame: &Pixmap) -> Option<(u32, u32)> {
+    let rows: Vec<u32> = frame
+        .data()
+        .chunks_exact(frame.width() as usize * 4)
+        .enumerate()
+        .filter(|(_, row)| row.chunks_exact(4).any(|px| px[3] != 0))
+        .map(|(y, _)| y as u32)
+        .collect();
+    Some((*rows.first()?, *rows.last()?))
+}
+
+#[test]
+fn large_face_moves_the_caption_off_mouth_and_chin_in_canvas_space() {
+    let face = (0.38, 0.22, 0.24, 0.43);
+    let (top, bottom) = punched_in_zone(face);
+    let mut project = face_project(face, 0.0);
+    project.tracks[3].items.push(page("cap-1", 1.0));
+    let mut g = Graphics::new();
+    let at = 1.3;
+
+    // Without face data the page sits on the chin: the bug.
+    let mut blind = project.clone();
+    blind.faces.clear();
+    let before = g.caption_placement_at(&blind, at).unwrap();
+    assert_eq!(before.face, FaceFit::Off);
+    assert!(
+        before.bounds.y < bottom && before.bounds.y + before.bounds.h > top,
+        "{before:?} vs zone {top}..{bottom}"
+    );
+
+    let placed = g.caption_placement_at(&project, at).unwrap();
+    assert_eq!(placed.face, FaceFit::Moved, "{placed:?}");
+    let (a, b) = (placed.bounds.y, placed.bounds.y + placed.bounds.h);
+    assert!(
+        b <= top || a >= bottom,
+        "{placed:?} vs zone {top}..{bottom}"
+    );
+
+    // The pixels agree with the report: painted inside the reported box, clear of the zone.
+    let mut frame = Pixmap::new(1080, 1920).unwrap();
+    g.draw(&project, at, &mut frame.as_mut());
+    let (first, last) = painted_rows(&frame).expect("the caption is drawn");
+    assert!(
+        first as f32 >= a * 1920.0 - 2.0 && last as f32 <= b * 1920.0 + 2.0,
+        "{first}..{last} vs {placed:?}"
+    );
+    assert!(last as f32 / 1920.0 <= top || first as f32 / 1920.0 >= bottom);
+}
+
+#[test]
+fn a_wide_shot_keeps_the_requested_position() {
+    let mut project = face_project((0.45, 0.30, 0.08, 0.14), 0.0);
+    project.tracks[3].items.push(page("cap-1", 1.0));
+    let mut g = Graphics::new();
+    let placed = g.caption_placement_at(&project, 1.3).unwrap();
+    assert_eq!(
+        (placed.face, placed.slot),
+        (FaceFit::Clear, Slot::Requested),
+        "{placed:?}"
+    );
+    project.faces.clear();
+    assert_eq!(
+        placed.bounds,
+        g.caption_placement_at(&project, 1.3).unwrap().bounds
+    );
+}
+
+#[test]
+fn a_punch_in_inside_a_page_counts_for_the_whole_page() {
+    let mut project = face_project((0.38, 0.0, 0.24, 0.2), 2.0);
+    for (id, start) in [("early", 0.0), ("straddle", 1.6), ("late", 4.0)] {
+        project.tracks[3].items.push(page(id, start));
+    }
+    let mut g = Graphics::new();
+    let mut blind = project.clone();
+    blind.faces.clear();
+    let home = g.caption_placement_at(&blind, 0.5).unwrap().bounds;
+    // Put the zone's bottom (y + 1.12 h at 1x) 0.04 above the requested box.
+    for s in project.faces.get_mut("a").unwrap() {
+        s.y = home.y - 0.04 - 1.12 * s.h;
+    }
+    let early = g.caption_placement_at(&project, 0.5).unwrap();
+    assert_eq!(early.face, FaceFit::Clear, "{early:?}");
+    assert_eq!(early.bounds, home);
+    // The 1.15x punch-in at 2.0 s lifts the zone onto the box for the page that spans it ...
+    let straddle = g.caption_placement_at(&project, 2.5).unwrap();
+    assert_ne!(straddle.face, FaceFit::Clear, "{straddle:?}");
+    // ... and for the pages after it.
+    let late = g.caption_placement_at(&project, 4.5).unwrap();
+    assert_ne!(late.face, FaceFit::Clear, "{late:?}");
+}
+
+#[test]
+fn missing_detections_are_reported_and_never_counted_as_clear() {
+    let mut project = face_project((0.45, 0.30, 0.08, 0.14), 0.0);
+    project.faces.get_mut("a").unwrap().retain(|s| s.t <= 2.0);
+    for (id, start) in [("seen", 0.0), ("partly", 2.4), ("blind", 5.0)] {
+        project.tracks[3].items.push(page(id, start));
+    }
+    let mut g = Graphics::new();
+    let seen = g.caption_placement_at(&project, 0.5).unwrap();
+    assert_eq!((seen.face, seen.face_gaps), (FaceFit::Clear, false));
+    let partly = g.caption_placement_at(&project, 2.8).unwrap();
+    assert!(partly.face_gaps, "{partly:?}");
+    let blind = g.caption_placement_at(&project, 5.5).unwrap();
+    assert_eq!(
+        (blind.face, blind.slot, blind.face_gaps),
+        (FaceFit::Unchecked, Slot::Requested, true)
+    );
+    let report = caption_report(&mut g, &project, 8);
+    assert_eq!(
+        (report.pages, report.unchecked, report.gaps),
+        (3, 1, 2),
+        "{report:?}"
+    );
+    assert_eq!(report.examples[0].item, "blind");
+}
+
+#[test]
+fn a_page_with_no_clear_slot_is_not_drawn_and_is_reported() {
+    // The face is high in the frame for the first half of the page and low for the second, so
+    // the zone spans both slots and nothing is clear.
+    let mut project = face_project((0.38, 0.22, 0.24, 0.43), 0.0);
+    project.tracks[3].items.push(page("cap-1", 1.0));
+    let low_only = project.clone();
+    for s in project
+        .faces
+        .get_mut("a")
+        .unwrap()
+        .iter_mut()
+        .filter(|s| s.t < 1.75)
+    {
+        (s.y, s.h) = (0.0, 0.3);
+    }
+    let mut g = Graphics::new();
+    let placed = g.caption_placement_at(&project, 1.3).unwrap();
+    assert_eq!(placed.face, FaceFit::Hidden, "{placed:?}");
+    let report = caption_report(&mut g, &project, 5);
+    assert_eq!(report.hidden, 1);
+    assert_eq!(report.examples[0].item, "cap-1");
+    let frame = |g: &mut Graphics, p: &Project| {
+        let mut f = Pixmap::new(270, 480).unwrap();
+        g.draw(p, 1.3, &mut f.as_mut());
+        f
+    };
+    let mut without = project.clone();
+    without.tracks[3].items.clear();
+    assert_eq!(
+        frame(&mut g, &project).data(),
+        frame(&mut g, &without).data()
+    );
+    // With the face only low, the upper slot is clear, so the page moves there instead.
+    let placed = g.caption_placement_at(&low_only, 1.3).unwrap();
+    assert_eq!((placed.face, placed.slot), (FaceFit::Moved, Slot::Upper));
+}
+
+#[test]
+fn captions_avoid_the_hook_box_where_it_really_is_and_hide_when_nothing_is_clear() {
+    let hook_at = |y: f32| {
+        let mut item = sample(TextPreset::Hook, "The hook");
+        if let ItemBody::Text(text) = &mut item.body {
+            text.position = Some(Point::new(0.5, y));
+        }
+        item
+    };
+    let mut project = face_project((0.38, 0.22, 0.24, 0.43), 0.0);
+    project.tracks[3].items.push(page("cap-1", 1.0));
+    project.tracks[2].items.push(hook_at(0.74));
+    let at = 1.3;
+    let mut g = Graphics::new();
+
+    // The rows the low hook really paints.
+    let mut only_hook = project.clone();
+    only_hook.tracks[3].items.clear();
+    let mut frame = Pixmap::new(1080, 1920).unwrap();
+    g.draw(&only_hook, at, &mut frame.as_mut());
+    let (first, last) = painted_rows(&frame).expect("the hook is drawn");
+    let (top, bottom) = (first as f32 / 1920.0, (last + 1) as f32 / 1920.0);
+    let overlaps = |b: Rect| b.y < bottom && b.y + b.h > top;
+
+    // No face: captions asked for the low spot sit on a low hook, so they leave it.
+    let mut no_face = project.clone();
+    no_face.faces.clear();
+    let mut no_hook = no_face.clone();
+    no_hook.tracks[2].items.clear();
+    let free = g.caption_placement_at(&no_hook, at).unwrap();
+    assert!(overlaps(free.bounds), "{free:?} vs hook {top}..{bottom}");
+    let placed = g.caption_placement_at(&no_face, at).unwrap();
+    assert_eq!(placed.slot, Slot::Upper, "{placed:?}");
+    assert!(!overlaps(placed.bounds), "{placed:?}");
+
+    // A large face blocks the low slots; the upper slot is clear of the low hook, so it is used
+    // rather than hiding the page because some text is on screen.
+    let placed = g.caption_placement_at(&project, at).unwrap();
+    assert_eq!((placed.face, placed.slot), (FaceFit::Moved, Slot::Upper));
+    assert!(!overlaps(placed.bounds), "{placed:?}");
+
+    // With the hook up there too, no slot is clear of both: the page is not drawn.
+    project.tracks[2].items = vec![hook_at(0.2)];
+    let placed = g.caption_placement_at(&project, at).unwrap();
+    assert_eq!(placed.face, FaceFit::Hidden, "{placed:?}");
+    assert_eq!(caption_report(&mut g, &project, 5).hidden, 1);
+}
+
+#[test]
+fn a_position_the_safe_area_overrides_is_reported_with_the_box_actually_drawn() {
+    let mut project = Project::new("clamp", VideoKind::default(), Canvas::vertical());
+    project.captions.size = 0.06;
+    project.tracks[3].items.push(page("cap-1", 0.0));
+    let mut g = Graphics::new();
+    let mut at = |position: f32| {
+        project.captions.position = position;
+        g.caption_placement_at(&project, 0.5).unwrap()
+    };
+    let (low, lower) = (at(0.78), at(0.84));
+    assert!(low.clamped && lower.clamped, "{low:?} {lower:?}");
+    assert_eq!(lower.requested, 0.84);
+    // Both land on the same box: the safe area's bottom edge (y 1600 of 1920).
+    assert_eq!(low.bounds, lower.bounds);
+    assert!(lower.bounds.y + lower.bounds.h <= 1600.0 / 1920.0 + 1e-4);
+    assert!(lower.bounds.y + lower.bounds.h / 2.0 < 0.84 - 0.01);
+    assert_eq!(lower.face, FaceFit::Off);
+    assert!(!at(0.5).clamped);
+}
+
+#[test]
+fn word_pop_overshoot_is_part_of_the_reported_box() {
+    let mut project = Project::new("pop", VideoKind::default(), Canvas::vertical());
+    project.tracks[3].items.push(Item {
+        id: "cap-1".into(),
+        start: 1.0,
+        duration: 0.5,
+        body: ItemBody::Caption(Caption {
+            words: vec![Word {
+                text: "Hello".into(),
+                start: 0.0,
+                end: 0.5,
+                emphasis: false,
+            }],
+        }),
+    });
+    let mut g = Graphics::new();
+    project.captions.mode = CaptionMode::Highlight;
+    let rest = g.caption_placement_at(&project, 1.2).unwrap().bounds;
+    project.captions.mode = CaptionMode::WordPop;
+    let popped = g.caption_placement_at(&project, 1.2).unwrap().bounds;
+    // The same word, grown to the top of its pop-in so the face check covers it too.
+    let peak = timing::pop_peak();
+    assert!(peak > 1.0);
+    assert!(
+        (popped.h / rest.h - peak).abs() < 1e-3 && (popped.w / rest.w - peak).abs() < 1e-3,
+        "{rest:?} {popped:?}"
+    );
+}
+
+#[test]
+fn pages_without_any_face_data_count_as_unchecked() {
+    let mut project = face_project((0.45, 0.30, 0.08, 0.14), 0.0);
+    project.faces.clear();
+    for (id, start) in [("first", 0.0), ("second", 3.0)] {
+        project.tracks[3].items.push(page(id, start));
+    }
+    let report = caption_report(&mut Graphics::new(), &project, 5);
+    assert_eq!(
+        (report.pages, report.unchecked, report.moved, report.hidden),
+        (2, 2, 0, 0)
+    );
+    assert_eq!(report.examples.len(), 2);
+    assert!(report.examples.iter().all(|p| p.face == FaceFit::Off));
 }

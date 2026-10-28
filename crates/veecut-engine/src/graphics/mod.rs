@@ -6,8 +6,11 @@
 //! Montserrat comes from JulietaUla/Montserrat/fonts/ttf; other families from google/fonts/ofl.
 //! Inter is a static instance of that upstream font at wght=600, opsz=14 (fontTools 4.68).
 //! Run the ignored `visual_proof` test for PNG samples and a warm-frame draw benchmark.
+//! Caption pages keep off the speaker's mouth and chin when the project has face boxes; see
+//! `placement.rs` for the rule and `Graphics::caption_placements` for what was drawn where.
 
 mod contrast;
+mod placement;
 mod raster;
 #[cfg(test)]
 mod tests;
@@ -29,6 +32,8 @@ use crate::project::{
     Align, Anim, Canvas, CaptionMode, CaptionStyle, Color, Item, ItemBody, Point, Project, Rect,
     Text, TextPreset, TrackKind, Word,
 };
+use placement::Choice;
+pub use placement::{CaptionPlacement, CaptionReport, FaceFit, Slot, caption_report};
 use raster::{ACCENT, DARK, Layer, Span, Spec};
 use timing::{Motion, accents, active_caption, active_word, caption_pages, motion};
 
@@ -50,6 +55,7 @@ pub struct Graphics {
     families: Vec<String>,
     layers: HashMap<u64, Layer>,
     pages: HashMap<u64, Vec<(Range<usize>, usize)>>,
+    placements: HashMap<u64, Choice>,
     bytes: usize,
     mask: Option<Mask>,
 }
@@ -98,6 +104,7 @@ impl Graphics {
             families,
             layers: HashMap::new(),
             pages: HashMap::new(),
+            placements: HashMap::new(),
             bytes: 0,
             mask: None,
         }
@@ -117,15 +124,27 @@ impl Graphics {
                 TrackKind::Captions if project.captions.mode != CaptionMode::Off => {
                     if let Some((item, words)) = active_caption(&track.items, t, project.canvas.fps)
                     {
-                        self.caption(
+                        // Placement is planned at canvas size so preview and export agree.
+                        let choice = self.choose(
+                            project,
                             item,
                             words,
-                            &project.captions,
-                            t,
-                            project.canvas.fps,
                             safe,
-                            pixmap,
+                            project.canvas.width,
+                            project.canvas.height,
                         );
+                        if choice.face != FaceFit::Hidden {
+                            self.caption(
+                                item,
+                                words,
+                                &project.captions,
+                                choice,
+                                t,
+                                project.canvas.fps,
+                                safe,
+                                pixmap,
+                            );
+                        }
                     }
                 }
                 TrackKind::Text | TrackKind::Overlay => {
@@ -173,6 +192,7 @@ impl Graphics {
         item: &Item,
         words: &[Word],
         style: &CaptionStyle,
+        choice: Choice,
         t: f64,
         fps: f64,
         safe: Rect,
@@ -215,21 +235,82 @@ impl Graphics {
         } else {
             range.clone()
         };
+        let Some(built) = self.caption_layer(
+            words,
+            shown,
+            line_break,
+            spoken,
+            style,
+            style.size * choice.scale,
+            safe,
+            target.width(),
+            target.height(),
+        ) else {
+            return;
+        };
+        let mut m = Motion::default();
+        if style.mode == CaptionMode::WordPop {
+            m = motion(
+                Anim::Pop,
+                ((relative - words[spoken].start) / 0.12) as f32,
+                false,
+            );
+            // The word is already readable during Herk's two-frame lead; only its size pops.
+            m.alpha = 1.0;
+        }
+        let position = Point::new(safe.x + safe.w / 2.0, choice.anchor);
+        if let Some(layer) = self.layers.get(&built.key) {
+            draw_layer(
+                layer,
+                target,
+                &mut self.mask,
+                position,
+                safe,
+                m,
+                Anim::None,
+                usize::MAX,
+            );
+        }
+    }
+
+    /// Finds or renders the layer for `words[shown]` at text size `size` (a fraction of the
+    /// canvas height) on a `w` x `h` px target. Placement measures candidates through this too,
+    /// so what it measures is what draws.
+    #[allow(clippy::too_many_arguments)]
+    fn caption_layer(
+        &mut self,
+        words: &[Word],
+        shown: Range<usize>,
+        line_break: usize,
+        spoken: usize,
+        style: &CaptionStyle,
+        size: f32,
+        safe: Rect,
+        w: u32,
+        h: u32,
+    ) -> Option<Built> {
+        let mut hash = DefaultHasher::new();
         (style.mode as u8).hash(&mut hash);
-        shown.start.hash(&mut hash);
-        shown.end.hash(&mut hash);
+        style.uppercase.hash(&mut hash);
+        for word in &words[shown.clone()] {
+            word.text.hash(&mut hash);
+            word.emphasis.hash(&mut hash);
+        }
+        (line_break > shown.start && line_break < shown.end)
+            .then(|| line_break - shown.start)
+            .hash(&mut hash);
         if style.mode == CaptionMode::Highlight {
-            spoken.hash(&mut hash);
+            (spoken - shown.start).hash(&mut hash);
         }
         style.font.hash(&mut hash);
-        style.size.to_bits().hash(&mut hash);
+        size.to_bits().hash(&mut hash);
         style.color.hash(&mut hash);
         style.highlight.hash(&mut hash);
         style.stroke.to_bits().hash(&mut hash);
         style.shadow.hash(&mut hash);
         style.boxed.hash(&mut hash);
-        target.width().hash(&mut hash);
-        target.height().hash(&mut hash);
+        w.hash(&mut hash);
+        h.hash(&mut hash);
         let key = hash.finish();
         if !self.layers.contains_key(&key) {
             let mut spans = Vec::new();
@@ -264,15 +345,13 @@ impl Graphics {
             }
             let font = self.family(&style.font).to_owned();
             let subtitle = style.mode == CaptionMode::Subtitle;
-            let size = fraction(style.size, 0.033)
-                * target.height() as f32
-                * if subtitle { 0.72 } else { 1.0 };
+            let size = fraction(size, 0.033) * h as f32 * if subtitle { 0.72 } else { 1.0 };
             let spec = Spec {
                 spans,
                 font: &font,
                 size,
-                width: safe.w * target.width() as f32 / 1.08,
-                height: safe.h * target.height() as f32 / 1.08,
+                width: safe.w * w as f32 / 1.08,
+                height: safe.h * h as f32 / 1.08,
                 max_lines: 2,
                 align: Align::Center,
                 stroke: style.stroke,
@@ -287,47 +366,29 @@ impl Graphics {
                 preset: None,
                 weight: 800,
             };
-            if let Some(layer) = raster::render(&mut self.fonts, &mut self.swash, spec) {
-                self.cache(key, layer);
-            }
+            let layer = raster::render(&mut self.fonts, &mut self.swash, spec)?;
+            self.cache(key, layer);
         }
-        let mut m = Motion::default();
-        if style.mode == CaptionMode::WordPop {
-            m = motion(
-                Anim::Pop,
-                ((relative - words[spoken].start) / 0.12) as f32,
-                false,
-            );
-            // The word is already readable during Herk's two-frame lead; only its size pops.
-            m.alpha = 1.0;
-        }
-        let position = Point::new(
-            safe.x + safe.w / 2.0,
-            if style.mode == CaptionMode::Subtitle && style.position == 0.70 {
-                safe.y + safe.h - 0.06
-            } else {
-                style.position
-            },
-        );
-        if let Some(layer) = self.layers.get(&key) {
-            draw_layer(
-                layer,
-                target,
-                &mut self.mask,
-                position,
-                safe,
-                m,
-                Anim::None,
-                usize::MAX,
-            );
-        }
+        let layer = self.layers.get(&key)?;
+        Some(Built {
+            key,
+            width: layer.image.width(),
+            height: layer.image.height(),
+            size: layer.size,
+        })
     }
 
-    fn text(&mut self, item: &Item, text: &Text, t: f64, safe: Rect, target: &mut PixmapMut<'_>) {
-        if text.text.trim().is_empty() {
-            return;
-        }
-        let defaults = Preset::for_kind(text.preset, safe);
+    /// Finds or renders the layer for a text item on a `w` x `h` px target. Caption placement
+    /// measures text through this too, so the hook's box it avoids is the one that draws.
+    fn text_layer(
+        &mut self,
+        item: &Item,
+        text: &Text,
+        defaults: &Preset,
+        safe: Rect,
+        w: u32,
+        h: u32,
+    ) -> Option<Built> {
         let mut hash = DefaultHasher::new();
         item.id.hash(&mut hash);
         text.text.hash(&mut hash);
@@ -340,8 +401,8 @@ impl Graphics {
         text.style.stroke.map(f32::to_bits).hash(&mut hash);
         text.style.uppercase.hash(&mut hash);
         text.style.align.map(|a| a as u8).hash(&mut hash);
-        target.width().hash(&mut hash);
-        target.height().hash(&mut hash);
+        w.hash(&mut hash);
+        h.hash(&mut hash);
         let key = hash.finish();
         if !self.layers.contains_key(&key) {
             let color = text.style.color.unwrap_or(defaults.color);
@@ -381,14 +442,13 @@ impl Graphics {
             let font = self
                 .family(text.style.font.as_deref().unwrap_or(defaults.font))
                 .to_owned();
-            let size = fraction(text.style.size.unwrap_or(defaults.size), defaults.size)
-                * target.height() as f32;
+            let size = fraction(text.style.size.unwrap_or(defaults.size), defaults.size) * h as f32;
             let spec = Spec {
                 spans,
                 font: &font,
                 size,
-                width: safe.w * target.width() as f32 / 1.08,
-                height: safe.h * target.height() as f32 / 1.08,
+                width: safe.w * w as f32 / 1.08,
+                height: safe.h * h as f32 / 1.08,
                 max_lines: defaults.lines.max(content.lines().count()),
                 align: text.style.align.unwrap_or(defaults.align),
                 stroke: text.style.stroke.unwrap_or(defaults.stroke),
@@ -402,10 +462,29 @@ impl Graphics {
                 preset: Some(text.preset),
                 weight: defaults.weight,
             };
-            if let Some(layer) = raster::render(&mut self.fonts, &mut self.swash, spec) {
-                self.cache(key, layer);
-            }
+            let layer = raster::render(&mut self.fonts, &mut self.swash, spec)?;
+            self.cache(key, layer);
         }
+        let layer = self.layers.get(&key)?;
+        Some(Built {
+            key,
+            width: layer.image.width(),
+            height: layer.image.height(),
+            size: layer.size,
+        })
+    }
+
+    fn text(&mut self, item: &Item, text: &Text, t: f64, safe: Rect, target: &mut PixmapMut<'_>) {
+        if text.text.trim().is_empty() {
+            return;
+        }
+        let defaults = Preset::for_kind(text.preset, safe);
+        let Some(built) =
+            self.text_layer(item, text, &defaults, safe, target.width(), target.height())
+        else {
+            return;
+        };
+        let key = built.key;
         let duration = item.duration.min(0.6) as f32 / 2.0;
         let entering = ((t - item.start) as f32 / duration.max(0.001)).clamp(0.0, 1.0);
         let leaving =
@@ -423,19 +502,19 @@ impl Graphics {
         if text.preset == TextPreset::Kinetic && anim == Anim::Fade && !exit {
             m.scale = 1.0 + 0.28 * (1.0 - entering).powi(3);
         }
-        let mut position = text.position.unwrap_or(defaults.position);
-        let bounds = if text.position.is_some() && text.preset != TextPreset::Callout {
-            Rect::FULL
-        } else {
-            safe
-        };
+        let (position, bounds) = text_place(text, &defaults, safe);
         if text.preset == TextPreset::Callout {
-            let point = text
-                .position
-                .unwrap_or(Point::new(safe.x + safe.w * 0.67, safe.y + safe.h * 0.56));
-            position = Point::new(point.x - safe.w * 0.20, point.y - safe.h * 0.14);
+            let point = callout_point(text, safe);
             if let Some(layer) = self.layers.get(&key) {
-                let (cx, cy) = center(layer, target, position, safe, m.scale);
+                let (cx, cy) = center(
+                    layer.image.width() as f32,
+                    layer.image.height() as f32,
+                    target.width() as f32,
+                    target.height() as f32,
+                    position,
+                    safe,
+                    m.scale,
+                );
                 let mut path = PathBuilder::new();
                 path.move_to(cx, cy + layer.image.height() as f32 * 0.4);
                 path.line_to(
@@ -628,17 +707,15 @@ impl Preset {
 }
 
 fn center(
-    layer: &Layer,
-    target: &PixmapMut<'_>,
+    layer_w: f32,
+    layer_h: f32,
+    w: f32,
+    h: f32,
     position: Point,
     bounds: Rect,
     scale: f32,
 ) -> (f32, f32) {
-    let (w, h) = (target.width() as f32, target.height() as f32);
-    let (half_w, half_h) = (
-        layer.image.width() as f32 * scale / 2.0,
-        layer.image.height() as f32 * scale / 2.0,
-    );
+    let (half_w, half_h) = (layer_w * scale / 2.0, layer_h * scale / 2.0);
     let x = if position.x.is_finite() {
         position.x * w
     } else {
@@ -661,6 +738,72 @@ fn center(
     )
 }
 
+/// A cached caption layer: its cache key, pixel size and the text size it was shrunk to fit.
+#[derive(Clone, Copy)]
+struct Built {
+    key: u64,
+    width: u32,
+    height: u32,
+    size: f32,
+}
+
+/// Where `captions.position` aims: subtitles keep their own low default until it is changed.
+fn requested_y(style: &CaptionStyle, safe: Rect) -> f32 {
+    if style.mode == CaptionMode::Subtitle && style.position == 0.70 {
+        safe.y + safe.h - 0.06
+    } else {
+        style.position
+    }
+}
+
+/// Where a text item's layer is centered and the area it may not leave, as `text` draws it.
+fn text_place(text: &Text, defaults: &Preset, safe: Rect) -> (Point, Rect) {
+    if text.preset == TextPreset::Callout {
+        let point = callout_point(text, safe);
+        return (
+            Point::new(point.x - safe.w * 0.20, point.y - safe.h * 0.14),
+            safe,
+        );
+    }
+    (
+        text.position.unwrap_or(defaults.position),
+        if text.position.is_some() {
+            Rect::FULL
+        } else {
+            safe
+        },
+    )
+}
+
+/// The point a callout's leader line ends on.
+fn callout_point(text: &Text, safe: Rect) -> Point {
+    text.position
+        .unwrap_or(Point::new(safe.x + safe.w * 0.67, safe.y + safe.h * 0.56))
+}
+
+/// The box (fractions of the canvas) a `layer_w` x `layer_h` px layer fills on a `w` x `h` px
+/// target when `draw_layer` centers it at `position` inside `bounds`, at motion scale `scale`
+/// (1 at rest; `pop_peak()` at the top of a pop-in).
+fn layer_box(
+    layer_w: u32,
+    layer_h: u32,
+    w: u32,
+    h: u32,
+    position: Point,
+    bounds: Rect,
+    scale: f32,
+) -> Rect {
+    let (lw, lh, wf, hf) = (layer_w as f32, layer_h as f32, w as f32, h as f32);
+    let scale = scale.min(bounds.w * wf / lw).min(bounds.h * hf / lh);
+    let (cx, cy) = center(lw, lh, wf, hf, position, bounds, scale);
+    Rect {
+        x: (cx - lw * scale / 2.0) / wf,
+        y: (cy - lh * scale / 2.0) / hf,
+        w: lw * scale / wf,
+        h: lh * scale / hf,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_layer(
     layer: &Layer,
@@ -676,12 +819,13 @@ fn draw_layer(
         return;
     }
     let (width, height) = (layer.image.width() as f32, layer.image.height() as f32);
+    let (target_w, target_h) = (target.width() as f32, target.height() as f32);
     let scale = m
         .scale
-        .min(bounds.w * target.width() as f32 / width)
-        .min(bounds.h * target.height() as f32 / height);
+        .min(bounds.w * target_w / width)
+        .min(bounds.h * target_h / height);
     let shifted = Point::new(position.x + m.x * 0.08, position.y + m.y * 0.055);
-    let (cx, cy) = center(layer, target, shifted, bounds, scale);
+    let (cx, cy) = center(width, height, target_w, target_h, shifted, bounds, scale);
     let transform = Transform::from_row(
         scale,
         0.0,

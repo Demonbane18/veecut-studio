@@ -9,7 +9,7 @@ use std::cmp::Reverse;
 
 pub use beats::{Beats, beats};
 pub use cuts::{CutPlan, CutReason, CutSettings, Removal, plan_cuts};
-pub use face::face_focus;
+pub use face::{face_track, focus};
 pub use highlights::{Highlight, highlights};
 
 use crate::transcript::TranscriptWord;

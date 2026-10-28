@@ -90,6 +90,16 @@ pub(crate) fn max_decode_scale(clip: &Clip) -> f32 {
     (kb * z).clamp(1.0, 4.0)
 }
 
+/// Size the decoder frames `clip` at for a `dest_w` x `dest_h` output: large enough that a
+/// punch-in is a crop, not an upscale.
+pub(crate) fn decode_size(clip: &Clip, dest_w: u32, dest_h: u32) -> (u32, u32) {
+    let scale = max_decode_scale(clip);
+    (
+        round_even((dest_w as f32 * scale).round() as u32),
+        round_even((dest_h as f32 * scale).round() as u32),
+    )
+}
+
 /// Cover crop of a source picture into an output aspect, centered on `focus` and clamped
 /// so the window stays inside the source.
 pub(crate) fn cover_crop(

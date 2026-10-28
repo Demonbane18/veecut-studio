@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use super::{
-    Job, SAMPLE_RATE, add_captions, audio_track, hook, hook_from, keep_captions_off_face, lay_main,
-    music_bed, pcm, place_audio, place_broll, text_sfx,
+    Job, SAMPLE_RATE, add_captions, audio_track, hook, hook_from, lay_main, music_bed, pcm,
+    place_audio, place_broll, text_sfx, track_face,
 };
 use crate::analyze::{self, CutReason};
 use crate::media;
@@ -137,6 +137,37 @@ fn cut_summary(job: &mut Job, removed: &[analyze::Removal], before: f64, after: 
     ));
 }
 
+fn add_hook(
+    job: &mut Job,
+    project: &mut Project,
+    transcript: &Transcript,
+    face: Option<Point>,
+) -> Result<()> {
+    let picked = job
+        .req
+        .hook
+        .clone()
+        .map(|text| (text, 3.0))
+        .or_else(|| hook_from(transcript));
+    if let Some((text, src_end)) = picked {
+        let until = project
+            .source_to_timeline(&transcript.asset, src_end)
+            .unwrap_or(3.0);
+        hook(project, &text, until, face)?;
+        if job.req.hook.is_none() {
+            job.report.review.push(format!(
+                "Automatic hook: \"{text}\". Check that it works as the opener."
+            ));
+        }
+    } else {
+        job.report.review.push(
+            "No complete short sentence fit an automatic hook, so the hook was left out. Add your own hook."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Talking head (short or long) and screen tutorials.
 pub(super) fn talking_head(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> {
     let kind = job.req.kind;
@@ -161,11 +192,11 @@ pub(super) fn talking_head(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Res
     }
     cut_summary(job, &plan.removed, info.duration, p.duration());
 
-    // Framing: keep the face in a cover crop and at the center of punch-ins, and keep captions
-    // off it. Screen recordings have no face to find.
+    // Framing: keep the face in a cover crop and at the center of punch-ins, and track it so
+    // captions stay off the mouth and chin. Screen recordings have no face to find.
     let face = if kind != VideoKind::Tutorial {
         progress("Finding the face");
-        analyze::face_focus(&source, (0.0, info.duration), 9).unwrap_or(None)
+        track_face(job, &mut p, &src, &source, (0.0, info.duration))
     } else {
         None
     };
@@ -182,23 +213,9 @@ pub(super) fn talking_head(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Res
         p.captions.uppercase = false;
         p.captions.max_words = 10;
         p.captions.max_chars = 42;
-    } else {
-        keep_captions_off_face(job, &mut p, face);
     }
     if kind == VideoKind::TalkingHeadShort && (job.req.hook.is_some() || job.style.hook()) {
-        let picked = job
-            .req
-            .hook
-            .clone()
-            .map(|h| (h, 3.0))
-            .or_else(|| hook_from(&transcript));
-        if let Some((text, src_end)) = picked {
-            let until = p.source_to_timeline(&src, src_end).unwrap_or(3.0);
-            hook(&mut p, &text, until, face)?;
-            if job.req.hook.is_none() {
-                job.report.review.push(format!("Hook text picked from the first sentence: \"{text}\". Replace it with a sharper claim if you have one."));
-            }
-        }
+        add_hook(job, &mut p, &transcript, face)?;
     }
     place_broll(job, &dir, &mut p, &transcript)?;
     add_captions(job, &mut p, &transcript)?;
@@ -416,11 +433,24 @@ pub(super) fn podcast(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<(
                 .collect::<Vec<_>>()
         ));
     }
-    let face = analyze::face_focus(&sources[0], (0.0, first.duration), 9).unwrap_or(None);
+    // One camera: aim framing at its face. With several, each camera's face is tracked for the
+    // captions, but there is no single place to aim.
+    progress("Finding the faces");
+    let mut face = None;
+    for (k, (cam, source)) in cams.iter().zip(&sources).enumerate() {
+        let duration = if k == 0 {
+            first.duration
+        } else {
+            media::probe(source)?.duration
+        };
+        let found = track_face(job, &mut p, cam, source, (0.0, duration));
+        if k == 0 {
+            face = found;
+        }
+    }
     if !multi {
         set_focus(&mut p, face);
     }
-    keep_captions_off_face(job, &mut p, face);
     cut_summary(job, &plan.removed, first.duration, p.duration());
     place_broll(job, &dir, &mut p, &transcript)?;
     add_captions(job, &mut p, &transcript)?;
@@ -501,6 +531,7 @@ pub(super) fn clips(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()>
         let mut t = transcript.clone();
         t.asset = src.clone();
         t.save(&dir.join("transcript.json"))?;
+        t.words.retain(|w| w.start >= m.start && w.end <= m.end);
         let keeps: Vec<(f64, f64)> = plan
             .keep
             .iter()
@@ -508,18 +539,10 @@ pub(super) fn clips(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()>
             .filter(|(a, b)| b - a > 0.2)
             .collect();
         lay_main(&mut p, &src, &keeps)?;
-        let face = analyze::face_focus(&source, (m.start, m.end), 7).unwrap_or(None);
+        let face = track_face(job, &mut p, &src, &source, (m.start, m.end));
         set_focus(&mut p, face);
-        keep_captions_off_face(job, &mut p, face);
         punch_ins(&mut p, &t, 1.2, 2.0, 2.8, 1.15);
-        let title: String = job.req.hook.clone().unwrap_or_else(|| {
-            m.title
-                .split_whitespace()
-                .take(7)
-                .collect::<Vec<_>>()
-                .join(" ")
-        });
-        hook(&mut p, &title, 3.0, face)?;
+        add_hook(job, &mut p, &t, face)?;
         job.report.summary.push(format!(
             "Clip {}: {} ({:.0} s), score {:.2}: {}",
             n + 1,
@@ -723,8 +746,101 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
 mod tests {
     use super::*;
     use crate::ops::apply;
-    use crate::project::{Asset, Canvas};
+    use crate::project::{Asset, Canvas, ItemBody};
     use crate::transcript::TranscriptWord;
+
+    fn transcript(text: &str) -> Transcript {
+        let words: Vec<_> = text
+            .split_whitespace()
+            .enumerate()
+            .map(|(i, text)| TranscriptWord {
+                text: text.into(),
+                start: i as f64 * 0.4,
+                end: i as f64 * 0.4 + 0.3,
+                confidence: None,
+            })
+            .collect();
+        Transcript {
+            asset: "a".into(),
+            provider: "test".into(),
+            language: None,
+            duration: words.last().map_or(0.0, |w| w.end),
+            words,
+        }
+    }
+
+    #[test]
+    fn automatic_hook_keeps_complete_sentences_and_scores_later_candidates() {
+        let t = transcript(
+            "You know I got the opportunity to visit a place far away yesterday. \
+             We walked home. Why do you always quit?",
+        );
+        let (text, end) = hook_from(&t).unwrap();
+        assert_eq!(text.replace('*', ""), "Why do you always quit");
+        assert_eq!(end, t.words.last().unwrap().end);
+
+        let first = transcript("We walked home. Why do you always quit?");
+        let (text, end) = hook_from(&first).unwrap();
+        assert_eq!(text.replace('*', ""), "We walked home");
+        assert_eq!(end, first.sentences()[0].end);
+
+        let long_title = transcript(
+            "You know I got the opportunity to visit a place far away yesterday. \
+             Extraordinary discoveries change everything about interplanetary exploration.",
+        );
+        let (text, end) = hook_from(&long_title).unwrap();
+        assert_eq!(
+            text.replace('*', ""),
+            "Extraordinary discoveries change everything about interplanetary exploration"
+        );
+        assert_eq!(end, long_title.words.last().unwrap().end);
+    }
+
+    #[test]
+    fn automatic_hook_omits_long_or_unfinished_sentences_and_requests_review() {
+        let ws = crate::workspace::Workspace { root: ".".into() };
+        let req = super::super::EditRequest::new(VideoKind::TalkingHeadShort);
+        for text in [
+            "You know I got the opportunity to visit a place far away yesterday.",
+            "You know I got the opportunity to",
+        ] {
+            let t = transcript(text);
+            assert!(hook_from(&t).is_none());
+            let mut job = Job {
+                ws: &ws,
+                req: &req,
+                style: crate::style::Style::default(),
+                report: super::super::EditReport::default(),
+            };
+            let mut p = Project::new("t", req.kind, Canvas::vertical());
+            add_hook(&mut job, &mut p, &t, None).unwrap();
+            assert!(p.tracks.iter().all(|track| track.items.is_empty()));
+            assert_eq!(job.report.review.len(), 1);
+        }
+    }
+
+    #[test]
+    fn explicit_hook_is_preserved_without_automatic_review() {
+        let ws = crate::workspace::Workspace { root: ".".into() };
+        let mut req = super::super::EditRequest::new(VideoKind::TalkingHeadShort);
+        let text = "You know I got the opportunity to choose my own *hook* unchanged";
+        req.hook = Some(text.into());
+        let mut job = Job {
+            ws: &ws,
+            req: &req,
+            style: crate::style::Style::default(),
+            report: super::super::EditReport::default(),
+        };
+        let mut p = Project::new("t", req.kind, Canvas::vertical());
+        add_hook(&mut job, &mut p, &transcript("Nothing fits"), None).unwrap();
+        let hooks: Vec<_> = p.tracks.iter().flat_map(|track| &track.items).collect();
+        assert_eq!(hooks.len(), 1);
+        let ItemBody::Text(hook) = &hooks[0].body else {
+            panic!("hook must be text");
+        };
+        assert_eq!(hook.text, text);
+        assert!(job.report.review.is_empty());
+    }
 
     #[test]
     fn punch_ins_alternate_and_respect_max_shot() {

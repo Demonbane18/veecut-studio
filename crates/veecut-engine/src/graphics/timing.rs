@@ -2,23 +2,28 @@ use std::ops::Range;
 
 use crate::project::{Anim, Item, ItemBody, Word};
 
+/// When a caption page is on screen: two frames before its first word to 300 ms after its last.
+pub(super) fn page_span(item: &Item, words: &[Word], fps: f64) -> Option<(f64, f64)> {
+    let (first, last) = (words.first()?, words.last()?);
+    Some((
+        item.start + first.start - 2.0 / fps.max(1.0),
+        item.start + last.end + 0.3,
+    ))
+}
+
 /// Herk Edit Kit's two-frame lead and hard page swaps, with a 300 ms tail.
 pub(super) fn active_caption(items: &[Item], t: f64, fps: f64) -> Option<(&Item, &[Word])> {
-    let lead = 2.0 / fps.max(1.0);
     items
         .iter()
         .filter_map(|item| {
             let ItemBody::Caption(caption) = &item.body else {
                 return None;
             };
-            let first = caption.words.first()?;
-            let start = item.start + first.start - lead;
-            (t >= start).then_some((item, caption.words.as_slice(), start))
+            let (start, end) = page_span(item, &caption.words, fps)?;
+            (t >= start).then_some((item, caption.words.as_slice(), start, end))
         })
         .max_by(|a, b| a.2.total_cmp(&b.2))
-        .and_then(|(item, words, _)| {
-            (t < item.start + words.last()?.end + 0.3).then_some((item, words))
-        })
+        .and_then(|(item, words, _, end)| (t < end).then_some((item, words)))
 }
 
 pub(super) fn active_word(words: &[Word], t: f64) -> usize {
@@ -141,6 +146,14 @@ pub(super) fn motion(anim: Anim, progress: f32, exit: bool) -> Motion {
         Anim::Typewriter | Anim::Wipe => m.reveal = visible,
     }
     m
+}
+
+/// The largest scale a word-pop entrance reaches: the overshoot of `motion(Anim::Pop, ..)`.
+/// Caption placement keeps this larger box clear of the face too.
+pub(super) fn pop_peak() -> f32 {
+    (0..=100)
+        .map(|i| motion(Anim::Pop, i as f32 / 100.0, false).scale)
+        .fold(1.0, f32::max)
 }
 
 #[cfg(test)]

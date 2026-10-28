@@ -243,9 +243,7 @@ fn fill_clip(
     };
     let local = (t - item.start).clamp(0.0, item.duration);
     let (scale, focus) = math::view_at(clip, local, item.duration);
-    let decode_scale = math::max_decode_scale(clip);
-    let dec_w = math::round_even((dest_w as f32 * decode_scale).round() as u32);
-    let dec_h = math::round_even((dest_h as f32 * decode_scale).round() as u32);
+    let (dec_w, dec_h) = math::decode_size(clip, dest_w, dest_h);
     let bg = project.canvas.background;
     let req = FrameReq {
         id: item.id.clone(),

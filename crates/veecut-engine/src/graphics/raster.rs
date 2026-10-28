@@ -47,6 +47,8 @@ pub(super) struct Layer {
     pub glyphs: Vec<Rect>,
     pub line_bottoms: Vec<f32>,
     pub contrast: Option<ContrastGuard>,
+    /// The font size in pixels after shrinking to fit; below the requested size when it was cut.
+    pub size: f32,
 }
 
 pub(super) fn paint(color: Color) -> Paint<'static> {
@@ -375,6 +377,7 @@ pub(super) fn render(
         glyphs: glyphs.into_iter().map(|(_, _, rect)| rect).collect(),
         line_bottoms,
         contrast,
+        size,
     })
 }
 

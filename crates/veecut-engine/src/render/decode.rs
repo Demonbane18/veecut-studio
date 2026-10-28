@@ -11,7 +11,7 @@ use fast_image_resize::images::{Image, ImageRef};
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 
 use crate::media::{self, ffmpeg};
-use crate::project::{AssetKind, Fit, Point};
+use crate::project::{AssetKind, Clip, Fit, Point, Rect};
 
 use super::math::{self, CropRect};
 
@@ -457,18 +457,28 @@ fn pull(slot: &mut Slot, req: &FrameReq) -> Result<bool> {
     }
 }
 
-fn video_framing(req: &FrameReq) -> (FocusMap, String) {
-    match req.fit {
+/// The map from source points to the decoded picture, and the source window ffmpeg crops for
+/// `Fit::Cover` (None for `Fit::Contain`). Shared by decoding and by caption placement, so the
+/// face a caption avoids is where the picture really draws it.
+fn video_map(
+    fit: Fit,
+    src_w: u32,
+    src_h: u32,
+    dec_w: u32,
+    dec_h: u32,
+    focus: Point,
+) -> (FocusMap, Option<(u32, u32, u32, u32)>) {
+    match fit {
         Fit::Cover => {
             let crop = math::cover_crop(
-                req.src_w as f64,
-                req.src_h as f64,
-                req.dec_w as f64,
-                req.dec_h as f64,
-                req.focus.x as f64,
-                req.focus.y as f64,
+                src_w as f64,
+                src_h as f64,
+                dec_w as f64,
+                dec_h as f64,
+                focus.x as f64,
+                focus.y as f64,
             );
-            let px = math::crop_px(crop, req.src_w, req.src_h);
+            let px = math::crop_px(crop, src_w, src_h);
             let map = FocusMap::Cover {
                 crop: CropRect {
                     x: px.0 as f64,
@@ -476,31 +486,73 @@ fn video_framing(req: &FrameReq) -> (FocusMap, String) {
                     w: px.2 as f64,
                     h: px.3 as f64,
                 },
-                src_w: req.src_w as f64,
-                src_h: req.src_h as f64,
+                src_w: src_w as f64,
+                src_h: src_h as f64,
             };
-            (
-                map,
-                video_filter(req.speed, req.fps, &framing_filter(req, Some(px))),
-            )
+            (map, Some(px))
         }
         Fit::Contain => {
-            let scale = (req.dec_w as f64 / req.src_w.max(1) as f64)
-                .min(req.dec_h as f64 / req.src_h.max(1) as f64);
-            let iw = req.src_w as f64 * scale;
-            let ih = req.src_h as f64 * scale;
+            let scale =
+                (dec_w as f64 / src_w.max(1) as f64).min(dec_h as f64 / src_h.max(1) as f64);
+            let iw = src_w as f64 * scale;
+            let ih = src_h as f64 * scale;
             let map = FocusMap::Contain {
-                ox: (req.dec_w as f64 - iw) * 0.5,
-                oy: (req.dec_h as f64 - ih) * 0.5,
+                ox: (dec_w as f64 - iw) * 0.5,
+                oy: (dec_h as f64 - ih) * 0.5,
                 scale,
-                src_w: req.src_w as f64,
-                src_h: req.src_h as f64,
+                src_w: src_w as f64,
+                src_h: src_h as f64,
             };
-            (
-                map,
-                video_filter(req.speed, req.fps, &framing_filter(req, None)),
-            )
+            (map, None)
         }
+    }
+}
+
+fn video_framing(req: &FrameReq) -> (FocusMap, String) {
+    let (map, crop) = video_map(
+        req.fit, req.src_w, req.src_h, req.dec_w, req.dec_h, req.focus,
+    );
+    (
+        map,
+        video_filter(req.speed, req.fps, &framing_filter(req, crop)),
+    )
+}
+
+/// Where `r`, a rectangle of the source picture (fractions of the source), lands on the canvas
+/// (fractions of the canvas) when `clip` is `local` seconds into its item: the same crop, focus
+/// and zoom window `DecoderPool::fill` draws with. The result may reach past the canvas edges.
+pub(crate) fn canvas_rect(
+    clip: &Clip,
+    src: (u32, u32),
+    canvas: (u32, u32),
+    local: f64,
+    duration: f64,
+    r: Rect,
+) -> Rect {
+    let (scale, view) = math::view_at(clip, local, duration);
+    let (dec_w, dec_h) = math::decode_size(clip, canvas.0, canvas.1);
+    let (map, _) = video_map(
+        clip.fit,
+        src.0,
+        src.1,
+        dec_w,
+        dec_h,
+        clip.focus.unwrap_or(Point::CENTER),
+    );
+    let (dw, dh) = (dec_w as f64, dec_h as f64);
+    let (fx, fy) = map.pixel(view, dw, dh);
+    let (x, y, w, h) = math::zoom_window(dw, dh, scale as f64, fx, fy);
+    let corner = |px: f32, py: f32| {
+        let (cx, cy) = map.pixel(Point::new(px, py), dw, dh);
+        (((cx - x) / w) as f32, ((cy - y) / h) as f32)
+    };
+    let (x0, y0) = corner(r.x, r.y);
+    let (x1, y1) = corner(r.x + r.w, r.y + r.h);
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
     }
 }
 
@@ -633,5 +685,42 @@ mod tests {
         assert!(s < p, "{f}");
         assert!(f.contains("PTS-STARTPTS)/1.500000"), "{f}");
         assert!(!f.contains("noautorotate"));
+    }
+
+    #[test]
+    fn canvas_rect_follows_the_crop_and_the_punch_in() {
+        // A 16:9 source in a 9:16 canvas keeps the full height and 608 of 1920 px of width.
+        let mut clip = Clip::new("a", 0.0);
+        clip.focus = Some(Point::new(0.5, 0.45));
+        let (src, canvas) = ((1920, 1080), (1080, 1920));
+        let face = Rect {
+            x: 0.45,
+            y: 0.3,
+            w: 0.1,
+            h: 0.2,
+        };
+        let plain = canvas_rect(&clip, src, canvas, 1.0, 4.0, face);
+        assert!((plain.y - 0.3).abs() < 1e-3 && (plain.h - 0.2).abs() < 1e-3);
+        assert!((plain.w - 0.1 * 1920.0 / 608.0).abs() < 2e-3);
+        assert!((plain.x + plain.w / 2.0 - 0.5).abs() < 2e-3);
+
+        // A 1.15x punch-in aimed at y 0.45 maps source y to 1.15 * y - 0.0175 and grows the box.
+        clip.zooms.push(crate::project::Zoom {
+            at: 0.0,
+            duration: 4.0,
+            scale: 1.15,
+            focus: None,
+            ease: 0.0,
+        });
+        let zoomed = canvas_rect(&clip, src, canvas, 1.0, 4.0, face);
+        assert!(
+            (zoomed.y - (1.15 * 0.3 - 0.0175)).abs() < 2e-3,
+            "{zoomed:?}"
+        );
+        assert!((zoomed.h - 0.2 * 1.15).abs() < 2e-3, "{zoomed:?}");
+        // Outside the zoom the picture is back at 1x.
+        clip.zooms[0].at = 3.0;
+        let before = canvas_rect(&clip, src, canvas, 1.0, 4.0, face);
+        assert!((before.y - 0.3).abs() < 1e-3);
     }
 }

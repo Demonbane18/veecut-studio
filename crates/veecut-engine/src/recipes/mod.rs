@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::analyze::{self, CutSettings};
 use crate::config::Config;
+use crate::graphics::{self, FaceFit, Graphics};
 use crate::ops::{self, Op};
 use crate::project::{
     Anim, AssetKind, AssetRole, Canvas, CaptionMode, ItemBody, KenBurns, Point, Project,
@@ -41,7 +42,7 @@ pub struct EditRequest {
     pub copy: Option<String>,
     pub canvas: Option<Canvas>,
     pub name: Option<String>,
-    /// Hook text for the first seconds; the recipe picks one from the first sentence when unset.
+    /// Hook text for the first seconds; otherwise the recipe picks a complete short sentence.
     pub hook: Option<String>,
     /// Spoken language code (`en`, `tl`); falls back to the style, then auto-detect.
     pub language: Option<String>,
@@ -553,16 +554,36 @@ pub(crate) fn hook(
     Ok(())
 }
 
-/// A hook from the first sentence: the whole sentence when it is short, else its first seven
-/// words, with the strongest word in the accent color.
+/// A complete sentence of at most ten words, preferring the opener, then the clips scorer.
+/// Highlight titles are shortened for display, so recover the full sentence from its source time.
 pub(crate) fn hook_from(transcript: &Transcript) -> Option<(String, f64)> {
-    let first = transcript.sentences().into_iter().next()?;
-    let take = if first.end_word - first.first <= 10 {
-        first.end_word
-    } else {
-        first.first + 7
+    let sentences = transcript.sentences();
+    let fits = |s: &&crate::transcript::Sentence| {
+        s.end_word - s.first <= 10 && s.text.trim_end().ends_with(['.', '?', '!'])
     };
-    let words = &transcript.words[first.first..take];
+    let first = sentences.first()?;
+    let picked = if fits(&first) {
+        first
+    } else {
+        let short: Vec<_> = sentences.iter().filter(fits).collect();
+        let max_len = short.iter().map(|s| s.end - s.start).reduce(f64::max)?;
+        let candidates = Transcript {
+            asset: transcript.asset.clone(),
+            provider: transcript.provider.clone(),
+            language: transcript.language.clone(),
+            duration: transcript.duration,
+            words: short
+                .iter()
+                .flat_map(|s| &transcript.words[s.first..s.end_word])
+                .cloned()
+                .collect(),
+        };
+        let best = analyze::highlights(&candidates, 0.0, max_len, 1)
+            .into_iter()
+            .next()?;
+        short.into_iter().find(|s| s.start == best.start)?
+    };
+    let words = &transcript.words[picked.first..picked.end_word];
     let emphasis = analyze::emphasis(words);
     let mut marked = false;
     let text: Vec<String> = words
@@ -585,20 +606,93 @@ pub(crate) fn hook_from(transcript: &Transcript) -> Option<(String, f64)> {
     (!text.is_empty()).then(|| (text.join(" "), words.last().map(|w| w.end).unwrap_or(3.0)))
 }
 
-/// Moves captions off the face: Herk Edit Kit never puts captions over the mouth or chin, and
-/// puts them on the shirt in a punch-in.
-pub(crate) fn keep_captions_off_face(job: &mut Job, project: &mut Project, face: Option<Point>) {
-    let Some(face) = face else { return };
-    if project.captions.mode == CaptionMode::Off {
+/// Finds the speaker's face over time in `range` of `source` and keeps the boxes in the project
+/// (`/faces`), where caption placement reads them. Returns the median face center, where
+/// framing and punch-ins aim. A failed or empty detection goes on the review list: captions are
+/// then not checked against the face, and the report must not suggest they were.
+pub(crate) fn track_face(
+    job: &mut Job,
+    project: &mut Project,
+    asset: &str,
+    source: &Path,
+    range: (f64, f64),
+) -> Option<Point> {
+    let track = match analyze::face_track(source, range) {
+        Ok(track) if !track.is_empty() => track,
+        Ok(_) => {
+            job.report.review.push(
+                "No face was found in the footage, so captions were not checked against the face."
+                    .into(),
+            );
+            return None;
+        }
+        Err(e) => {
+            job.report.review.push(format!(
+                "Face detection failed ({e:#}), so captions were not checked against the face."
+            ));
+            return None;
+        }
+    };
+    let focus = analyze::focus(&track);
+    let found = track.len();
+    let mut faces = project.faces.clone();
+    faces.insert(asset.to_string(), track);
+    match ops::apply(
+        project,
+        &Op::Set {
+            path: "/faces".into(),
+            value: serde_json::json!(faces),
+        },
+    ) {
+        Ok(_) => job.report.summary.push(format!(
+            "Face found at {found} checks over {:.0} s; captions keep off the mouth and chin where it was found",
+            range.1 - range.0
+        )),
+        Err(e) => job.report.review.push(format!(
+            "Could not keep the face boxes ({e:#}), so captions were not checked against the face."
+        )),
+    }
+    focus
+}
+
+/// Adds what the caption placement did to the report: pages moved, hidden or not checked against
+/// the face.
+fn note_caption_placement(job: &mut Job, project: &Project) {
+    let text = project.tracks.iter().any(|t| {
+        matches!(t.kind, TrackKind::Text | TrackKind::Overlay)
+            && t.items.iter().any(|i| matches!(i.body, ItemBody::Text(_)))
+    });
+    if project.faces.is_empty() && !text {
         return;
     }
-    if (project.captions.position - face.y).abs() < 0.2 {
-        let to = if face.y < 0.55 { 0.74 } else { 0.22 };
+    let report = graphics::caption_report(&mut Graphics::new(), project, 8);
+    let first = |fit: FaceFit| {
+        report
+            .examples
+            .iter()
+            .find(|p| p.face == fit)
+            .map(|p| p.start)
+    };
+    if report.moved > 0 {
         job.report.summary.push(format!(
-            "Captions moved from {:.2} to {to:.2} of the height to stay off the face",
-            project.captions.position
+            "{} caption pages moved or shrunk to stay off the mouth, chin and hook",
+            report.moved
         ));
-        project.captions.position = to;
+    }
+    if let Some(at) = first(FaceFit::Hidden) {
+        job.report.review.push(format!(
+            "{} caption pages are not shown because every slot would cover the mouth, the chin or other text such as the hook (first at timeline {at:.1} s). Zoom out there, move the hook or change the captions.",
+            report.hidden
+        ));
+    }
+    if report.gaps > 0 {
+        let at = first(FaceFit::Unchecked)
+            .map(|t| format!(", first at timeline {t:.1} s"))
+            .unwrap_or_default();
+        job.report.review.push(format!(
+            "The face was not found at some moment of {} caption pages ({} not checked at all{at}); the check covers only where it was found.",
+            report.gaps, report.unchecked
+        ));
     }
 }
 
@@ -616,6 +710,7 @@ pub(crate) fn add_captions(
         "{pages} caption pages ({:?})",
         project.captions.mode
     ));
+    note_caption_placement(job, project);
     Ok(())
 }
 

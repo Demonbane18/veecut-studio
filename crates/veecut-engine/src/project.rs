@@ -4,6 +4,7 @@
 //! output size.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -846,6 +847,17 @@ pub struct Marker {
     pub done: bool,
 }
 
+/// The largest face found in a source picture at one moment, as a box in fractions of the picture.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FaceSample {
+    /// Source seconds.
+    pub t: f64,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
 /// One edit.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Project {
@@ -866,6 +878,10 @@ pub struct Project {
     pub tracks: Vec<Track>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
+    /// Face boxes over time per asset id (sorted by `t`), found when a recipe ran. Captions use
+    /// them to stay off the mouth and chin. Replace them with `{"op":"set","path":"/faces",...}`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub faces: BTreeMap<String, Vec<FaceSample>>,
 }
 
 impl Project {
@@ -897,6 +913,7 @@ impl Project {
                 track("sfx", TrackKind::Audio, "Sound effects"),
             ],
             markers: Vec::new(),
+            faces: BTreeMap::new(),
         }
     }
 
@@ -1270,5 +1287,38 @@ mod tests {
         p.assets.push(asset("a", 3.0));
         let err = p.validate().unwrap_err().to_string();
         assert!(err.contains("past the end"), "{err}");
+    }
+
+    #[test]
+    fn face_boxes_are_optional_and_set_through_the_op() {
+        let mut p = Project::new("t", VideoKind::TalkingHeadShort, Canvas::vertical());
+        p.assets.push(asset("a", 60.0));
+        // A project from before face boxes loads as before and is saved without the field.
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("faces"));
+        assert!(
+            serde_json::from_str::<Project>(&json)
+                .unwrap()
+                .faces
+                .is_empty()
+        );
+        let face = FaceSample {
+            t: 0.5,
+            x: 0.4,
+            y: 0.2,
+            w: 0.2,
+            h: 0.3,
+        };
+        crate::ops::apply(
+            &mut p,
+            &crate::ops::Op::Set {
+                path: "/faces".into(),
+                value: serde_json::json!({ "a": [face] }),
+            },
+        )
+        .unwrap();
+        assert_eq!(p.faces["a"], vec![face]);
+        let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
     }
 }

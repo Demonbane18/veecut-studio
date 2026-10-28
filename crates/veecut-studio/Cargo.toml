@@ -1,0 +1,16 @@
+[package]
+name = "veecut-studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+eframe = "0.37"
+hound = "3.5"
+open = "5"
+rfd = "0.17"
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+serde_json.workspace = true
+tiny-skia = "0.12"
+veecut-engine = { path = "../veecut-engine" }

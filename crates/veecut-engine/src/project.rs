@@ -382,6 +382,10 @@ pub struct CaptionStyle {
     pub stroke: f32,
     #[serde(default = "yes")]
     pub shadow: bool,
+    /// Every caption sits in one dark box with a thin light edge, so it reads on black, white
+    /// and busy footage alike (Herk Edit Kit's house look).
+    #[serde(default)]
+    pub boxed: bool,
     #[serde(default = "yes")]
     pub uppercase: bool,
     /// Vertical center of the caption block as a fraction of the canvas height
@@ -431,6 +435,7 @@ impl Default for CaptionStyle {
             highlight: default_caption_highlight(),
             stroke: default_caption_stroke(),
             shadow: true,
+            boxed: false,
             uppercase: true,
             position: default_caption_position(),
             max_words: default_caption_words(),

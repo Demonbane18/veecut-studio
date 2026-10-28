@@ -202,7 +202,9 @@ pub fn install(ws: &Workspace, repo: &str) -> Result<InstallReport>;
 pub fn update(ws: &Workspace, repo: Option<&str>) -> Result<Vec<UpdateReport>>;
 pub fn remove(ws: &Workspace, repo: &str) -> Result<()>;
 pub fn installed(ws: &Workspace) -> Result<Lock>;
-pub fn recommended(kind: VideoKind) -> &'static [&'static str];
+/// Best catalog entries for a kind of video: SAFE, tested first, then stars. Data-driven, so it
+/// follows the catalog as it updates.
+pub fn recommended<'a>(catalog: &'a Catalog, kind: VideoKind, n: usize) -> Vec<&'a Entry>;
 ```
 
 ### `recipes`, `qa`
@@ -213,6 +215,46 @@ pub struct EditRequest { pub kind: VideoKind, pub sources: Vec<PathBuf>, pub bro
 pub fn edit(ws: &Workspace, req: &EditRequest, progress: &mut dyn FnMut(&str)) -> Result<EditReport>;
 pub fn check(path: &Path) -> Result<QaReport>; // qa.rs: duration, size, fps, loudness, true peak, black frames, problems
 ```
+
+## Command line (`veecut`)
+
+Commands that work on a project take `-p/--project P` (a slug, a project folder or a
+`project.json` path); without it they use the most recently changed project in the workspace.
+Every command accepts `--json` for machine-readable output and `--workspace DIR`.
+
+```
+veecut init [DIR]                     set up a workspace (folders, built-in skill, agent config)
+veecut doctor                         check ffmpeg, transcription, agents and the skills catalog
+veecut edit [FILE...] [--kind K] [--aspect 9:16|16:9|4:5|1:1] [--broll FILE...] [--music FILE]
+            [--voice FILE] [--copy TEXT|FILE] [--name NAME] [--hook TEXT] [--language CODE]
+            [--clips N] [--no-render]
+                                      run the recipe for kind K (default talking-head-short) on the
+                                      files, or the newest inbox video; prints projects, drafts,
+                                      what it did and what needs review
+veecut status                         kind, length, tracks and items, drafts, open notes
+veecut transcript [--srt|--vtt|--raw]   sentences with timeline times; captions as SRT/VTT; raw words
+veecut ops JSON|--file F|-            apply Editor API ops atomically (one op, an array, or JSON lines)
+veecut schema                         JSON schema of the ops
+veecut undo / veecut redo
+veecut render [--final] [--aspect A] [--range A-B] [--out FILE]
+                                      draft to outbox/<slug>-v<n>.mp4, final to outbox/<slug>-final.mp4
+veecut frame --at T [--width W] [--out FILE]      one composited frame as PNG (for vision models)
+veecut frames [--every S] [--out FILE]            contact sheet of frames
+veecut captions [--rebuild] [--mode word_pop|highlight|pills|subtitle|off]
+veecut note "NOTE" [--at T] [--rule]             pin a note; --rule also saves it to my-rules.md
+veecut rules [add "RULE" --words "USER WORDS"]   list or add lasting rules
+veecut style [show|set KEY VALUE]
+veecut skills [sync|list|search Q|show REPO|install REPO [--force]|update [REPO]|remove REPO|recommend [--kind K]]
+veecut qa FILE
+veecut agent "PROMPT" [--with opencode|claude|codex|gemini]
+veecut mcp                            MCP server on stdio (tools below)
+veecut studio                         open the desktop editor
+veecut fonts                          list caption and text fonts
+```
+
+MCP tools: `status`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `note`,
+`undo` (with `redo: true` to redo), `skills_search`, `skills_install`. Each takes the same
+arguments as the matching command; `frame` and `frames` also return the PNG as an image.
 
 ## The built-in skill
 

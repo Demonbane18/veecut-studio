@@ -1,0 +1,28 @@
+[package]
+name = "veecut"
+description = "VeeCut Studio: an AI video editor. Coding agents and a desktop editor share one timeline."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["studio", "whisper"]
+# The desktop editor (`veecut studio`).
+studio = ["dep:veecut-studio"]
+# Local transcription through whisper.cpp.
+whisper = ["veecut-engine/whisper"]
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny-skia = "0.12"
+toml.workspace = true
+veecut-engine = { path = "../veecut-engine", default-features = false }
+veecut-studio = { path = "../veecut-studio", optional = true }

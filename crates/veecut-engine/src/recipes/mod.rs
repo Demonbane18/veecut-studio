@@ -46,6 +46,8 @@ pub struct EditRequest {
     pub hook: Option<String>,
     /// Spoken language code (`en`, `tl`); falls back to the style, then auto-detect.
     pub language: Option<String>,
+    /// Override transcription for this edit without changing the user's global config.
+    pub transcribe: Option<TranscribeOptions>,
     /// How many clips the `clips` recipe makes.
     pub clips: usize,
     /// Render a draft at the end.
@@ -65,6 +67,7 @@ impl EditRequest {
             name: None,
             hook: None,
             language: None,
+            transcribe: None,
             clips: 3,
             render: true,
         }
@@ -215,16 +218,24 @@ impl Job<'_> {
             .asset(asset_id)
             .context("transcript of an unknown asset")?;
         let file = project.asset_path(dir, asset);
-        let config = Config::load()?;
-        let provider = match config.transcribe.provider.as_str() {
-            "groq" => Some(Provider::Groq),
-            "local" => Some(Provider::Local),
-            _ => None,
-        };
-        let opts = TranscribeOptions {
-            provider,
-            language: self.language(),
-            model: Some(config.transcribe.local_model.clone()).filter(|m| !m.is_empty()),
+        let opts = if let Some(opts) = &self.req.transcribe {
+            let mut opts = opts.clone();
+            if opts.language.is_none() {
+                opts.language = self.language();
+            }
+            opts
+        } else {
+            let config = Config::load()?;
+            TranscribeOptions {
+                provider: match config.transcribe.provider.as_str() {
+                    "groq" => Some(Provider::Groq),
+                    "local" => Some(Provider::Local),
+                    _ => None,
+                },
+                language: self.language(),
+                model: Some(config.transcribe.local_model).filter(|m| !m.is_empty()),
+                ..Default::default()
+            }
         };
         progress(&format!(
             "Transcribing {}",

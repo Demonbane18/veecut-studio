@@ -76,6 +76,7 @@ pub(super) fn transcribe(
     _: &Path,
     model: Option<&str>,
     _: Option<&str>,
+    _: bool,
     _: &mut dyn FnMut(&str),
 ) -> Result<Transcript> {
     self::model(model.unwrap_or(DEFAULT_MODEL))?;
@@ -89,6 +90,7 @@ pub(super) fn transcribe(
     media: &Path,
     model: Option<&str>,
     language: Option<&str>,
+    cpu_only: bool,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Transcript> {
     let m = self::model(model.unwrap_or(DEFAULT_MODEL))?;
@@ -97,7 +99,7 @@ pub(super) fn transcribe(
         download(m, &path, progress)?;
     }
     let pcm = crate::media::pcm_mono(media, whisper::SAMPLE_RATE, None)?;
-    let (words, detected) = whisper::run(&path, m.name, &pcm, language, progress)?;
+    let (words, detected) = whisper::run(&path, m.name, &pcm, language, cpu_only, progress)?;
     Ok(Transcript {
         asset: String::new(),
         provider: format!("local:{}", m.name),
@@ -197,6 +199,7 @@ mod whisper {
         name: &str,
         pcm: &[f32],
         language: Option<&str>,
+        cpu_only: bool,
         progress: &mut dyn FnMut(&str),
     ) -> Result<(Vec<TranscriptWord>, Option<String>)> {
         if pcm.is_empty() {
@@ -211,6 +214,7 @@ mod whisper {
             _ => DtwModelPreset::LargeV3Turbo,
         };
         let mut params = WhisperContextParameters::default();
+        params.use_gpu(!cpu_only);
         params.dtw_parameters(DtwParameters {
             mode: DtwMode::ModelPreset {
                 model_preset: preset,

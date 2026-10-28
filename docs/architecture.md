@@ -25,6 +25,7 @@ small decisions.
 | `crates/veecut-engine` | library | model, ops, media I/O, analysis, transcription, graphics, compositor, recipes, skills catalog, workspace |
 | `crates/veecut-studio` | library | the egui desktop editor; entry point `veecut_studio::run` |
 | `crates/veecut` | binary | the `veecut` command: CLI, MCP server (`veecut mcp`), `veecut studio` |
+| `crates/veecut-eval` | unpublished binary | fixture baselines, agent trials, escalation ladders and result reports |
 
 ## The user's workspace
 
@@ -105,6 +106,8 @@ impl FrameStream { pub fn new(project: &Project, project_dir: &Path, from: f64, 
 impl Iterator for FrameStream { type Item = Result<(f64, tiny_skia::Pixmap)>; }
 /// The project's mixed audio as 48 kHz stereo 16-bit WAV.
 pub fn mix_audio(project: &Project, project_dir: &Path, out_wav: &Path, range: Option<(f64, f64)>, normalize: bool) -> Result<()>;
+/// Maps a normalized source rectangle through the compositor's crop, focus and zoom.
+pub fn canvas_rect(clip: &Clip, src: (u32, u32), canvas: (u32, u32), local: f64, duration: f64, rect: Rect) -> Rect;
 ```
 
 ### `graphics`
@@ -139,7 +142,7 @@ reported for review. Missing face detections are reported as unchecked, never as
 
 ```rust
 pub enum Provider { Groq, Local }
-pub struct TranscribeOptions { pub provider: Option<Provider>, pub language: Option<String>, pub model: Option<String> }
+pub struct TranscribeOptions { pub provider: Option<Provider>, pub language: Option<String>, pub model: Option<String>, pub cpu_only: bool }
 /// Auto provider: Groq when GROQ_API_KEY is set, else local whisper.cpp (model downloaded to ~/.veecut/models on first use).
 pub fn transcribe(media: &Path, asset_id: &str, opts: &TranscribeOptions, progress: &mut dyn FnMut(&str)) -> Result<Transcript>;
 pub fn status() -> Vec<String>; // one line per provider: ready or what is missing
@@ -201,7 +204,8 @@ pub fn add_rule(path: &Path, rule: &str, user_words: &str) -> Result<()>;
 pub fn rules(path: &Path) -> Result<Vec<String>>;
 // config.rs
 pub fn home() -> PathBuf;   // ~/.veecut or VEECUT_HOME
-pub struct Config { .. }    // Config::load(), save(); skills auto-sync/auto-update, agent commands, transcription defaults
+pub struct Config { .. }    // Config::load(), save(); skills, agent commands and selections, transcription defaults
+// Config::agent_selection(kind) resolves per-agent defaults; set_agent_selection(kind, selection) changes the saved choice.
 pub fn load_dotenv(root: &Path); // sets variables from <root>/.env that are not already set
 // agent.rs
 pub enum AgentKind { OpenCode, Claude, Codex, Gemini }
@@ -210,21 +214,38 @@ pub struct AgentStatus { pub kind: AgentKind, pub readiness: Readiness, pub deta
 pub fn detect() -> Vec<AgentStatus>; // bounded, read-only sign-in/config probes
 pub struct Stop; // Clone + Default; one per run. stop() ends the process group/job.
 pub enum Outcome { Finished(std::process::ExitStatus), Stopped }
-pub enum Output { Answer(String), Log(String) }
-pub fn run(ws: &Workspace, kind: AgentKind, prompt: &str, stop: &Stop, on_output: &mut dyn FnMut(Output)) -> Result<Outcome>;
+pub struct Selection { pub model: Option<String>, pub effort: Option<String> }
+pub struct Usage { pub input_tokens: u64, pub output_tokens: u64, pub cached_tokens: u64, pub cost_usd: Option<f64>, pub turns: Option<u64> }
+pub enum Output { Answer(String), Log(String), Usage(Usage) }
+pub fn run(ws: &Workspace, kind: AgentKind, prompt: &str, selection: &Selection, stop: &Stop, on_output: &mut dyn FnMut(Output)) -> Result<Outcome>;
+pub fn studio_prompt(project: &Path, note: &str) -> String;
+pub fn known_models(kind: AgentKind) -> Vec<ModelChoice>;
+pub fn models(kind: AgentKind) -> Result<Vec<ModelChoice>>; // adds bounded `opencode models` discovery
+pub fn efforts(kind: AgentKind, model: Option<&str>) -> Vec<EffortChoice>;
 ```
 
 Agents run in a separate Unix process group or a Windows Job Object. Stop and CLI Ctrl+C
 terminate that group/job, reap the agent and drain output before reporting Stopped. Studio
 also stops its agent on exit. Unix helpers that deliberately create a new session/group
 escape group termination; ordinary inherited hooks and MCP children remain in the group.
-Studio prefixes notes with its live-preview policy: ops, optional cached frame, short reply;
-no render or open unless a video is requested.
-Codex and OpenCode structured output separates answers from tool logs; plain agents separate
-stdout from stderr. Studio keeps the latest note, reply and result outside the folded log.
+Studio and the evaluation harness share `agent::studio_prompt`: ops, an optional cached frame,
+a short reply, and no render or open unless a video is requested.
+Codex, OpenCode and Claude structured output separates answers, tool logs and cumulative usage.
+Input tokens exclude cached tokens; `Usage::total_tokens` adds input, output and cached once.
+Missing usage or cost stays unknown. Studio keeps the latest note, reply, usage and result
+outside the folded log.
 Claude and Codex readiness includes their read-only login checks; failures retain the fix.
 Other providers and custom command overrides disclose what was not checked. Refresh reruns
 the checks without changing agent settings.
+Model and effort choices live in `[agent.selection.<agent>]` in `config.toml`. Callers resolve
+the config selection and apply per-run overrides before calling `run`; an absent effort in
+`Selection` means the agent's default. OpenCode defaults to `opencode/glm-5.3-flash-free`;
+other agents use their CLI's default model. A custom command vector takes precedence and
+is not given extra model, effort or output-format arguments.
+
+Claude `ultracode` maps to `--effort max --settings '{"ultracode":true}'` and adds `Workflow`
+to the allowed tools. The picker labels its roughly fivefold token cost. Gemini has no
+effort flag. Model lists are suggestions; custom model IDs remain accepted.
 
 
 ### `skills`
@@ -249,10 +270,18 @@ pub fn recommended<'a>(catalog: &'a Catalog, kind: VideoKind, n: usize) -> Vec<&
 
 ```rust
 pub struct EditRequest { pub kind: VideoKind, pub sources: Vec<PathBuf>, pub broll: Vec<PathBuf>, pub music: Option<PathBuf>,
-                         pub voice: Option<PathBuf>, pub copy: Option<String>, pub canvas: Option<Canvas>, pub name: Option<String> }
+                         pub voice: Option<PathBuf>, pub copy: Option<String>, pub canvas: Option<Canvas>, pub name: Option<String>,
+                         pub transcribe: Option<TranscribeOptions>, /* other recipe options */ }
 pub fn edit(ws: &Workspace, req: &EditRequest, progress: &mut dyn FnMut(&str)) -> Result<EditReport>;
 pub fn check(path: &Path) -> Result<QaReport>; // qa.rs: duration, size, fps, loudness, true peak, black frames, problems
 ```
+
+An explicit recipe transcription override bypasses global provider settings. Evaluation
+baselines use local transcription with `cpu_only = true`, so configured Groq credentials
+cannot cause an upload and whisper.cpp does not use GPU acceleration.
+The harness also sets `VEECUT_LOCAL_CPU_ONLY=1` before starting workers. The transcription
+entry point honors this process-scoped override in inherited CLI and MCP children, even
+when their global config selects Groq.
 
 ## Command line (`veecut`)
 
@@ -288,7 +317,8 @@ veecut rules [add "RULE" --words "USER WORDS"]   list or add lasting rules
 veecut style [show|set KEY VALUE]
 veecut skills [sync|list|search Q|show REPO|install REPO [--force]|update [REPO]|remove REPO|recommend [--kind K]]
 veecut qa FILE
-veecut agent "PROMPT" [--with opencode|claude|codex|gemini]
+veecut agent "PROMPT" [--with opencode|claude|codex|gemini] [--model M] [--effort E]
+veecut agent --models [--with AGENT]    built-in model and effort choices; OpenCode also queries its installed CLI
 veecut mcp                            MCP server on stdio (tools below)
 veecut studio                         open the desktop editor
 veecut fonts                          list caption and text fonts
@@ -297,6 +327,40 @@ veecut fonts                          list caption and text fonts
 MCP tools: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `note`,
 `undo` (with `redo: true` to redo), `skills_search`, `skills_install`. Each takes the same
 arguments as the matching command; `frame` and `frames` also return the PNG as an image.
+
+## Evaluation harness (`veecut-eval`)
+
+The unpublished harness depends on the engine, not the CLI or Studio. Its commands are
+`baselines`, `run`, `ladder` and `report`; root and manifest overrides precede the command.
+Filters select fixture IDs, kinds and lengths, with task and level filters for agent runs.
+The fixture manifest remains outside git. No harness operation writes into fixture media.
+
+Baselines run the matching engine recipe with rendering disabled and local CPU transcription.
+Each has its own workspace, linked inbox, saved report, log and completion record under
+`~/veecut-eval/work/baselines/<id>`. Completed baselines are reusable; incomplete attempts
+remain available when retried. Each agent trial copies its baseline into `work/runs/`,
+materializes independent inbox files and rebases project paths. Level 1 starts without a
+project. Other levels use the same `agent::studio_prompt` as Studio.
+
+Tasks are code templates filled from manifest notes and frozen baseline evidence. Checks
+cover kind/canvas/source identity, exact style changes, kept source ranges, timed assets,
+kind-specific edits and caption/mouth geometry. Cue timestamps alone are not word timing.
+Visual truth is disclosed as a detector-derived proxy; missing evidence fails as `check`.
+Every check variant has passing and failing project tests.
+
+The runner calls `agent::run` with an explicit selection and a Stop watchdog: 600 seconds,
+or 1,200 for level 1 on long fixtures, unless overridden. It records one JSONL row per trial
+under `results/YYYY-MM-DD.jsonl`: fixture, kind, length, task, level, agent, model, effort,
+trial, pass, check detail, seconds, input/output/cached tokens, reported cost, claimed
+success and failure class. Logs and failing workspaces remain inspectable. Failure classes
+are `model`, `app`, `environment` and `check`; classification includes supporting evidence.
+
+Custom agent commands are refused because they override model selection. Free runs accept
+the known free models; paid runs require `--allow-paid`. Screening runs 49 cells sequentially:
+nine free models at their default variant on five tasks and four image-capable models on
+the visual task. Existing cells are skipped; `--rerun` preserves earlier generations.
+Ladders require two passes, trying a third trial on a split. Reports separate one-trial
+screening outcomes from reliable rungs and show medians and failure evidence.
 
 ## The built-in skill
 

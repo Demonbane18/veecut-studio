@@ -4723,6 +4723,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "veecut-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "veecut-engine",
+]
+
+[[package]]
 name = "veecut-studio"
 version = "0.1.0"
 dependencies = [

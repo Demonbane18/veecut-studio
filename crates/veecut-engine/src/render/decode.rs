@@ -521,7 +521,7 @@ fn video_framing(req: &FrameReq) -> (FocusMap, String) {
 /// Where `r`, a rectangle of the source picture (fractions of the source), lands on the canvas
 /// (fractions of the canvas) when `clip` is `local` seconds into its item: the same crop, focus
 /// and zoom window `DecoderPool::fill` draws with. The result may reach past the canvas edges.
-pub(crate) fn canvas_rect(
+pub fn canvas_rect(
     clip: &Clip,
     src: (u32, u32),
     canvas: (u32, u32),

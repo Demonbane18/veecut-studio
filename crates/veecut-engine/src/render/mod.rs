@@ -20,7 +20,7 @@ use crate::project::{Canvas, Project};
 
 use compose::{Grade, Scratch};
 use decode::DecoderPool;
-pub(crate) use decode::canvas_rect;
+pub use decode::canvas_rect;
 
 pub use audio::mix_audio;
 

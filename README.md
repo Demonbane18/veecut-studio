@@ -63,6 +63,42 @@ Gemini CLI: run `gemini` in the workspace and say "edit this". It reads `GEMINI.
 
 To hand a request to an agent without opening it, run `veecut agent "edit this"`. It uses OpenCode with the free model by default; `--with claude`, `--with codex` or `--with gemini` picks another one.
 
+Choose a model and effort for one run:
+
+```sh
+veecut agent "bigger captions" --with opencode --model opencode/glm-5.3-flash-free --effort low
+veecut agent "bigger captions" --with claude --model haiku --effort low
+veecut agent "bigger captions" --with codex --model gpt-5.6-luna --effort low
+veecut agent "bigger captions" --with gemini --model gemini-2.5-flash
+veecut agent --models --with opencode
+```
+
+`--models` without `--with` lists all four agents. OpenCode's list combines built-in choices
+with `opencode models`. `--model default` uses VeeCut's default: free GLM for OpenCode,
+or the CLI's own model for other agents. `--effort default` uses the agent's own effort.
+Gemini has no effort setting. Usage appears after a run when reported by the agent;
+unknown token counts or cost are not treated as zero.
+
+Studio saves model and effort choices per agent in `~/.veecut/config.toml`:
+
+```toml
+[agent.selection.opencode]
+model = "opencode/glm-5.3-flash-free"
+effort = "low"
+
+[agent.selection.claude]
+model = "haiku"
+effort = "low"
+```
+
+Omit `effort` to use the agent's default. OpenCode defaults to GLM 5.3 Flash Free; the other
+agents use their CLI's default model. Existing custom command overrides take precedence;
+VeeCut does not add model, effort or output-format flags to them.
+
+Claude's `ultracode` effort enables its workflow planner, uses `max` effort and allows
+`Workflow` in headless mode. This is the most expensive choice, roughly five times the
+tokens of a normal run, and requires a model that supports `xhigh`.
+
 Ctrl+C stops the agent and its inherited helpers. No project change is rolled back; saved
 edits remain undoable.
 
@@ -78,8 +114,9 @@ With a project open:
 - The inspector on the right edits the selected item, or the project when nothing is selected.
 - The timeline at the bottom has the magnetic main track, overlay, text, caption and audio tracks, with waveforms and snapping.
 - Studio notes apply ops and refresh the preview. Agents render or open a video only when
-  the note asks for one. The Agent tab shows elapsed time, Stop, and a readiness Refresh button.
-  Your latest note and reply stay visible; tool output is folded below them.
+  the note asks for one. The Agent tab has model and effort pickers, elapsed time, Stop,
+  and a readiness Refresh button. Your latest note, reply and reported usage stay visible;
+  tool output is folded below them.
 - Talking-head Auto-edit keeps face boxes over time and places captions clear of the mouth
   and chin through crops and punch-ins. It moves or shrinks crowded pages, tries an upper
   slot clear of the hook, and reports pages it cannot safely show or check. Existing projects
@@ -113,7 +150,7 @@ Keyboard shortcuts (Cmd on macOS, Ctrl elsewhere):
 | N | Snapping on or off |
 | Esc | Clear the selection |
 
-For development, `cargo run -p veecut-studio --example studio -- <workspace> [project.json]` starts the editor straight from the repository. Set `VEECUT_STUDIO_SHOTS=<empty directory>` and open a project at least 3 seconds long to have the editor save three screenshots of itself (`00-paused.png`, then `01-playback.png` and `02-playback.png` one second apart during playback) and quit. It is useful for docs and bug reports, and it only captures the editor's own window.
+For development, `cargo run -p veecut-studio --example studio -- <workspace> [project.json]` starts the editor straight from the repository. Set `VEECUT_STUDIO_SHOTS=<empty directory>` and open a project at least 3 seconds long to save four screenshots: `00-paused.png`, `01-playback.png`, `02-playback.png`, and `03-agent.png` with the model and effort pickers. The editor then quits. This hook captures only the editor's own window and needs no GUI automation.
 
 ## Nine kinds of video
 
@@ -141,6 +178,46 @@ auto_sync_hours = 24   # 0 turns automatic syncing off
 auto_update = true     # update installed SAFE skills after a sync
 safe_only = true       # refuse skills not graded SAFE unless you pass --force
 ```
+
+## Model evaluation harness
+
+`veecut-eval` is an unpublished workspace tool. Its fixture manifest and media live outside
+git, by default in `~/veecut-eval/`. Media, run workspaces and screenshots need their own
+backup; they are not included in the repository.
+
+```sh
+cargo run -p veecut-eval -- baselines
+cargo run -p veecut-eval -- run --screening
+cargo run -p veecut-eval -- run --fixture ths-s-mark-pond-31s --task caption-size \
+  --agent opencode --model opencode/glm-5.3-flash-free --trials 2
+cargo run -p veecut-eval -- ladder --fixture ths-s-mark-pond-31s --level 2
+cargo run -p veecut-eval -- report
+```
+
+`baselines` runs each fixture's recipe locally on CPU, with no agent and no render. It
+links inputs into `work/baselines/<id>/inbox/`, records `baseline.json`, `report.json`
+and `baseline.log`, and skips completed baselines. Failed attempts remain available
+when retried. `--fixture`, `--kind` and `--length` accept comma-separated filters.
+Use `baselines --screening` to prepare only the six screening fixtures.
+
+`run --screening` runs all nine listed OpenCode free models once at their default
+variant on five tasks, plus a visual task on the four image-capable models: 49 runs.
+Runs are sequential. Each gets independent input copies under `work/runs/`; failing
+workspaces and agent logs remain for inspection. Ordinary `run` also accepts `--task`,
+`--level`, `--effort` and `--trials`. `--timeout` overrides the 600-second deadline
+(1,200 seconds for level 1 on L/XL fixtures); the deadline uses the engine's Stop handle.
+
+Results append to `results/YYYY-MM-DD.jsonl`. Existing cells are skipped; `--rerun`
+starts a new generation without overwriting prior evidence. `ladder` requires two
+passes, with a third trial after a split, before recommending a rung. Paid models
+are refused unless the caller explicitly supplies `--allow-paid`. Custom agent
+commands are refused because they can override the requested model.
+
+`report` prints per-kind, length and task summaries, the screening table and failure
+evidence. `report --out FILE` saves it. Pass `--root DIR` or `--manifest FILE` before
+the subcommand to use another fixture collection. A one-trial screening pass is not
+a reliability recommendation. Visual checks disclose their detector-derived face
+evidence; missing evidence is a check failure, not proof that captions are safe.
 
 ## Privacy
 

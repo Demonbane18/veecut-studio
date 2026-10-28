@@ -1,0 +1,20 @@
+[package]
+name = "veecut-eval"
+description = "Local fixture evaluation harness for VeeCut agents"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+veecut-engine = { path = "../veecut-engine" }
+
+[dev-dependencies]
+tempfile = "3"

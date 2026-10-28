@@ -34,6 +34,9 @@ pub struct TranscribeOptions {
     /// (default), `base`, `small` or `medium`. A name meant for the other provider is ignored.
     #[serde(default)]
     pub model: Option<String>,
+    /// Disable GPU acceleration for local transcription.
+    #[serde(default)]
+    pub cpu_only: bool,
 }
 
 /// Transcribes the speech in `media` with word times in source seconds.
@@ -58,7 +61,11 @@ pub fn transcribe(
         .as_deref()
         .map(str::trim)
         .filter(|m| !m.is_empty());
-    let mut transcript = match opts.provider.unwrap_or_else(auto_provider) {
+    let (provider, cpu_only) = execution_mode(
+        opts,
+        std::env::var_os("VEECUT_LOCAL_CPU_ONLY").is_some_and(|value| value == "1"),
+    );
+    let mut transcript = match provider {
         Provider::Groq => groq::transcribe(
             media,
             info.duration,
@@ -70,6 +77,7 @@ pub fn transcribe(
             media,
             model.map(|m| m.trim_start_matches("whisper-")),
             language,
+            cpu_only,
             progress,
         )?,
     };
@@ -79,6 +87,15 @@ pub fn transcribe(
         bail!("no speech was found in {}", media.display());
     }
     Ok(transcript)
+}
+
+/// The evaluation process can force local CPU execution for inherited CLI/MCP children.
+fn execution_mode(opts: &TranscribeOptions, force_local_cpu: bool) -> (Provider, bool) {
+    if force_local_cpu {
+        (Provider::Local, true)
+    } else {
+        (opts.provider.unwrap_or_else(auto_provider), opts.cpu_only)
+    }
 }
 
 fn auto_provider() -> Provider {
@@ -102,4 +119,29 @@ pub fn status() -> Vec<String> {
         groq + mark(Provider::Groq),
         local::status() + ffmpeg.as_deref().unwrap_or("") + mark(Provider::Local),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_only_is_explicit_and_old_options_keep_the_default() {
+        let old: TranscribeOptions = serde_json::from_str(r#"{"provider":"local"}"#).unwrap();
+        assert!(!old.cpu_only);
+        let cpu: TranscribeOptions =
+            serde_json::from_str(r#"{"provider":"local","cpu_only":true}"#).unwrap();
+        assert!(cpu.cpu_only);
+        assert_eq!(cpu.provider, Some(Provider::Local));
+    }
+
+    #[test]
+    fn evaluation_override_never_selects_groq() {
+        let opts = TranscribeOptions {
+            provider: Some(Provider::Groq),
+            ..Default::default()
+        };
+        assert_eq!(execution_mode(&opts, true), (Provider::Local, true));
+        assert_eq!(execution_mode(&opts, false), (Provider::Groq, false));
+    }
 }

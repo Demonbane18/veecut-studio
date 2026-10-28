@@ -87,7 +87,8 @@ pub(super) fn rounded(pix: &mut Pixmap, rect: Rect, radius: f32, color: Color) {
 fn shape(fonts: &mut FontSystem, spec: &Spec<'_>, size: f32, width: f32) -> Buffer {
     let mut b = Buffer::new(fonts, Metrics::new(size, size * 1.25));
     b.set_size(Some(width.max(1.0)), None);
-    b.set_wrap(Wrap::WordOrGlyph);
+    // Words stay whole; `render` shrinks the text until the widest word fits.
+    b.set_wrap(Wrap::Word);
     // cosmic-text requires an exact weight for named families, even for static faces.
     let weight = fonts
         .db()
@@ -129,14 +130,20 @@ pub(super) fn render(
     let mut size = spec.size.max(1.0);
     let mut padding = size * 0.38 + size * spec.stroke.clamp(0.0, 0.5);
     let mut b = shape(fonts, &spec, size, spec.width - 2.0 * padding);
-    // Fit whole text, never crop it. Preset line limits include explicit newlines.
+    // Fit whole text, never crop it or split a word. Preset line limits include explicit newlines.
+    // ponytail: a single unbreakable string wider than ~35 box widths still overflows after the
+    // last step; add a glyph-wrap fallback if such text ever shows up.
     for _ in 0..28 {
         let lines = b.layout_runs().count();
         let height = b
             .layout_runs()
             .map(|r| r.line_top + r.line_height)
             .fold(0.0_f32, f32::max);
-        if lines <= spec.max_lines.max(1) && height + padding * 2.0 <= spec.height {
+        let widest = b.layout_runs().map(|r| r.line_w).fold(0.0_f32, f32::max);
+        if lines <= spec.max_lines.max(1)
+            && height + padding * 2.0 <= spec.height
+            && widest <= spec.width - 2.0 * padding
+        {
             break;
         }
         size *= 0.88;
@@ -411,5 +418,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn long_words_shrink_to_fit_instead_of_breaking() {
+        let mut graphics = crate::graphics::Graphics::new();
+        // A 9:16 caption at size 0.06: "OPPORTUNITY" alone is wider than the caption box.
+        let spec = Spec {
+            spans: vec![Span::new("OPPORTUNITY TO FLY".into(), Color::WHITE)],
+            font: "Montserrat",
+            size: 115.0,
+            width: 778.0,
+            height: 1296.0,
+            max_lines: 2,
+            align: Align::Center,
+            stroke: 0.12,
+            shadow: true,
+            background: None,
+            edge: false,
+            accent: ACCENT,
+            preset: None,
+            weight: 800,
+        };
+        let layer = render(&mut graphics.fonts, &mut graphics.swash, spec).unwrap();
+        let first_line = layer
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.y == layer.glyphs[0].y)
+            .count();
+        assert!(
+            first_line >= "OPPORTUNITY".len(),
+            "the word was split after {first_line} letters"
+        );
+        assert!(layer.image.width() <= 779);
     }
 }

@@ -21,26 +21,25 @@ static FFPROBE: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
     })
 });
 
-/// `ffmpeg` from `VEECUT_FFMPEG` or the PATH.
+/// `ffmpeg` from `VEECUT_FFMPEG`, the PATH or the usual install folders.
 pub fn ffmpeg() -> Result<PathBuf> {
     FFMPEG.clone().ok_or_else(|| anyhow!("ffmpeg is not installed. Install it (macOS: brew install ffmpeg, Windows: winget install Gyan.FFmpeg, Linux: your package manager), or set VEECUT_FFMPEG to its path."))
 }
 
-/// `ffprobe` from `VEECUT_FFPROBE`, next to ffmpeg, or the PATH.
+/// `ffprobe` from `VEECUT_FFPROBE`, next to ffmpeg, the PATH or the usual install folders.
 pub fn ffprobe() -> Result<PathBuf> {
     FFPROBE
         .clone()
         .ok_or_else(|| anyhow!("ffprobe is not installed; it ships with ffmpeg"))
 }
 
+/// A desktop app starts with a minimal PATH (macOS: /usr/bin:/bin:/usr/sbin:/sbin), so this
+/// searches the same folders as the coding agents, Homebrew's included.
 fn find_tool(env: &str, name: &str) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os(env).map(PathBuf::from) {
         return p.is_file().then_some(p);
     }
-    let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|dir| dir.join(&exe))
-        .find(|p| p.is_file())
+    crate::agent::find_program(name)
 }
 
 /// A quiet ffmpeg command: no banner, errors only, never waits for keyboard input.

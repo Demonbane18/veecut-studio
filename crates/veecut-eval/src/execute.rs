@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -25,6 +26,7 @@ use veecut_engine::{
 use crate::{
     checks::{self, CheckResult},
     data::{self, Baseline, Fixture, FixtureFile, Row},
+    ladder,
     tasks::{self, Task},
 };
 
@@ -411,6 +413,7 @@ pub fn run(spec: RunSpec<'_>) -> Result<Row> {
         tokens_cached: None,
         cost_usd: None,
         turns: None,
+        first_request_input_tokens: None,
         claimed_success: false,
         claim_evidence: String::new(),
         failure_class: None,
@@ -604,7 +607,9 @@ pub fn run(spec: RunSpec<'_>) -> Result<Row> {
         }
         Ok(checked)
     })();
-    if let Some(usage) = usage {
+    let usage_evidence = usage.as_ref().and_then(|u| serde_json::to_value(u).ok());
+    if let Some(usage) = &usage {
+        row.first_request_input_tokens = usage.first_request_input_tokens;
         row.tokens_in = Some(usage.input_tokens);
         row.tokens_out = Some(usage.output_tokens);
         row.tokens_cached = Some(usage.cached_tokens);
@@ -634,6 +639,10 @@ pub fn run(spec: RunSpec<'_>) -> Result<Row> {
     row.pass = checked.pass;
     row.check_detail = checked.detail;
     row.evidence = checked.evidence;
+    // Keep the CLI's complete usage report next to the verdict, whatever fields it carries.
+    if let (Some(usage), Some(evidence)) = (usage_evidence, row.evidence.as_object_mut()) {
+        evidence.insert("usage".into(), usage);
+    }
     row.failure_class = checked
         .failure_class
         .or_else(|| (!row.pass).then(|| "model".into()));
@@ -663,6 +672,165 @@ pub fn run(spec: RunSpec<'_>) -> Result<Row> {
         row.check_detail
     );
     Ok(row)
+}
+
+const PROBE_PROMPT: &str = "Reply with the single word OK. Do not use tools or edit files.";
+const PROBE_LOG_BYTES: usize = 8192;
+
+/// A free model that cannot be used right now, with what this probe's own process showed.
+pub struct Probe {
+    pub reason: String,
+    pub seconds: f64,
+    pub workspace: PathBuf,
+    pub log: String,
+}
+
+fn keep_tail(text: &mut String, max: usize) {
+    if text.len() > max {
+        let mut cut = text.len() - max;
+        while !text.is_char_boundary(cut) {
+            cut += 1;
+        }
+        text.drain(..cut);
+    }
+}
+
+/// Why this probe's own output says the model is unusable now. `None` when it answered, or when
+/// the failure says nothing about availability: that is left to a real, recorded trial.
+/// `deadline` is the probe limit in seconds when it was reached.
+pub fn probe_verdict(
+    failure: Option<&str>,
+    deadline: Option<u64>,
+    answer: &str,
+    logs: &str,
+) -> Option<String> {
+    if !answer.trim().is_empty() {
+        return None;
+    }
+    let short = |text: &str| text.trim().chars().take(300).collect::<String>();
+    if let Some(error) = failure {
+        return (classify(&format!("{error}\n{logs}"), false) == "environment")
+            .then(|| short(error.lines().next().unwrap_or(error)));
+    }
+    if let Some(seconds) = deadline {
+        return Some(format!(
+            "No reply within the {seconds}-second probe deadline"
+        ));
+    }
+    logs.lines()
+        .map(str::trim)
+        .find(|line| classify(line, false) == "environment")
+        .map(short)
+}
+
+/// One tiny real call through `agent::run`, bounded by a watchdog. Only this call's own
+/// callbacks are read; OpenCode's shared log file never is.
+fn probe(root: &Path, model: &str, seconds: u64) -> Result<Option<Probe>> {
+    let config = veecut_engine::config::Config::load()?;
+    if config
+        .agent
+        .command(AgentKind::OpenCode)
+        .is_some_and(|c| !c.is_empty())
+    {
+        return Ok(None); // run() refuses overrides with its own recorded failure
+    }
+    let workspace =
+        root.join("work/probes")
+            .join(format!("{}-{}", model.replace('/', "_"), unique_id()));
+    Workspace::init(&workspace)?;
+    let ws = Workspace::open(&workspace)?;
+    let stop = Stop::default();
+    let (cancel, watch, deadline) = watchdog(stop.clone(), Duration::from_secs(seconds));
+    let started = Instant::now();
+    let (mut answer, mut logs) = (String::new(), String::new());
+    let outcome = agent::run(
+        &ws,
+        AgentKind::OpenCode,
+        PROBE_PROMPT,
+        &ladder::selection(model, None),
+        &stop,
+        &mut |event| match event {
+            Output::Answer(text) => answer.push_str(&text),
+            Output::Log(text) => {
+                logs.push_str(&text);
+                logs.push('\n');
+                keep_tail(&mut logs, 65536);
+            }
+            Output::Usage(_) => {}
+        },
+    );
+    let _ = cancel.send(());
+    let _ = watch.join();
+    let failure = outcome.as_ref().err().map(|e| format!("{e:#}"));
+    let deadline = deadline.load(Ordering::SeqCst).then_some(seconds);
+    Ok(
+        probe_verdict(failure.as_deref(), deadline, &answer, &logs).map(|reason| {
+            let mut log = failure.map_or(logs.clone(), |e| format!("{logs}\n{e}"));
+            keep_tail(&mut log, PROBE_LOG_BYTES);
+            Probe {
+                reason,
+                seconds: started.elapsed().as_secs_f64(),
+                workspace,
+                log,
+            }
+        }),
+    )
+}
+
+/// At most one bounded probe per free model per batch, made only just before a free rung would
+/// spend. Paid and unlisted models are refused: a probe is never a paid request. OpenCode's
+/// free allowance is shared by every free model, so one exhaustion answer covers the batch;
+/// "model unavailable" stays scoped to its model.
+pub struct Probes {
+    seconds: u64,
+    exhausted: Option<Probe>,
+    done: BTreeMap<String, Option<Probe>>,
+}
+impl Probes {
+    pub fn new(seconds: u64) -> Self {
+        Self {
+            seconds,
+            exhausted: None,
+            done: BTreeMap::new(),
+        }
+    }
+    /// `Some` when the free model cannot be used right now.
+    pub fn unavailable(
+        &mut self,
+        root: &Path,
+        agent: AgentKind,
+        selection: &Selection,
+    ) -> Result<Option<&Probe>> {
+        let model = selection
+            .model
+            .as_deref()
+            .filter(|m| ladder::free(agent, m))
+            .context("Only listed free models may be probed; a probe never spends on a paid or unknown model")?;
+        if self.exhausted.is_none() && !self.done.contains_key(model) {
+            match probe(root, model, self.seconds)? {
+                Some(found) if allowance_exhausted(&found.reason) => self.exhausted = Some(found),
+                result => {
+                    self.done.insert(model.to_owned(), result);
+                }
+            }
+        }
+        Ok(self
+            .exhausted
+            .as_ref()
+            .or(self.done.get(model).and_then(Option::as_ref)))
+    }
+}
+
+/// OpenCode's exact messages for a used-up free allowance, which belongs to the account, not a model.
+pub fn allowance_exhausted(text: &str) -> bool {
+    let text = text.to_lowercase();
+    [
+        "free allowance is used up",
+        "free usage limit reached",
+        "freeusagelimiterror",
+    ]
+    .iter()
+    .any(|m| text.contains(m))
 }
 
 fn copy_input(manifest_dir: &Path, file: &FixtureFile, inbox: &Path) -> Result<()> {
@@ -736,5 +904,108 @@ mod tests {
             classify("The requested caption size was not changed", false),
             "model"
         );
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    #[test]
+    fn unavailable_only_on_this_probes_own_evidence() {
+        // The product path raises OpenCode's allowance error; that defers the rung.
+        let reason = probe_verdict(
+            Some(
+                "OpenCode's free allowance is used up. It can take a day or more to come back; pick another agent or model.",
+            ),
+            None,
+            "",
+            "",
+        );
+        assert!(reason.unwrap().contains("free allowance is used up"));
+        assert!(
+            probe_verdict(
+                Some("OpenCode says the model opencode/beam-free is unavailable."),
+                None,
+                "",
+                ""
+            )
+            .is_some()
+        );
+        // A deadline without any reply defers; a deadline after an answer does not.
+        assert!(
+            probe_verdict(None, Some(60), "", "")
+                .unwrap()
+                .contains("60-second")
+        );
+        assert!(probe_verdict(None, Some(60), "OK", "").is_none());
+        // Quota text only in logs, no answer: deferred. With an answer, log words prove nothing.
+        assert!(probe_verdict(None, None, "", "starting\nFree usage limit reached\n").is_some());
+        assert!(probe_verdict(None, None, "OK", "request 429 ms later").is_none());
+        // Failures that say nothing about availability stay a recorded model/app trial.
+        assert!(probe_verdict(Some("invalid veecut operation"), None, "", "").is_none());
+        assert!(probe_verdict(None, None, "", "").is_none());
+    }
+    #[test]
+    fn probes_refuse_paid_and_unknown_models_before_any_call() {
+        let mut probes = Probes::new(1);
+        let root = Path::new("/nonexistent");
+        for (agent, model) in [
+            (AgentKind::Claude, "haiku"),
+            (AgentKind::OpenCode, "vendor/free-looking"),
+            (AgentKind::Claude, ladder::FREE_MODELS[0]),
+        ] {
+            assert!(
+                probes
+                    .unavailable(root, agent, &ladder::selection(model, None))
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn keeps_probe_log_tail_on_char_boundary() {
+        let mut text = "é".repeat(10);
+        keep_tail(&mut text, 5);
+        assert_eq!(text, "éé");
+    }
+}
+
+#[cfg(test)]
+mod allowance_tests {
+    use super::*;
+    #[test]
+    fn only_exact_free_allowance_messages_are_account_wide() {
+        assert!(allowance_exhausted(
+            "OpenCode's free allowance is used up. It can take a day or more."
+        ));
+        assert!(allowance_exhausted("FreeUsageLimitError"));
+        assert!(allowance_exhausted("Free usage limit reached"));
+        assert!(!allowance_exhausted(
+            "OpenCode says the model opencode/beam-free is unavailable."
+        ));
+        assert!(!allowance_exhausted(
+            "No reply within the 20-second probe deadline"
+        ));
+        assert!(!allowance_exhausted("rate limit 429"));
+    }
+    #[test]
+    fn one_exhaustion_probe_covers_every_free_model_without_more_calls() {
+        // Pre-seeded cache: any model returns it and no process is started (root does not exist).
+        let mut probes = Probes::new(1);
+        probes.exhausted = Some(Probe {
+            reason: "OpenCode's free allowance is used up.".into(),
+            seconds: 3.0,
+            workspace: "probe".into(),
+            log: String::new(),
+        });
+        for model in ladder::FREE_MODELS {
+            let probe = probes
+                .unavailable(
+                    Path::new("/nonexistent"),
+                    AgentKind::OpenCode,
+                    &ladder::selection(model, Some("max")),
+                )
+                .unwrap();
+            assert!(probe.unwrap().reason.contains("used up"));
+        }
     }
 }

@@ -1,3 +1,4 @@
+use crate::data::Deferral;
 use crate::{
     data::Row,
     ladder::{self, Decision},
@@ -111,7 +112,7 @@ fn evidence_text(rows: &[Row], row: &Row) -> String {
     detail
 }
 
-pub fn markdown(rows: &[Row]) -> String {
+pub fn markdown(rows: &[Row], deferrals: &[Deferral]) -> String {
     let mut out = String::from(
         "# VeeCut model evaluation (exploratory)\n\nRecommendations require two independent passing model trials (third trial after a split). An offline recheck revises the verdict for the same original trial; it is never another model run or additional spend. Single screening passes are not reliability recommendations. Invalid attempts are excluded. Failed workspaces are retained. Token input excludes cached tokens; totals include each once. Missing usage remains unreported. Costs are CLI-reported values, not inferred API prices.\n\n",
     );
@@ -263,6 +264,23 @@ pub fn markdown(rows: &[Row]) -> String {
         "\nScreening records in latest generations: {} / 49.\n",
         screening.len()
     );
+    let open = crate::data::open_deferrals(rows, deferrals);
+    out.push_str("\n## Deferred rungs (not model trials)\n\nA free model failed its once-per-batch availability probe (allowance used up, model unavailable, sign-in or network error, or no reply within the probe deadline), so the rung was not run. A deferral is neither a pass nor a failed attempt, adds no trials, and never affects reliability or recommendations. Rerun the same ladder command later to retry; a later model attempt of the same rung clears its entry.\n\n| Fixture / task | Rung | Deferred at | Reason | Probe seconds | Probe workspace |\n| --- | --- | --- | --- | ---: | --- |\n");
+    for deferral in &open {
+        let _ = writeln!(
+            out,
+            "| {} / {} | {} / {} | {} | {} | {:.1} | {} |",
+            cell(&deferral.fixture),
+            cell(&deferral.task),
+            cell(&deferral.model),
+            deferral.effort.as_deref().unwrap_or("default"),
+            cell(&deferral.timestamp),
+            cell(&deferral.reason),
+            deferral.probe_seconds,
+            link(&deferral.probe_workspace, "probe")
+        );
+    }
+    let _ = writeln!(out, "\nOpen deferrals: {}.\n", open.len());
     out.push_str("## Failures, invalid attempts and claims\n\nFailure classes are evidence-based heuristics, not an independent model judgment. Inspect attached logs before assigning blame. Check-class failures mean missing or invalid evaluator evidence, not model failure. Historical records remain below; an offline verdict does not erase its original row.\n\n| Fixture / task | Model | Trial / generation | State | Class | Claimed success | Evidence | Workspace |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for row in rows
         .iter()
@@ -298,23 +316,23 @@ mod tests {
         assert_eq!(median(vec![5., 1., 3.]), Some(3.));
         assert_eq!(median(vec![1., 5.]), Some(3.));
         assert_eq!(number(None, 0), "not reported");
-        assert!(markdown(&[]).contains("0 / 49"));
+        assert!(markdown(&[], &[]).contains("0 / 49"));
     }
     #[test]
     fn a_screening_pass_is_not_a_recommendation() {
         let mut first = crate::data::synthetic_row();
         first.screening = true;
-        assert!(markdown(std::slice::from_ref(&first)).contains("insufficient trials"));
+        assert!(markdown(std::slice::from_ref(&first), &[]).contains("insufficient trials"));
         let mut second = first.clone();
         second.trial = 2;
         second.screening = false;
-        let text = markdown(&[first.clone(), second]);
+        let text = markdown(&[first.clone(), second], &[]);
         assert!(text.contains("2/2"));
         assert!(text.contains("1 / 49"));
         let mut rerun = first.clone();
         rerun.screening = false;
         rerun.generation = 1;
-        assert!(markdown(&[first, rerun]).contains("1 / 49"));
+        assert!(markdown(&[first, rerun], &[]).contains("1 / 49"));
     }
     #[test]
     fn rechecks_do_not_add_trials_or_spend_and_mark_invalid_cells() {
@@ -324,7 +342,7 @@ mod tests {
         checked.rechecked = true;
         checked.original_run = Some(original.reference());
         checked.generation = 1;
-        let text = markdown(&[original.clone(), checked.clone()]);
+        let text = markdown(&[original.clone(), checked.clone()], &[]);
         assert!(text.contains("1 original model attempts + 1 offline recheck records"));
         assert!(text.contains("Original-run totals only: 2.0 seconds; 10 reported tokens"));
         assert!(text.contains("insufficient trials"));
@@ -332,9 +350,9 @@ mod tests {
         assert!(text.contains("clean offline recheck"));
         let mut second = original.clone();
         second.trial = 2;
-        assert!(markdown(&[original.clone(), checked.clone(), second]).contains("2/2"));
+        assert!(markdown(&[original.clone(), checked.clone(), second], &[]).contains("2/2"));
         original.invalid = true;
-        let invalid = markdown(&[original, checked]);
+        let invalid = markdown(&[original, checked], &[]);
         assert!(invalid.contains("invalid; live rerun required"));
         assert!(!invalid.contains("2/2"));
     }
@@ -345,7 +363,7 @@ mod tests {
         original.check_detail = "Run deadline reached after 600 seconds".into();
         original.failure_class = Some("environment".into());
         original.evidence = serde_json::json!({"failure_review":{"evidence":"Free usage limit reached","citation":"R22.log:12"}});
-        let text = markdown(std::slice::from_ref(&original));
+        let text = markdown(std::slice::from_ref(&original), &[]);
         assert!(text.contains("Free usage limit reached"));
         assert!(text.contains("Citation: R22.log:12"));
         assert!(!text.contains("Run deadline reached after 600 seconds"));
@@ -362,5 +380,60 @@ mod tests {
         assert!(text.contains("R22.log:12"));
         assert!(text.contains("Current check: Offline artifact check passed"));
         assert!(text.contains("Invalid: Read eval-task.json before editing"));
+    }
+}
+
+#[cfg(test)]
+mod deferral_tests {
+    use super::*;
+    fn deferral(row: &Row, timestamp: &str) -> Deferral {
+        Deferral {
+            timestamp: timestamp.into(),
+            fixture: row.fixture.clone(),
+            task: row.task.clone(),
+            level: row.level,
+            agent: row.agent.clone(),
+            model: row.model.clone(),
+            effort: row.effort.clone(),
+            reason: "OpenCode's free allowance is used up.".into(),
+            probe_seconds: 4.0,
+            probe_workspace: "synthetic/probe".into(),
+            probe_log: "Free usage limit reached".into(),
+        }
+    }
+    #[test]
+    fn deferred_rungs_are_listed_but_never_counted_as_attempts() {
+        let mut row = crate::data::synthetic_row();
+        row.timestamp = "2026-01-01T00:00:00+00:00".into();
+        let before = markdown(std::slice::from_ref(&row), &[]);
+        let stale = deferral(&row, "2025-12-31T00:00:00+00:00");
+        let later = deferral(&row, "2026-01-02T00:00:00+00:00");
+        let text = markdown(std::slice::from_ref(&row), &[stale.clone(), later.clone()]);
+        assert!(text.contains("1 original model attempts + 0 offline recheck records"));
+        assert!(text.contains("Open deferrals: 1."));
+        assert!(text.contains("free allowance is used up"));
+        // Reliability table and failure list match the report without deferrals.
+        let section = |t: &str, h: &str| {
+            t.split(h)
+                .nth(1)
+                .unwrap()
+                .split("\n## ")
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        for heading in ["## Cheapest reliable rung", "## Failures"] {
+            assert_eq!(section(&text, heading), section(&before, heading));
+        }
+        // A deferral alone is no row, trial or failure.
+        let only = markdown(&[], &[later.clone()]);
+        assert!(only.contains("0 original model attempts"));
+        assert!(only.contains("Open deferrals: 1."));
+        assert!(!only.contains("clean live"));
+        // A later real attempt of the same rung supersedes it; an earlier one does not.
+        let mut retry = row.clone();
+        retry.timestamp = "2026-01-03T00:00:00+00:00".into();
+        assert!(markdown(&[retry], &[later.clone()]).contains("Open deferrals: 0."));
+        assert!(markdown(&[row], &[later]).contains("Open deferrals: 1."));
     }
 }

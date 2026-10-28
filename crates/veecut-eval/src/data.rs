@@ -132,6 +132,9 @@ pub struct Row {
     pub tokens_cached: Option<u64>,
     pub cost_usd: Option<f64>,
     pub turns: Option<u64>,
+    /// Input plus cache tokens of the run's first model request, when the CLI reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_request_input_tokens: Option<u64>,
     pub claimed_success: bool,
     pub claim_evidence: String,
     pub failure_class: Option<String>,
@@ -249,6 +252,79 @@ pub fn attempt_invalid(rows: &[Row], row: &Row) -> bool {
 }
 
 pub fn rows(dir: &Path) -> Result<Vec<Row>> {
+    read_jsonl(dir)
+}
+
+/// A free rung that was not run because its model was unavailable. Never a model trial.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Deferral {
+    pub timestamp: String,
+    pub fixture: String,
+    pub task: String,
+    pub level: u8,
+    pub agent: String,
+    pub model: String,
+    pub effort: Option<String>,
+    /// First line of the upstream error, or why no reply arrived.
+    pub reason: String,
+    /// Seconds the bounded probe took.
+    pub probe_seconds: f64,
+    /// Kept probe workspace, for inspection.
+    pub probe_workspace: PathBuf,
+    /// Tail of what this probe's own process printed; never a shared or earlier log.
+    pub probe_log: String,
+}
+
+impl Deferral {
+    pub fn cell(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}",
+            self.fixture,
+            self.task,
+            self.agent,
+            self.model,
+            self.effort.as_deref().unwrap_or("default")
+        )
+    }
+}
+
+/// Deferrals live in their own folder so no trial, reliability or recheck code ever sees them.
+pub fn deferral_dir(results: &Path) -> PathBuf {
+    results.join("deferred")
+}
+
+pub fn deferrals(results: &Path) -> Result<Vec<Deferral>> {
+    read_jsonl(&deferral_dir(results))
+}
+
+pub fn append_deferral(results: &Path, deferral: &Deferral) -> Result<()> {
+    append_jsonl(&deferral_dir(results), deferral)
+}
+
+/// Deferrals not yet answered by a later model attempt of the same rung; latest per cell.
+pub fn open_deferrals<'a>(rows: &[Row], deferrals: &'a [Deferral]) -> Vec<&'a Deferral> {
+    let mut latest = BTreeMap::<String, &Deferral>::new();
+    for deferral in deferrals {
+        let key = deferral.cell();
+        if latest
+            .get(&key)
+            .is_none_or(|previous| previous.timestamp <= deferral.timestamp)
+        {
+            latest.insert(key, deferral);
+        }
+    }
+    latest
+        .into_iter()
+        .filter(|(key, deferral)| {
+            !rows.iter().any(|row| {
+                !row.rechecked && &row.cell() == key && row.timestamp > deferral.timestamp
+            })
+        })
+        .map(|(_, deferral)| deferral)
+        .collect()
+}
+
+fn read_jsonl<T: serde::de::DeserializeOwned>(dir: &Path) -> Result<Vec<T>> {
     if !dir.exists() {
         return Ok(vec![]);
     }
@@ -286,13 +362,17 @@ pub fn rows(dir: &Path) -> Result<Vec<Row>> {
 }
 
 pub fn append_row(dir: &Path, row: &Row) -> Result<()> {
+    append_jsonl(dir, row)
+}
+
+fn append_jsonl(dir: &Path, record: &impl Serialize) -> Result<()> {
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("{}.jsonl", chrono::Utc::now().format("%Y-%m-%d")));
     let mut file = fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(path)?;
-    let mut bytes = serde_json::to_vec(row)?;
+    let mut bytes = serde_json::to_vec(record)?;
     bytes.push(b'\n');
     file.write_all(&bytes)?;
     file.sync_data()?;
@@ -579,6 +659,7 @@ pub fn synthetic_row() -> Row {
         tokens_cached: Some(2),
         cost_usd: Some(0.0),
         turns: Some(1),
+        first_request_input_tokens: None,
         claimed_success: true,
         claim_evidence: "Done".into(),
         failure_class: None,

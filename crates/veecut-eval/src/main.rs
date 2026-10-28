@@ -8,6 +8,7 @@ mod tasks;
 
 use crate::{
     data::{Fixture, Row},
+    ladder::Cell,
     tasks::Task,
 };
 use anyhow::{Context, Result, ensure};
@@ -118,6 +119,13 @@ struct LadderArgs {
     /// Only orchestrators may enable paid rungs; monitor weekly budgets between batches.
     #[arg(long)]
     allow_paid: bool,
+    /// Rungs to try: providers free/opencode, claude, codex, or rung ids MODEL[@EFFORT]
+    /// (e.g. claude,codex or opencode/flint-40b-free@max). Omit for the whole ladder.
+    #[arg(long, value_delimiter = ',')]
+    rungs: Vec<String>,
+    /// Seconds allowed for the once-per-model free availability probe.
+    #[arg(long,default_value_t=20,value_parser=clap::value_parser!(u64).range(5..=600))]
+    probe_timeout: u64,
 }
 
 #[derive(Args)]
@@ -145,7 +153,8 @@ fn main() -> Result<()> {
     let root = cli.root.unwrap_or_else(|| home.join("veecut-eval"));
     let root = safe_output(&root, &home)?;
     if let Command::Report { out } = cli.command {
-        let text = report::markdown(&data::rows(&root.join("results"))?);
+        let results = root.join("results");
+        let text = report::markdown(&data::rows(&results)?, &data::deferrals(&results)?);
         if let Some(path) = out {
             fs::write(safe_output(&path, &home)?, text)?;
         } else {
@@ -271,6 +280,12 @@ fn main() -> Result<()> {
             }
         }
         Command::Ladder(args) => {
+            let rungs = ladder::Rungs::parse(&args.rungs)?;
+            ensure!(
+                !rungs.selects_paid() || args.allow_paid,
+                "--rungs selects paid rungs (claude/codex); they also require --allow-paid from the orchestrator"
+            );
+            let mut probes = execute::Probes::new(args.probe_timeout);
             let mut count = 0;
             for fixture in fixtures.iter().filter(|f| args.filter.filter.matches(f)) {
                 for task in fixture_tasks(&root, fixture, &fixtures)?
@@ -278,69 +293,42 @@ fn main() -> Result<()> {
                     .filter(|t| args.filter.matches(t))
                 {
                     count += 1;
-                    let defaults = ladder::free_candidates(&rows, task.level == 6);
-                    let mut free_pass = false;
-                    for selection in &defaults {
-                        if ladder_cell(
-                            &root,
-                            manifest_dir,
-                            fixture,
-                            &task,
-                            AgentKind::OpenCode,
-                            selection,
-                            &args,
-                            &mut rows,
-                        )? {
-                            free_pass = true;
-                            if let Some(low) =
-                                ladder::extremes(selection.model.as_deref().unwrap()).0
-                            {
-                                let lower = ladder::selection(
-                                    selection.model.as_deref().unwrap(),
-                                    Some(low),
-                                );
-                                let _ = ladder_cell(
-                                    &root,
-                                    manifest_dir,
-                                    fixture,
-                                    &task,
-                                    AgentKind::OpenCode,
-                                    &lower,
-                                    &args,
-                                    &mut rows,
-                                )?;
-                            }
-                            break;
+                    let mut defaults = ladder::free_candidates(&rows, task.level == 6);
+                    for model in rungs.named_free_models() {
+                        if !defaults.iter().any(|s| s.model.as_deref() == Some(model))
+                            && (task.level != 6 || ladder::image_capable(model))
+                        {
+                            defaults.push(ladder::selection(model, None));
                         }
                     }
-                    if !free_pass {
-                        for selection in &defaults {
-                            if let Some(high) =
-                                ladder::extremes(selection.model.as_deref().unwrap()).1
-                            {
-                                let higher = ladder::selection(
-                                    selection.model.as_deref().unwrap(),
-                                    Some(high),
-                                );
-                                if ladder_cell(
-                                    &root,
-                                    manifest_dir,
-                                    fixture,
-                                    &task,
-                                    AgentKind::OpenCode,
-                                    &higher,
-                                    &args,
-                                    &mut rows,
-                                )? {
-                                    free_pass = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    let (free_pass, deferred) =
+                        ladder::climb_free(&defaults, &rungs, &mut |selection| {
+                            ladder_cell(
+                                &root,
+                                manifest_dir,
+                                fixture,
+                                &task,
+                                AgentKind::OpenCode,
+                                selection,
+                                &args,
+                                &mut probes,
+                                &mut rows,
+                            )
+                        })?;
                     if !free_pass && args.allow_paid {
+                        if deferred {
+                            // A deferred free rung proves nothing, so it must not trigger paid spend.
+                            eprintln!(
+                                "{} / {}: paid rungs withheld; a free rung was deferred, not failed",
+                                fixture.id, task.id
+                            );
+                            continue;
+                        }
                         for agent in [AgentKind::Claude, AgentKind::Codex] {
                             for selection in ladder::paid_candidates(agent) {
+                                if !rungs.allows(agent, &selection) {
+                                    continue;
+                                }
                                 if ladder_cell(
                                     &root,
                                     manifest_dir,
@@ -349,8 +337,10 @@ fn main() -> Result<()> {
                                     agent,
                                     &selection,
                                     &args,
+                                    &mut probes,
                                     &mut rows,
-                                )? {
+                                )? == Cell::Pass
+                                {
                                     break;
                                 }
                             }
@@ -572,27 +562,60 @@ fn ladder_cell(
     agent: AgentKind,
     selection: &Selection,
     args: &LadderArgs,
+    probes: &mut execute::Probes,
     rows: &mut Vec<Row>,
-) -> Result<bool> {
+) -> Result<Cell> {
     paid_guard(agent, selection, args.allow_paid)?;
     let key = ladder::cell(&fixture.id, &task.id, agent, selection);
     let generation = ladder::generation(rows, &key, args.rerun);
     loop {
         match ladder::decide(&ladder::outcomes(rows, &key, generation)) {
-            ladder::Decision::Reliable => return Ok(true),
-            ladder::Decision::Unreliable => return Ok(false),
-            ladder::Decision::Trial(trial) => rows.push(execute::run(execute::RunSpec {
-                root,
-                manifest_dir,
-                fixture,
-                task,
-                agent,
-                selection,
-                trial,
-                timeout: args.timeout,
-                screening: false,
-                generation,
-            })?),
+            ladder::Decision::Reliable => return Ok(Cell::Pass),
+            ladder::Decision::Unreliable => return Ok(Cell::Fail),
+            ladder::Decision::Trial(trial) => {
+                // Free rungs: one bounded probe per model per batch, before the first spend.
+                if selection
+                    .model
+                    .as_deref()
+                    .is_some_and(|m| ladder::free(agent, m))
+                    && let Some(probe) = probes.unavailable(root, agent, selection)?
+                {
+                    let deferral = data::Deferral {
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        fixture: fixture.id.clone(),
+                        task: task.id.clone(),
+                        level: task.level,
+                        agent: agent.name().into(),
+                        model: selection.model.clone().unwrap_or_default(),
+                        effort: selection.effort.clone(),
+                        reason: probe.reason.clone(),
+                        probe_seconds: probe.seconds,
+                        probe_workspace: probe.workspace.clone(),
+                        probe_log: probe.log.clone(),
+                    };
+                    data::append_deferral(&root.join("results"), &deferral)?;
+                    eprintln!(
+                        "{} / {} / {}: DEFERRED, not a model trial ({}). Rerun the same command later to retry.",
+                        fixture.id,
+                        task.id,
+                        ladder::rung_id(selection),
+                        deferral.reason
+                    );
+                    return Ok(Cell::Deferred);
+                }
+                rows.push(execute::run(execute::RunSpec {
+                    root,
+                    manifest_dir,
+                    fixture,
+                    task,
+                    agent,
+                    selection,
+                    trial,
+                    timeout: args.timeout,
+                    screening: false,
+                    generation,
+                })?)
+            }
         }
     }
 }

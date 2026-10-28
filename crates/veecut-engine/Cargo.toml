@@ -1,0 +1,41 @@
+[package]
+name = "veecut-engine"
+description = "VeeCut Studio editing engine: timeline model, Editor API, analysis, Rust compositor and ffmpeg I/O"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["whisper"]
+# Local, offline transcription through whisper.cpp. Needs cmake and a C++ compiler to build.
+whisper = ["dep:whisper-rs"]
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+toml.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+cosmic-text = "0.19"
+dirs = "7"
+fast_image_resize = "6"
+flate2 = "1"
+hound = "3.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+realfft = "3"
+regex = "1"
+rustface = "0.1.7"
+strsim = "0.11"
+tar = "0.4"
+tempfile = "3"
+tiny-skia = "0.12"
+ureq = { version = "3", features = ["json"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+whisper-rs = { version = "0.16", optional = true }

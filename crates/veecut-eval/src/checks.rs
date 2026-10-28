@@ -273,6 +273,10 @@ fn to_json(p: &Project) -> Result<Value, Fail> {
         .map_err(|e| bad(format!("project cannot be serialized: {e}"), Value::Null))
 }
 
+/// Numbers closer than this are the same (JSON round trips and ripple recomputation leave
+/// noise of about 1e-14).
+const NUMBER_TOL: f64 = 1e-6;
+
 fn diff(a: &Value, b: &Value, path: String, out: &mut Vec<String>) {
     match (a, b) {
         (Value::Object(x), Value::Object(y)) => {
@@ -289,6 +293,15 @@ fn diff(a: &Value, b: &Value, path: String, out: &mut Vec<String>) {
                 diff(u, v, format!("{path}/{i}"), out);
             }
         }
+        (Value::Number(x), Value::Number(y)) => {
+            let same = match (x.as_f64(), y.as_f64()) {
+                (Some(u), Some(v)) => (u - v).abs() <= NUMBER_TOL,
+                _ => x == y,
+            };
+            if !same {
+                out.push(path);
+            }
+        }
         _ => {
             if a != b {
                 out.push(path);
@@ -297,11 +310,27 @@ fn diff(a: &Value, b: &Value, path: String, out: &mut Vec<String>) {
     }
 }
 
-/// JSON pointers of every field that differs between two projects.
+/// `/tracks/0/items/<n>/start`: the main track's starts are computed from the durations and
+/// the order by `Project::normalize` after every op, so they are not an edit of their own.
+fn computed_main_start(path: &str) -> bool {
+    path.strip_prefix("/tracks/0/items/")
+        .and_then(|rest| rest.strip_suffix("/start"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+}
+
+/// JSON pointers of every field that differs between two projects, with numbers compared to
+/// within `NUMBER_TOL` and the computed main-track starts left out (durations, order, source
+/// ranges and every other field still count).
 fn changed(a: &Project, b: &Project) -> Result<Vec<String>, Fail> {
     let mut out = vec![];
     diff(&to_json(a)?, &to_json(b)?, String::new(), &mut out);
+    out.retain(|p| !computed_main_start(p));
     Ok(out)
+}
+
+/// Equal by the same comparator as `changed`. Serialization trouble counts as different.
+fn same(a: &Project, b: &Project) -> bool {
+    changed(a, b).is_ok_and(|c| c.is_empty())
 }
 
 /// The baseline project to compare with and the agent's counterpart. Every other baseline
@@ -324,7 +353,7 @@ fn pair<'a>(
     );
     for (x, y) in before.iter().zip(after).skip(1) {
         need!(
-            x == y,
+            same(x, y),
             format!(
                 "project {:?}, which the task did not ask to change, was modified",
                 x.name
@@ -1196,7 +1225,10 @@ fn clips(
     if transcripts.is_empty() {
         return Err(miss("no baseline transcript to measure the topic against"));
     }
-    let fresh: Vec<&Project> = after.iter().filter(|p| !before.contains(p)).collect();
+    let fresh: Vec<&Project> = after
+        .iter()
+        .filter(|p| !before.iter().any(|q| same(p, q)))
+        .collect();
     need!(
         fresh.len() == 3,
         format!(
@@ -1283,7 +1315,7 @@ fn with_baseline(b: &Project, a: &Project, f: impl Fn(&Project) -> Verdict) -> V
         }
         if let Some(o) = ev.as_object_mut() {
             o.insert("baseline_passes".into(), json!(baseline_passes));
-            o.insert("unchanged_from_baseline".into(), json!(b == a));
+            o.insert("unchanged_from_baseline".into(), json!(same(b, a)));
         }
     };
     match f(a) {
@@ -1789,7 +1821,7 @@ fn lyric(at: f64, text: &str, before: &[Project], after: &[Project]) -> Verdict 
         format!("other parts of the project changed: {}", list(&rest)),
         json!({"changed": rest})
     );
-    need!(b != a, "the project is identical to the baseline");
+    need!(!same(b, a), "the project is identical to the baseline");
     pass(
         format!("lyric changed at {first:.2} s with its timing kept"),
         json!({"at": first, "items": new_items}),
@@ -2707,6 +2739,86 @@ mod tests {
             text_item("lt", start, 4.0, text, TextPreset::LowerThird),
         );
         p
+    }
+
+    /// What a real op does to a multi-clip main track: starts recomputed, durations a float
+    /// apart (34.111999999999995 against 34.112).
+    fn noisy(p: &Project) -> Project {
+        let mut n = p.clone();
+        for (i, item) in n.tracks[0].items.iter_mut().enumerate().skip(1) {
+            item.start += 1e-12 * i as f64;
+            item.duration += 1e-13;
+        }
+        n
+    }
+
+    #[test]
+    fn float_noise_and_recomputed_main_starts_are_not_changes() {
+        let before = split(&[(0.0, 34.112), (34.112, 60.0), (60.0, 100.0)]);
+        let name = "Katelynn Greer\nResearch scientist";
+
+        // Noise plus the requested lower third passes.
+        let mut good = noisy(&before);
+        put(
+            &mut good,
+            "text",
+            text_item("lt", 1.0, 4.0, name, TextPreset::LowerThird),
+        );
+        for item in good.tracks[0].items.iter_mut().skip(1) {
+            item.start += 1e-9;
+            item.duration += 1e-10;
+        }
+        ok(&go(lt_check(), &[before.clone()], &[good.clone()]));
+
+        // Real changes next to the noise still fail: a main duration, an unrelated style field,
+        // a source range, or an item that moved on a non-main track.
+        let mut longer = good.clone();
+        longer.tracks[0].items[1].duration += 0.5;
+        fails(
+            &go(lt_check(), &[before.clone()], &[longer]),
+            "/tracks/0/items/1/duration",
+        );
+        let mut styled = good.clone();
+        styled.captions.size += 0.01;
+        fails(
+            &go(lt_check(), &[before.clone()], &[styled]),
+            "/captions/size",
+        );
+        let mut shifted = good.clone();
+        shifted.tracks[0].items[2].body = ItemBody::Clip(Clip::new("src", 61.0));
+        fails(&go(lt_check(), &[before.clone()], &[shifted]), "src_in");
+        let mut base_text = before.clone();
+        put(
+            &mut base_text,
+            "text",
+            text_item("other", 20.0, 3.0, "Other", TextPreset::Card),
+        );
+        let mut moved = noisy(&base_text);
+        put(
+            &mut moved,
+            "text",
+            text_item("lt", 1.0, 4.0, name, TextPreset::LowerThird),
+        );
+        moved.item_mut("other").unwrap().start += 0.5;
+        fails(&go(lt_check(), &[base_text], &[moved]), "changed");
+    }
+
+    #[test]
+    fn style_checks_ignore_noise_but_catch_real_side_effects() {
+        let before = split(&[(0.0, 34.112), (34.112, 100.0)]);
+        let mut good = noisy(&before);
+        good.captions.size = 0.06;
+        ok(&go(
+            Check::CaptionSize { size: 0.06 },
+            &[before.clone()],
+            &[good.clone()],
+        ));
+        let mut longer = good.clone();
+        longer.tracks[0].items[1].duration += 0.5;
+        fails(
+            &go(Check::CaptionSize { size: 0.06 }, &[before], &[longer]),
+            "only /captions/size",
+        );
     }
 
     #[test]

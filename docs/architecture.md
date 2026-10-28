@@ -347,6 +347,9 @@ cover kind/canvas/source identity, exact style changes, kept source ranges, time
 kind-specific edits and caption/mouth geometry. Cue timestamps alone are not word timing.
 Visual truth is disclosed as a detector-derived proxy; missing evidence fails as `check`.
 Every check variant has passing and failing project tests.
+Unrelated-field comparisons tolerate numeric roundoff up to `1e-6` and ignore derived
+main-track starts. Recipes can save float noise that later ops normalize; this must not
+turn a correct edit into a check failure.
 
 The runner calls `agent::run` with an explicit selection and a Stop watchdog: 600 seconds,
 or 1,200 for level 1 on long fixtures, unless overridden. It records one JSONL row per trial

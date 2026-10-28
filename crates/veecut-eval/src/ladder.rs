@@ -88,17 +88,28 @@ pub fn decide(outcomes: &[bool]) -> Decision {
 }
 
 pub fn generation(rows: &[Row], key: &str, rerun: bool) -> u32 {
-    let latest = rows
-        .iter()
-        .filter(|r| r.cell() == key)
-        .map(|r| r.generation)
-        .max();
-    latest.map_or(0, |g| g + u32::from(rerun))
+    if rerun {
+        return rows
+            .iter()
+            .filter(|r| r.cell() == key)
+            .map(|r| r.generation)
+            .max()
+            .map_or(0, |g| g + 1);
+    }
+    rows.iter()
+        .filter(|r| !r.rechecked && r.cell() == key)
+        .map(|r| r.source_generation())
+        .max()
+        .unwrap_or(0)
 }
 pub fn outcomes(rows: &[Row], key: &str, generation: u32) -> Vec<bool> {
-    let trials: BTreeMap<_, _> = rows
-        .iter()
-        .filter(|r| r.cell() == key && r.generation == generation)
+    let trials: BTreeMap<_, _> = crate::data::effective_rows(rows)
+        .into_iter()
+        .filter(|r| {
+            r.cell() == key
+                && r.source_generation() == generation
+                && !crate::data::attempt_invalid(rows, r)
+        })
         .map(|r| (r.trial, r.pass))
         .collect();
     (1..)
@@ -107,16 +118,21 @@ pub fn outcomes(rows: &[Row], key: &str, generation: u32) -> Vec<bool> {
 }
 
 pub fn free_candidates(rows: &[Row], visual: bool) -> Vec<Selection> {
+    let valid: Vec<_> = crate::data::current_rows(rows)
+        .into_iter()
+        .filter(|r| !crate::data::attempt_invalid(rows, r))
+        .collect();
     let mut others: Vec<_> = FREE_MODELS[2..]
         .iter()
         .copied()
         .filter(|m| {
-            (!visual || image_capable(m)) && rows.iter().any(|r| screening_cell(r) && r.model == *m)
+            (!visual || image_capable(m))
+                && valid.iter().any(|r| screening_cell(r) && r.model == *m)
         })
         .collect();
     others.sort_by(|a, b| {
         let score = |model: &str| {
-            let selected: Vec<_> = rows
+            let selected: Vec<_> = valid
                 .iter()
                 .filter(|r| screening_cell(r) && r.model == model)
                 .collect();

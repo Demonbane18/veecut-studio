@@ -242,6 +242,9 @@ the config selection and apply per-run overrides before calling `run`; an absent
 `Selection` means the agent's default. OpenCode defaults to `opencode/glm-5.3-flash-free`;
 other agents use their CLI's default model. A custom command vector takes precedence and
 is not given extra model, effort or output-format arguments.
+The default OpenCode driver stops on reported free-allowance exhaustion and unavailable-model
+errors, preserves usage received so far and returns an actionable error to CLI and Studio.
+Only emitted stdout/stderr errors are observable; private OpenCode log entries are not read.
 
 Claude `ultracode` maps to `--effort max --settings '{"ultracode":true}'` and adds `Workflow`
 to the allowed tools. The picker labels its roughly fivefold token cost. Gemini has no
@@ -331,7 +334,7 @@ arguments as the matching command; `frame` and `frames` also return the PNG as a
 ## Evaluation harness (`veecut-eval`)
 
 The unpublished harness depends on the engine, not the CLI or Studio. Its commands are
-`baselines`, `run`, `ladder` and `report`; root and manifest overrides precede the command.
+`baselines`, `run`, `ladder`, `recheck` and `report`; root and manifest overrides precede the command.
 Filters select fixture IDs, kinds and lengths, with task and level filters for agent runs.
 The fixture manifest remains outside git. No harness operation writes into fixture media.
 
@@ -341,6 +344,11 @@ Each has its own workspace, linked inbox, saved report, log and completion recor
 remain available when retried. Each agent trial copies its baseline into `work/runs/`,
 materializes independent inbox files and rebases project paths. Level 1 starts without a
 project. Other levels use the same `agent::studio_prompt` as Studio.
+Private task expectations, logs, answers and frozen before-state evidence live in
+`results/artifacts/<run-id>/`, not in the agent workspace. Per-task setup must produce
+a valid project that fails the requested check before dispatch; an unchanged baseline
+cannot earn a pass. Visual setup preserves independent face truth while making the
+drawn captions overlap the mouth, so the task requires a repair.
 
 Tasks are code templates filled from manifest notes and frozen baseline evidence. Checks
 cover kind/canvas/source identity, exact style changes, kept source ranges, timed assets,
@@ -364,6 +372,12 @@ nine free models at their default variant on five tasks and four image-capable m
 the visual task. Existing cells are skipped; `--rerun` preserves earlier generations.
 Ladders require two passes, trying a third trial on a split. Reports separate one-trial
 screening outcomes from reliable rungs and show medians and failure evidence.
+
+`recheck` evaluates retained artifacts without a model call, appending a linked row with
+`rechecked = true` and an incremented generation. It preserves source-run costs rather
+than counting them as new spend. Reports and reliability calculations identify the original
+attempt so an offline recheck cannot become an independent second trial. Runs that read
+private checker expectations keep `invalid = true` across rechecks and require live reruns.
 
 ## The built-in skill
 

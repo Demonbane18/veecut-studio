@@ -146,6 +146,25 @@ pub struct Row {
     pub provenance: String,
     pub screening: bool,
     pub generation: u32,
+    #[serde(default)]
+    pub invalid: bool,
+    /// An offline verdict on the same original model attempt, never another trial or spend.
+    #[serde(default)]
+    pub rechecked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_run: Option<RunReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checker_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_inputs: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunReference {
+    pub timestamp: String,
+    pub workspace: PathBuf,
+    pub generation: u32,
+    pub trial: u32,
 }
 
 impl Row {
@@ -162,6 +181,71 @@ impl Row {
     pub fn total_tokens(&self) -> Option<u64> {
         Some(self.tokens_in? + self.tokens_out? + self.tokens_cached?)
     }
+    pub fn reference(&self) -> RunReference {
+        RunReference {
+            timestamp: self.timestamp.clone(),
+            workspace: self.workspace.clone(),
+            generation: self.generation,
+            trial: self.trial,
+        }
+    }
+    pub fn origin(&self) -> RunReference {
+        self.original_run
+            .clone()
+            .unwrap_or_else(|| self.reference())
+    }
+    pub fn source_generation(&self) -> u32 {
+        self.original_run
+            .as_ref()
+            .map_or(self.generation, |source| source.generation)
+    }
+    pub fn attempt_key(&self) -> String {
+        let source = self.origin();
+        format!(
+            "{}|{}|{}|{}|{}",
+            self.cell(),
+            source.timestamp,
+            source.workspace.display(),
+            source.generation,
+            source.trial
+        )
+    }
+}
+
+/// Latest verdict per actual model attempt; offline rechecks replace verdicts, not trials.
+pub fn effective_rows(rows: &[Row]) -> Vec<&Row> {
+    let mut attempts = BTreeMap::<String, &Row>::new();
+    for row in rows {
+        let key = row.attempt_key();
+        if attempts.get(&key).is_none_or(|previous| {
+            (previous.generation, &previous.timestamp) <= (row.generation, &row.timestamp)
+        }) {
+            attempts.insert(key, row);
+        }
+    }
+    attempts.into_values().collect()
+}
+
+/// Verdicts for the latest live-run generation of each cell.
+pub fn current_rows(rows: &[Row]) -> Vec<&Row> {
+    let effective = effective_rows(rows);
+    let mut generations = BTreeMap::<String, u32>::new();
+    for row in &effective {
+        generations
+            .entry(row.cell())
+            .and_modify(|g| *g = (*g).max(row.source_generation()))
+            .or_insert(row.source_generation());
+    }
+    effective
+        .into_iter()
+        .filter(|row| generations.get(&row.cell()) == Some(&row.source_generation()))
+        .collect()
+}
+
+pub fn attempt_invalid(rows: &[Row], row: &Row) -> bool {
+    let key = row.attempt_key();
+    rows.iter()
+        .any(|candidate| candidate.invalid && candidate.attempt_key() == key)
 }
 
 pub fn rows(dir: &Path) -> Result<Vec<Row>> {
@@ -258,12 +342,21 @@ pub fn copy_tree(source: &Path, dest: &Path) -> Result<()> {
         dest.display()
     );
     fs::create_dir_all(dest)?;
-    copy_contents(source, dest)
+    copy_contents(source, dest, true)
 }
 
-fn copy_contents(source: &Path, dest: &Path) -> Result<()> {
+fn copy_contents(source: &Path, dest: &Path, workspace_root: bool) -> Result<()> {
     for entry in fs::read_dir(source)? {
         let entry = entry?;
+        let name = entry.file_name();
+        if workspace_root
+            && (matches!(
+                name.to_str(),
+                Some("baseline.json" | "report.json" | "baseline.log")
+            ) || name.to_string_lossy().starts_with("eval-"))
+        {
+            continue;
+        }
         let from = entry.path();
         let to = dest.join(entry.file_name());
         let metadata = fs::metadata(&from)?;
@@ -274,7 +367,7 @@ fn copy_contents(source: &Path, dest: &Path) -> Result<()> {
                 from.display()
             );
             fs::create_dir(&to)?;
-            copy_contents(&from, &to)?;
+            copy_contents(&from, &to, false)?;
         } else if metadata.is_file() {
             // fs::copy dereferences baseline inbox links and creates independent writable files.
             fs::copy(&from, &to).with_context(|| format!("copying {}", from.display()))?;
@@ -405,7 +498,23 @@ mod tests {
         #[cfg(not(unix))]
         fs::copy(&fixture, baseline.join("inbox/media")).unwrap();
         let run = temp.path().join("run");
+        for name in [
+            "baseline.json",
+            "report.json",
+            "baseline.log",
+            "eval-task.json",
+        ] {
+            fs::write(baseline.join(name), b"private evaluator evidence").unwrap();
+        }
         copy_tree(&baseline, &run).unwrap();
+        for name in [
+            "baseline.json",
+            "report.json",
+            "baseline.log",
+            "eval-task.json",
+        ] {
+            assert!(!run.join(name).exists());
+        }
         let snapshot = inbox_snapshot(&run.join("inbox")).unwrap();
         fs::write(run.join("inbox/media"), b"changed").unwrap();
         assert_eq!(fs::read(&fixture).unwrap(), b"original");
@@ -418,6 +527,32 @@ mod tests {
         rebase(&run, &baseline, &[(fixture, run.join("inbox/media"))]).unwrap();
         let v: Value = read_json(&run.join("transcript.json")).unwrap();
         assert_eq!(v["path"], run.join("inbox/media").to_str().unwrap());
+    }
+    #[test]
+    fn legacy_result_rows_default_new_metadata_and_invalidity_is_sticky() {
+        let source = synthetic_row();
+        let mut value = serde_json::to_value(&source).unwrap();
+        for key in [
+            "invalid",
+            "rechecked",
+            "original_run",
+            "checker_fingerprint",
+            "frozen_inputs",
+        ] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        let old: Row = serde_json::from_value(value).unwrap();
+        assert!(!old.rechecked && !old.invalid);
+        assert!(old.original_run.is_none());
+        let mut checked = old.clone();
+        checked.rechecked = true;
+        checked.original_run = Some(old.reference());
+        checked.generation = 1;
+        let mut invalid = old;
+        invalid.invalid = true;
+        let rows = vec![invalid, checked.clone()];
+        assert!(attempt_invalid(&rows, &checked));
+        assert_eq!(effective_rows(&rows).len(), 1);
     }
 }
 
@@ -458,5 +593,10 @@ pub fn synthetic_row() -> Row {
         provenance: "synthetic unit test".into(),
         screening: false,
         generation: 0,
+        invalid: false,
+        rechecked: false,
+        original_run: None,
+        checker_fingerprint: None,
+        frozen_inputs: None,
     }
 }

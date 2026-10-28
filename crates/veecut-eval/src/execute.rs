@@ -247,6 +247,11 @@ pub fn claim(answer: &str) -> (bool, String) {
             return (false, (*sentence).into());
         }
     }
+    // Decimal points split numeric ranges, so this completed-cut form uses the unsplit answer.
+    // Its bare imperative/future forms are deliberately not accepted.
+    if completed_numeric_cut(answer.trim()) {
+        return (true, answer.trim().into());
+    }
     for sentence in &sentences {
         let lower = sentence.to_lowercase();
         if lower.contains("will be") || lower.contains("would be") {
@@ -276,27 +281,54 @@ pub fn claim(answer: &str) -> (bool, String) {
     (false, "No explicit completion claim in final answer".into())
 }
 
+fn completed_numeric_cut(answer: &str) -> bool {
+    if answer.contains(['\n', '\r']) {
+        return false;
+    }
+    let Some(rest) = answer.strip_prefix("Cut ") else {
+        return false;
+    };
+    let Some((range, detail)) = rest.split_once(' ') else {
+        return false;
+    };
+    if !detail.starts_with("(exactly ")
+        || !(detail.ends_with(") from every track.") || detail.ends_with(") from all tracks."))
+    {
+        return false;
+    }
+    let Some((from, to)) = range.split_once(['–', '—', '-']) else {
+        return false;
+    };
+    let seconds = |value: &str| value.strip_suffix('s')?.parse::<f64>().ok();
+    matches!((seconds(from), seconds(to)), (Some(from), Some(to)) if from.is_finite() && to.is_finite() && from >= 0.0 && to > from)
+}
+
 pub fn classify(detail: &str, timed_out: bool) -> &'static str {
     let text = detail.to_lowercase();
-    if [
-        "unauthorized",
-        "not logged in",
-        "sign in",
-        "authentication",
-        "quota",
-        "rate limit",
-        "429",
-        "network",
-        "connection refused",
-        "timed out connecting",
-        "not installed",
-        "no such file",
-        "not found in path",
-        "disk full",
-        "no space left",
-    ]
-    .iter()
-    .any(|x| text.contains(x))
+    if text.contains("opencode's free allowance is used up")
+        || (text.contains("opencode says the model ") && text.contains(" is unavailable"))
+        || [
+            "unauthorized",
+            "not logged in",
+            "sign in",
+            "authentication",
+            "quota",
+            "rate limit",
+            "429",
+            "free usage limit reached",
+            "freeusagelimiterror",
+            "model is unavailable",
+            "network",
+            "connection refused",
+            "timed out connecting",
+            "not installed",
+            "no such file",
+            "not found in path",
+            "disk full",
+            "no space left",
+        ]
+        .iter()
+        .any(|x| text.contains(x))
     {
         "environment"
     } else if [
@@ -351,8 +383,12 @@ pub fn run(spec: RunSpec<'_>) -> Result<Row> {
     let workspace =
         root.join("work/runs")
             .join(format!("{}-{}-{}", fixture.id, task.id, unique_id()));
+    let artifacts = root
+        .join("results/artifacts")
+        .join(workspace.file_name().context("Run workspace has no name")?);
+    fs::create_dir_all(&artifacts)?;
     let mut row = Row {
-        schema_version: 1,
+        schema_version: 2,
         timestamp: chrono::Utc::now().to_rfc3339(),
         fixture: fixture.id.clone(),
         kind: fixture.kind.clone(),
@@ -382,13 +418,18 @@ pub fn run(spec: RunSpec<'_>) -> Result<Row> {
         exit_code: None,
         workspace: workspace.clone(),
         project_paths: vec![],
-        prompt_path: workspace.join("eval-prompt.txt"),
-        answer_path: workspace.join("eval-answer.txt"),
-        log_path: workspace.join("eval-agent.log"),
-        task_path: workspace.join("eval-task.json"),
+        prompt_path: artifacts.join("prompt.txt"),
+        answer_path: artifacts.join("answer.txt"),
+        log_path: artifacts.join("agent.log"),
+        task_path: artifacts.join("task.json"),
         provenance: task.provenance.clone(),
         screening,
         generation,
+        invalid: false,
+        rechecked: false,
+        original_run: None,
+        checker_fingerprint: None,
+        frozen_inputs: None,
     };
     let mut answer = String::new();
     let mut logs = String::new();
@@ -435,7 +476,7 @@ pub fn run(spec: RunSpec<'_>) -> Result<Row> {
             }
         }
         data::write_json(&row.task_path, task)?;
-        let (paths, before, transcripts) = data::projects(&workspace)?;
+        let (paths, mut before, transcripts) = data::projects(&workspace)?;
         let prompt = if task.level == 1 {
             task.prompt.clone()
         } else {
@@ -452,8 +493,26 @@ pub fn run(spec: RunSpec<'_>) -> Result<Row> {
                 evidence: json!({"prerequisite":reason,"provenance":task.provenance}),
             });
         }
+        if let Err(reason) = checks::prepare(task, &mut before, &transcripts) {
+            return Ok(CheckResult {
+                pass: false,
+                detail: format!("Task preparation failed: {reason}"),
+                failure_class: Some("check".into()),
+                evidence: json!({"preparation_error":reason,"spawned":false}),
+            });
+        }
+        for (path, project) in paths.iter().zip(&before) {
+            project.save(path)?;
+        }
         // Frozen snapshots remain outside the agent-readable workspace.
         let inbox_before = data::inbox_snapshot(&workspace.join("inbox"))?;
+        row.frozen_inputs = Some(crate::recheck::freeze(
+            &row,
+            task,
+            &before,
+            &transcripts,
+            &inbox_before,
+        )?);
         let ws = Workspace::open(&workspace)?;
         let mut log_file = fs::OpenOptions::new().append(true).open(&row.log_path)?;
         let stop = Stop::default();
@@ -497,6 +556,9 @@ pub fn run(spec: RunSpec<'_>) -> Result<Row> {
         let _ = watch.join();
         row.timed_out = deadline.load(Ordering::SeqCst);
         row.seconds = started.elapsed().as_secs_f64();
+        if let Ok(Outcome::Finished(status)) = &outcome {
+            row.exit_code = status.code();
+        }
         fs::write(&row.answer_path, &answer)?;
         let (paths, after, _) = data::projects(&workspace)?;
         row.project_paths = paths;
@@ -588,7 +650,7 @@ pub fn run(spec: RunSpec<'_>) -> Result<Row> {
     if !row.log_path.exists() {
         fs::write(&row.log_path, &logs)?;
     }
-    data::write_json(&workspace.join("eval-result.json"), &row)?;
+    data::write_json(&artifacts.join("result.json"), &row)?;
     data::append_row(&root.join("results"), &row)?;
     eprintln!(
         "{} / {} / {} trial {}: {} ({:.1}s) {}",
@@ -641,5 +703,38 @@ mod tests {
         assert!(!claim("The project was not changed.").0);
         assert!(!claim("The captions will be updated.").0);
         assert!(!claim("").0);
+    }
+    #[test]
+    fn completed_numeric_cut_claim_preserves_the_full_range() {
+        let answer = "Cut 14.2s–20.2s (exactly the \"from Utah to Kennedy Space Center, Florida.\" sentence, no extra seconds) from every track.";
+        assert_eq!(claim(answer), (true, answer.into()));
+        assert!(claim("Cut 2s-4s (exactly the requested sentence) from all tracks.").0);
+        for future in [
+            "I will cut 14.2s–20.2s from every track.",
+            "I would cut 14.2s–20.2s from every track.",
+            "Please cut 14.2s–20.2s (exactly the requested sentence) from every track.",
+            "Cut 14.2s–20.2s from every track.",
+            "Next, cut 14.2s–20.2s (exactly the requested sentence) from every track.",
+            "Plan:\nCut 14.2s–20.2s (exactly the requested sentence) from every track.",
+            "Cut 20.2s–14.2s (exactly the requested sentence) from every track.",
+        ] {
+            assert!(!claim(future).0, "{future}");
+        }
+    }
+    #[test]
+    fn opencode_exhaustion_and_unavailable_errors_are_environment_failures() {
+        for message in [
+            "Free usage limit reached",
+            "FreeUsageLimitError",
+            "Model is unavailable",
+            "OpenCode's free allowance is used up. It can take a day or more to come back; pick another agent or model.",
+            "OpenCode says the model opencode/big-pickle is unavailable. Pick another model or agent.",
+        ] {
+            assert_eq!(classify(message, false), "environment");
+        }
+        assert_eq!(
+            classify("The requested caption size was not changed", false),
+            "model"
+        );
     }
 }

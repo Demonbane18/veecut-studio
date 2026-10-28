@@ -2,6 +2,7 @@ mod checks;
 mod data;
 mod execute;
 mod ladder;
+mod recheck;
 mod report;
 mod tasks;
 
@@ -42,6 +43,8 @@ enum Command {
     Run(RunArgs),
     /// Try each provider's cheapest rungs; two passes, third trial on a split.
     Ladder(LadderArgs),
+    /// Regrade retained artifacts offline; never launches a model or prepares a new challenge.
+    Recheck(RecheckArgs),
     /// Markdown recommendations and complete artifact-linked screening/failure tables.
     Report {
         #[arg(long)]
@@ -115,6 +118,22 @@ struct LadderArgs {
     /// Only orchestrators may enable paid rungs; monitor weekly budgets between batches.
     #[arg(long)]
     allow_paid: bool,
+}
+
+#[derive(Args)]
+struct RecheckArgs {
+    #[command(flatten)]
+    filter: TaskFilter,
+    #[arg(long, value_delimiter = ',')]
+    model: Vec<String>,
+    #[arg(long, value_delimiter = ',')]
+    failure_class: Vec<String>,
+    /// Select one retained original attempt, including an older live-run generation.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+    /// Recheck even when this compiled checker already graded the retained attempt.
+    #[arg(long)]
+    rerun: bool,
 }
 
 fn main() -> Result<()> {
@@ -341,6 +360,94 @@ fn main() -> Result<()> {
             }
             ensure!(count > 0, "No tasks matched filters");
         }
+        Command::Recheck(args) => {
+            let workspace = args
+                .workspace
+                .as_ref()
+                .map(|p| safe_output(p, &home))
+                .transpose()?;
+            let candidates = if workspace.is_some() {
+                data::effective_rows(&rows)
+            } else {
+                data::current_rows(&rows)
+            };
+            let selected: Vec<Row> = candidates
+                .into_iter()
+                .filter(|row| {
+                    (args.filter.filter.fixture.is_empty()
+                        || args.filter.filter.fixture.contains(&row.fixture))
+                        && (args.filter.filter.kind.is_empty()
+                            || args.filter.filter.kind.contains(&row.kind))
+                        && (args.filter.filter.length.is_empty()
+                            || args.filter.filter.length.contains(&row.length))
+                        && (args.filter.task.is_empty() || args.filter.task.contains(&row.task))
+                        && (args.filter.level.is_empty() || args.filter.level.contains(&row.level))
+                        && (args.model.is_empty() || args.model.contains(&row.model))
+                        && (args.failure_class.is_empty()
+                            || row
+                                .failure_class
+                                .as_ref()
+                                .is_some_and(|class| args.failure_class.contains(class)))
+                        && workspace.as_ref().is_none_or(|path| {
+                            row.workspace.canonicalize().is_ok_and(|p| &p == path)
+                        })
+                })
+                .cloned()
+                .collect();
+            ensure!(
+                !selected.is_empty(),
+                "No retained attempts matched recheck filters"
+            );
+            let fingerprint = recheck::checker_fingerprint();
+            for previous in selected {
+                let invalid = data::attempt_invalid(&rows, &previous);
+                if !args.rerun
+                    && recheck::already_checked(&previous, &fingerprint)
+                    && (!invalid || previous.invalid)
+                {
+                    continue;
+                }
+                let origin = previous.origin();
+                let source = rows
+                    .iter()
+                    .find(|row| !row.rechecked && row.reference() == origin)
+                    .cloned()
+                    .context("Original model attempt row is missing")?;
+                let fixture = fixtures
+                    .iter()
+                    .find(|f| f.id == source.fixture)
+                    .context("Original fixture is missing from manifest")?;
+                let generation = rows
+                    .iter()
+                    .filter(|row| row.cell() == source.cell())
+                    .map(|row| row.generation)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                let row = recheck::evaluate(
+                    &root,
+                    manifest_dir,
+                    fixture,
+                    &source,
+                    &previous,
+                    generation,
+                    invalid,
+                )?;
+                eprintln!(
+                    "{} / {} / {}: offline {}{}",
+                    row.fixture,
+                    row.task,
+                    row.model,
+                    if row.pass { "PASS" } else { "FAIL" },
+                    if row.invalid {
+                        " (invalid; live rerun required)"
+                    } else {
+                        ""
+                    }
+                );
+                rows.push(row);
+            }
+        }
         Command::Report { .. } => unreachable!(),
     }
     Ok(())
@@ -432,10 +539,12 @@ fn run_trials(
     let key = ladder::cell(&fixture.id, &task.id, agent, selection);
     let generation = ladder::generation(rows, &key, rerun);
     for trial in 1..=trials {
-        if rows
-            .iter()
-            .any(|r| r.cell() == key && r.generation == generation && r.trial == trial)
-        {
+        if rows.iter().any(|r| {
+            !r.rechecked
+                && r.cell() == key
+                && r.source_generation() == generation
+                && r.trial == trial
+        }) {
             continue;
         }
         rows.push(execute::run(execute::RunSpec {

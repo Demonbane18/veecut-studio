@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use veecut_engine::{
     graphics::{CaptionPlacement, FaceFit, Graphics},
+    ops::{Op, apply, apply_all},
     project::{
         Asset, AssetKind, AssetRole, CaptionMode, Clip, Color, FaceSample, Item, ItemBody, Project,
         Rect, Text, TextPreset, TrackKind, VideoKind,
@@ -61,6 +62,7 @@ pub struct CheckResult {
     pub failure_class: Option<String>,
 }
 
+#[derive(Debug)]
 struct Fail {
     detail: String,
     evidence: Value,
@@ -1588,16 +1590,14 @@ fn explainer(sentences: usize, before: &[Project], after: &[Project]) -> Verdict
     with_baseline(b, a, |p| explainer_ok(sentences, p))
 }
 
-fn explainer_ok(sentences: usize, p: &Project) -> Verdict {
-    if sentences == 0 {
-        return Err(miss("no sentence ground truth"));
-    }
+/// Pictures on screen: still images (not logos) and B-roll video on visible main or overlay
+/// tracks, opaque enough to be seen.
+fn pictures(p: &Project) -> Vec<&Item> {
     let picture = |a: &Asset| {
         (a.kind == AssetKind::Image && a.role != AssetRole::Logo)
             || (a.kind == AssetKind::Video && a.role == AssetRole::Broll)
     };
-    let shown: Vec<&Item> = p
-        .tracks
+    p.tracks
         .iter()
         .filter(|t| !t.hidden && matches!(t.kind, TrackKind::Main | TrackKind::Overlay))
         .flat_map(|t| t.items.iter())
@@ -1605,7 +1605,14 @@ fn explainer_ok(sentences: usize, p: &Project) -> Verdict {
             i.clip()
                 .is_some_and(|c| c.opacity > 0.1 && p.asset(&c.asset).is_some_and(picture))
         })
-        .collect();
+        .collect()
+}
+
+fn explainer_ok(sentences: usize, p: &Project) -> Verdict {
+    if sentences == 0 {
+        return Err(miss("no sentence ground truth"));
+    }
+    let shown = pictures(p);
     let n = shown.len();
     need!(
         (n as f64 - sentences as f64).abs() <= 0.2 * sentences as f64 + 1e-9,
@@ -1821,7 +1828,6 @@ fn lyric(at: f64, text: &str, before: &[Project], after: &[Project]) -> Verdict 
         format!("other parts of the project changed: {}", list(&rest)),
         json!({"changed": rest})
     );
-    need!(!same(b, a), "the project is identical to the baseline");
     pass(
         format!("lyric changed at {first:.2} s with its timing kept"),
         json!({"at": first, "items": new_items}),
@@ -1834,6 +1840,53 @@ fn lyric(at: f64, text: &str, before: &[Project], after: &[Project]) -> Verdict 
 
 fn hit(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+}
+
+/// Where the frozen mouth zones of the retained close-ups land on the canvas, with their
+/// timeline seconds. Zones come from the frozen samples and the project's own crop, focus and
+/// zooms, never from `Project::faces`.
+fn mouth_zones(
+    p: &Project,
+    ids: &[String],
+    samples: &[FaceSample],
+) -> Result<Vec<(f64, Rect)>, Fail> {
+    let mut zones = vec![];
+    for s in samples
+        .iter()
+        .filter(|s| s.t.is_finite() && s.w > 0.0 && s.h > 0.0 && s.x.is_finite() && s.y.is_finite())
+    {
+        let found = p.main().items.iter().find_map(|item| {
+            let clip = item.clip()?;
+            (ids.contains(&clip.asset) && s.t >= clip.src_in && s.t < clip.src_out(item.duration))
+                .then_some((item, clip))
+        });
+        let Some((item, clip)) = found else { continue };
+        let Some(asset) = p
+            .asset(&clip.asset)
+            .filter(|a| a.kind == AssetKind::Video && a.width > 0 && a.height > 0)
+        else {
+            return Err(miss(
+                "the source asset has no picture size, so the mouth cannot be mapped to the canvas",
+            ));
+        };
+        let local = (s.t - clip.src_in) / clip.speed;
+        let face = Rect {
+            x: s.x,
+            y: s.y + s.h * MOUTH_TOP,
+            w: s.w,
+            h: s.h * (1.0 - MOUTH_TOP + CHIN_MARGIN),
+        };
+        let zone = canvas_rect(
+            clip,
+            (asset.width, asset.height),
+            (p.canvas.width, p.canvas.height),
+            local,
+            item.duration,
+            face,
+        );
+        zones.push((item.start + local, zone));
+    }
+    Ok(zones)
 }
 
 fn mouth(asset: &str, samples: &[FaceSample], before: &[Project], after: &[Project]) -> Verdict {
@@ -1911,42 +1964,7 @@ fn judge_mouth(
         placements.iter().all(|x| x.size >= MIN_CAPTION_SIZE),
         "captions were shrunk below a readable size"
     );
-    let mut zones = vec![];
-    for s in samples
-        .iter()
-        .filter(|s| s.t.is_finite() && s.w > 0.0 && s.h > 0.0 && s.x.is_finite() && s.y.is_finite())
-    {
-        let found = p.main().items.iter().find_map(|item| {
-            let clip = item.clip()?;
-            (ids.contains(&clip.asset) && s.t >= clip.src_in && s.t < clip.src_out(item.duration))
-                .then_some((item, clip))
-        });
-        let Some((item, clip)) = found else { continue };
-        let Some(asset) = p
-            .asset(&clip.asset)
-            .filter(|a| a.kind == AssetKind::Video && a.width > 0 && a.height > 0)
-        else {
-            return Err(miss(
-                "the source asset has no picture size, so the mouth cannot be mapped to the canvas",
-            ));
-        };
-        let local = (s.t - clip.src_in) / clip.speed;
-        let face = Rect {
-            x: s.x,
-            y: s.y + s.h * MOUTH_TOP,
-            w: s.w,
-            h: s.h * (1.0 - MOUTH_TOP + CHIN_MARGIN),
-        };
-        let zone = canvas_rect(
-            clip,
-            (asset.width, asset.height),
-            (p.canvas.width, p.canvas.height),
-            local,
-            item.duration,
-            face,
-        );
-        zones.push((item.start + local, zone));
-    }
+    let zones = mouth_zones(p, ids, samples)?;
     need!(
         !zones.is_empty(),
         "none of the frozen close-ups is still on the main timeline"
@@ -1976,6 +1994,262 @@ fn judge_mouth(
         format!("{verified} caption/close-up pairs checked, none covers the mouth"),
         json!({"verified": verified, "pages": placements.len()}),
     )
+}
+
+// ---------------------------------------------------------------------------------------------
+// Task setup: a start state that fails the check
+// ---------------------------------------------------------------------------------------------
+
+/// How far camera B's clips are moved to put it out of sync, in seconds (8 times `SYNC_TOL`).
+const DESYNC: f64 = 0.8;
+/// Where `prepare` cuts a vlog that already has the right length, in seconds.
+const VLOG_SHORT: f64 = 45.0;
+
+/// Puts copies of the frozen baseline projects into the state the agent starts from, so that a
+/// run which changes nothing cannot pass. Changes go through the Editor API ops, never around
+/// them. On `Ok` the untouched projects were checked with `check(task, projects, projects, ..)`
+/// and failed it for a task reason (for the mouth task: by really covering the frozen mouth).
+/// On `Err` the projects are left as they were and the run must not start: the fixture cannot
+/// give this task a valid failing start.
+///
+/// - Podcast: camera B's clips are moved 0.8 s out of sync.
+/// - Tutorial: sped-up clips are put back to normal speed over the same source.
+/// - Vlog: a vlog of 50 to 70 s loses its tail so that it is 45 s long.
+/// - Explainer: a picture count within 20% of the sentences gets extra pictures on an overlay.
+/// - Mouth: the face data is removed and the caption position and size are chosen so a caption
+///   box overlaps a frozen close-up mouth zone, proven with the real caption layout.
+/// - Every other task already starts from a state that fails (the requested change is missing).
+pub fn prepare(
+    task: &Task,
+    projects: &mut [Project],
+    transcripts: &[Transcript],
+) -> Result<(), String> {
+    if let Some(reason) = &task.prerequisite {
+        return Err(reason.clone());
+    }
+    let mut next = projects.to_vec();
+    setup(&task.check, &mut next)
+        .map_err(|e| format!("cannot build a failing start state: {e}"))?;
+    let start = check(task, &next, &next, transcripts, true);
+    if start.pass {
+        return Err(format!(
+            "the untouched start state already passes the check ({}); no challenge could be built",
+            start.detail
+        ));
+    }
+    if start.failure_class.is_some() {
+        return Err(format!(
+            "the check cannot grade this fixture: {}",
+            start.detail
+        ));
+    }
+    if matches!(task.check, Check::Mouth { .. }) && !start.detail.contains("cover the mouth") {
+        return Err(format!(
+            "the start state fails for another reason than covering the mouth: {}",
+            start.detail
+        ));
+    }
+    projects.clone_from_slice(&next);
+    Ok(())
+}
+
+/// Whether the projects as given, untouched, already satisfy the task. For auditing legacy runs
+/// that started from an unprepared baseline: it is `check(task, before, before, ..).pass`, with
+/// no change required (a `check`-class result, for example a missing prerequisite, is `false`).
+pub fn baseline_satisfied(task: &Task, before: &[Project], transcripts: &[Transcript]) -> bool {
+    check(task, before, before, transcripts, true).pass
+}
+
+fn first(ps: &mut [Project]) -> Result<&mut Project, String> {
+    ps.first_mut()
+        .ok_or_else(|| "there is no baseline project".to_owned())
+}
+
+fn setup(check: &Check, ps: &mut [Project]) -> Result<(), String> {
+    match check {
+        Check::Podcast { cam_b, .. } => desync(first(ps)?, cam_b),
+        Check::Tutorial { .. } => normal_speed(first(ps)?),
+        Check::Vlog { .. } => shorten(first(ps)?),
+        Check::Explainer { sentences } => crowd(first(ps)?, *sentences),
+        Check::Mouth { asset, samples } => {
+            let Some(file) = file_of(ps, asset) else {
+                return Err(format!("baseline asset {asset:?} is not in any project"));
+            };
+            cover_mouth(first(ps)?, &file, samples)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn run_ops(p: &mut Project, ops: &[Op]) -> Result<(), String> {
+    apply_all(p, ops).map(|_| ()).map_err(|e| format!("{e:#}"))
+}
+
+fn desync(p: &mut Project, cam_b: &str) -> Result<(), String> {
+    let ids = ids_for(p, cam_b);
+    let mut ops = vec![];
+    for item in &p.main().items {
+        let Some(c) = item.clip().filter(|c| ids.contains(&c.asset)) else {
+            continue;
+        };
+        let limit = p.asset(&c.asset).map_or(0.0, |a| a.duration);
+        let src_in = if limit <= 0.0 || c.src_out(item.duration) + DESYNC <= limit {
+            c.src_in + DESYNC
+        } else if c.src_in >= DESYNC {
+            c.src_in - DESYNC
+        } else {
+            continue;
+        };
+        ops.push(Op::Patch {
+            item: item.id.clone(),
+            patch: json!({"src_in": src_in}),
+        });
+    }
+    if ops.is_empty() {
+        return Err(format!(
+            "camera B ({cam_b}) has no movable clip on the main track"
+        ));
+    }
+    run_ops(p, &ops)
+}
+
+fn normal_speed(p: &mut Project) -> Result<(), String> {
+    let ops: Vec<Op> = p
+        .main()
+        .items
+        .iter()
+        .filter_map(|i| {
+            let c = i.clip()?;
+            ((c.speed - 1.0).abs() > 0.01).then(|| Op::Patch {
+                item: i.id.clone(),
+                patch: json!({"speed": 1.0, "duration": i.duration * c.speed}),
+            })
+        })
+        .collect();
+    if ops.is_empty() {
+        return Ok(());
+    }
+    run_ops(p, &ops)
+}
+
+fn shorten(p: &mut Project) -> Result<(), String> {
+    let len = main_end(p);
+    if !(50.0..=70.0).contains(&len) {
+        return Ok(());
+    }
+    run_ops(
+        p,
+        &[Op::CutRange {
+            from: VLOG_SHORT,
+            to: len,
+        }],
+    )
+}
+
+fn crowd(p: &mut Project, sentences: usize) -> Result<(), String> {
+    if sentences == 0 {
+        return Err("no sentence ground truth".into());
+    }
+    let n = pictures(p).len();
+    if (n as f64 - sentences as f64).abs() > 0.2 * sentences as f64 + 1e-9 {
+        return Ok(());
+    }
+    let extra = (((1.2 * sentences as f64).floor() as usize) + 2)
+        .saturating_sub(n)
+        .max(1);
+    let Some(asset) = p
+        .assets
+        .iter()
+        .find(|a| a.kind == AssetKind::Image && a.role != AssetRole::Logo)
+        .map(|a| a.id.clone())
+    else {
+        return Err("the project has no picture asset to add".into());
+    };
+    let existing = p
+        .tracks
+        .iter()
+        .find(|t| t.kind == TrackKind::Overlay && !t.hidden)
+        .map(|t| t.id.clone());
+    let track = match existing {
+        Some(id) => id,
+        None => {
+            let done = apply(
+                p,
+                &Op::AddTrack {
+                    kind: TrackKind::Overlay,
+                    name: None,
+                },
+            )
+            .map_err(|e| format!("{e:#}"))?;
+            done.items
+                .first()
+                .cloned()
+                .ok_or("no overlay track was added")?
+        }
+    };
+    let ops: Vec<Op> = (0..extra)
+        .map(|i| Op::AddClip {
+            asset: asset.clone(),
+            track: Some(track.clone()),
+            start: Some(i as f64 * 0.6),
+            index: None,
+            src_in: 0.0,
+            duration: Some(0.5),
+            frame: None,
+            volume: None,
+            duck: None,
+        })
+        .collect();
+    run_ops(p, &ops)
+}
+
+fn cover_mouth(p: &mut Project, file: &str, samples: &[FaceSample]) -> Result<(), String> {
+    let ids = ids_for(p, file);
+    let zones = mouth_zones(p, &ids, samples).map_err(|f| f.detail)?;
+    if zones.is_empty() {
+        return Err("none of the frozen close-ups is on the main timeline".into());
+    }
+    // Without face data the engine cannot dodge, so the caption stays where it is told to be.
+    let mut base = p.clone();
+    if !base.faces.is_empty() {
+        run_ops(
+            &mut base,
+            &[Op::Set {
+                path: "/faces".into(),
+                value: json!({}),
+            }],
+        )?;
+    }
+    let mut graphics = Graphics::new();
+    let step = (zones.len() / 24).max(1);
+    for &(t, zone) in zones.iter().step_by(step) {
+        let centre = f64::from(zone.y + zone.h / 2.0);
+        for size in [base.captions.size, 0.06, 0.08] {
+            let mut trial = base.clone();
+            run_ops(
+                &mut trial,
+                &[
+                    Op::Set {
+                        path: "/captions/position".into(),
+                        value: json!(centre),
+                    },
+                    Op::Set {
+                        path: "/captions/size".into(),
+                        value: json!(size),
+                    },
+                ],
+            )?;
+            let covered = graphics
+                .caption_placements(&trial)
+                .iter()
+                .any(|x| t >= x.start && t <= x.end && hit(x.bounds, zone));
+            if covered {
+                *p = trial;
+                return Ok(());
+            }
+        }
+    }
+    Err("no caption position and size put a caption box over a retained close-up mouth".into())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3990,5 +4264,303 @@ mod tests {
         assert!(!r.pass);
         assert_eq!(r.failure_class.as_deref(), Some("check"));
         assert!(r.detail.contains("panic"));
+    }
+
+    #[test]
+    fn baseline_satisfied_exposes_a_start_that_already_meets_the_task() {
+        // The original (unprepared) mouth baseline: the engine already keeps captions clear.
+        let safe = vec![talking(true)];
+        assert!(baseline_satisfied(&task(mouth_check()), &safe, &[]));
+        let covered = start_of(mouth_check(), safe, &[]);
+        assert!(!baseline_satisfied(&task(mouth_check()), &covered, &[]));
+        // Tasks that ask for a change are not met by their baseline.
+        assert!(!baseline_satisfied(&task(cut_check()), &[talk()], &[]));
+        // A prerequisite or missing truth is never "satisfied".
+        let mut t = task(mouth_check());
+        t.prerequisite = Some("none".into());
+        assert!(!baseline_satisfied(&t, &[talking(true)], &[]));
+    }
+
+    // ---- prepared start states: the untouched project must never pass ----
+
+    /// `prepare` must succeed and the untouched start must fail for a task reason.
+    fn start_of(check: Check, mut ps: Vec<Project>, tr: &[Transcript]) -> Vec<Project> {
+        let t = task(check);
+        prepare(&t, &mut ps, tr).expect("a failing start state");
+        let r = super::check(&t, &ps, &ps, tr, true);
+        assert!(!r.pass && r.failure_class.is_none(), "{}", r.detail);
+        ps
+    }
+
+    #[test]
+    fn requested_change_tasks_fail_untouched_and_pass_with_the_edit() {
+        let mut hooked = styled();
+        if let ItemBody::Text(t) = &mut hooked.item_mut("hook-1").unwrap().body {
+            t.text = "A closer look: x".into();
+        }
+        let mut sized = styled();
+        sized.captions.size = 0.06;
+        let mut green = styled();
+        green.captions.highlight = Color::parse("#00ff00").unwrap();
+        let no_hook = made(VideoKind::TalkingHeadShort, &["a.mp4"]);
+        let mut titled = no_hook.clone();
+        put(
+            &mut titled,
+            "text",
+            text_item("t1", 0.0, 3.0, "A closer look: x", TextPreset::Title),
+        );
+        let looped = [(0.0, 20.0), (20.0, 20.0), (40.0, 20.0)];
+        let cases = vec![
+            (Check::CaptionSize { size: 0.06 }, styled(), sized),
+            (
+                Check::Highlight {
+                    color: "#00FF00".into(),
+                },
+                styled(),
+                green,
+            ),
+            (
+                Check::Hook {
+                    item: Some("hook-1".into()),
+                    text: "A closer look: x".into(),
+                },
+                styled(),
+                hooked,
+            ),
+            (
+                Check::Hook {
+                    item: None,
+                    text: "A closer look: x".into(),
+                },
+                no_hook,
+                titled,
+            ),
+            (cut_check(), talk(), split(&[(0.0, 30.0), (34.0, 100.0)])),
+            (
+                Check::Start {
+                    asset: "src".into(),
+                    start: 20.0,
+                },
+                talk(),
+                split(&[(19.8, 100.0)]),
+            ),
+            (
+                broll_check(),
+                talk(),
+                with_broll(AssetRole::Broll, 30.4, 3.0),
+            ),
+            (
+                lt_check(),
+                talk(),
+                with_lower_third("Katelynn Greer\nResearch scientist", 1.0),
+            ),
+            (
+                Check::Music {
+                    file: "bed.mp3".into(),
+                },
+                music_base(),
+                with_music(0.2, false, &looped, AssetRole::Music),
+            ),
+            (
+                promo_check(),
+                promo_project("Old line", 2.0, "Second line"),
+                promo_project("Built for the next giant leap.", 2.0, "Second line"),
+            ),
+            (
+                lyric_check(),
+                lyric_project(&["Hold", "me", "tight"], 10.0, &["never", "let", "go"]),
+                lyric_project(
+                    &["Hold", "me", "tight", "[chorus]"],
+                    10.0,
+                    &["never", "let", "go"],
+                ),
+            ),
+        ];
+        for (check, base, good) in cases {
+            let name = format!("{check:?}");
+            let start = start_of(check.clone(), vec![base.clone()], &[]);
+            assert_eq!(
+                start,
+                vec![base],
+                "{name}: the start must stay the baseline"
+            );
+            let r = go(check, &start, &[good]);
+            assert!(r.pass, "{name}: {}", r.detail);
+        }
+    }
+
+    #[test]
+    fn run_starts_with_no_project_and_clips_with_no_new_clips() {
+        let good = made(VideoKind::Vlog, &["a.mp4", "b.mp4"]);
+        let start = start_of(run_check(VideoKind::Vlog), vec![], &[]);
+        assert!(start.is_empty());
+        ok(&go(run_check(VideoKind::Vlog), &start, &[good]));
+
+        let base = clip_project("base", 500.0, 10.0);
+        let tr = [transcript()];
+        let want = Check::Clips {
+            topic: vec!["space".into()],
+        };
+        let start = start_of(want.clone(), vec![base.clone()], &tr);
+        let three = [
+            base,
+            clip_project("c1", 0.0, 30.0),
+            clip_project("c2", 100.0, 30.0),
+            clip_project("c3", 200.0, 30.0),
+        ];
+        let r = super::check(&task(want), &start, &three, &tr, true);
+        assert!(r.pass, "{}", r.detail);
+    }
+
+    #[test]
+    fn podcast_starts_out_of_sync() {
+        let good = two_cam(-OFFSET, true);
+        let start = start_of(podcast_check(), vec![good.clone()], &[]);
+        assert_ne!(start[0], good);
+        fails(&go(podcast_check(), &start, &start), "out of sync");
+        ok(&go(podcast_check(), &start, &[good]));
+        // Without a speech track the continuity rule catches the same shift.
+        let quiet = two_cam(-OFFSET, false);
+        let start = start_of(podcast_check(), vec![quiet.clone()], &[]);
+        ok(&go(podcast_check(), &start, &[quiet]));
+
+        // Camera B never on the main track: no start state can be built, nothing is changed.
+        let mut one_cam = proj(VideoKind::Podcast);
+        video(&mut one_cam, "a", "cam-a.mp4");
+        video(&mut one_cam, "b", "cam-b.mp4");
+        main_clip(&mut one_cam, "m1", "a", 100.0, 30.0);
+        let mut ps = vec![one_cam.clone()];
+        assert!(prepare(&task(podcast_check()), &mut ps, &[]).is_err());
+        assert_eq!(ps, vec![one_cam]);
+    }
+
+    #[test]
+    fn tutorial_starts_with_the_silences_at_normal_speed() {
+        let edit = tutorial_edit(&[
+            (0.0, 10.0, 1.0),
+            (10.0, 14.0, 4.0),
+            (14.0, 40.0, 1.0),
+            (40.0, 46.0, 4.0),
+            (46.0, 100.0, 1.0),
+        ]);
+        let start = start_of(tutorial_check(), vec![edit.clone()], &[]);
+        assert!(
+            start[0]
+                .main()
+                .items
+                .iter()
+                .all(|i| i.clip().is_some_and(|c| (c.speed - 1.0).abs() < 1e-9))
+        );
+        let ids = vec!["src".to_string()];
+        assert!((total(&kept(&start[0], &ids)) - total(&kept(&edit, &ids))).abs() < 1e-6);
+        ok(&go(tutorial_check(), &start, &[edit]));
+        // A baseline with nothing sped up already fails and is left as it is.
+        let plain = start_of(tutorial_check(), vec![tutorial_base()], &[]);
+        assert_eq!(plain, vec![tutorial_base()]);
+    }
+
+    #[test]
+    fn vlog_starts_too_short_unless_it_already_fails() {
+        let good = vlog_project(10, 6.0);
+        let want = Check::Vlog { beats: beats() };
+        let start = start_of(want.clone(), vec![good.clone()], &[]);
+        assert!((main_end(&start[0]) - VLOG_SHORT).abs() < 1e-6);
+        ok(&go(want.clone(), &start, &[good]));
+        let short = vec![vlog_project(5, 8.0)];
+        assert_eq!(start_of(want, short.clone(), &[]), short);
+    }
+
+    #[test]
+    fn explainer_starts_with_too_many_pictures() {
+        let good = explainer_project(10, 3.0);
+        let want = Check::Explainer { sentences: 10 };
+        let start = start_of(want.clone(), vec![good.clone()], &[]);
+        assert!(pictures(&start[0]).len() > 12);
+        ok(&go(want.clone(), &start, &[good]));
+        let few = vec![explainer_project(5, 3.0)];
+        assert_eq!(start_of(want, few.clone(), &[]), few);
+        let mut ps = vec![explainer_project(10, 3.0)];
+        assert!(prepare(&task(Check::Explainer { sentences: 0 }), &mut ps, &[]).is_err());
+    }
+
+    #[test]
+    fn mouth_starts_really_covering_the_frozen_mouth() {
+        let safe = talking(true);
+        let start = start_of(mouth_check(), vec![safe.clone()], &[]);
+        let p = &start[0];
+        assert!(p.faces.is_empty(), "the engine must not be able to dodge");
+        assert_ne!(p.captions.position, safe.captions.position);
+        // Independent proof: real layout against the frozen face, not the project's faces.
+        let zones = mouth_zones(p, &["src".to_string()], &[face()]).unwrap();
+        let placements = Graphics::new().caption_placements(p);
+        assert!(placements.iter().any(|x| {
+            zones
+                .iter()
+                .any(|&(t, z)| t >= x.start && t <= x.end && hit(x.bounds, z))
+        }));
+        // Fixes: the engine's own protection, or moving the captions off the mouth.
+        ok(&go(mouth_check(), &start, &[safe.clone()]));
+        let mut moved = p.clone();
+        apply(
+            &mut moved,
+            &Op::Set {
+                path: "/captions/position".into(),
+                value: json!(0.2),
+            },
+        )
+        .unwrap();
+        apply(
+            &mut moved,
+            &Op::Set {
+                path: "/captions/size".into(),
+                value: json!(0.04),
+            },
+        )
+        .unwrap();
+        ok(&go(mouth_check(), &start, &[moved]));
+
+        // No usable close-up, unknown asset or captions off: no honest challenge exists.
+        for (check, project) in [
+            (
+                Check::Mouth {
+                    asset: "src".into(),
+                    samples: vec![],
+                },
+                talking(true),
+            ),
+            (
+                Check::Mouth {
+                    asset: "ghost".into(),
+                    samples: vec![face()],
+                },
+                talking(true),
+            ),
+            (mouth_check(), {
+                let mut off = talking(true);
+                off.captions.mode = CaptionMode::Off;
+                off
+            }),
+        ] {
+            let mut ps = vec![project.clone()];
+            assert!(prepare(&task(check), &mut ps, &[]).is_err());
+            assert_eq!(ps, vec![project]);
+        }
+    }
+
+    #[test]
+    fn prepare_refuses_tasks_it_cannot_grade() {
+        let mut ps = vec![talk()];
+        let ungradable = Check::Cut {
+            asset: String::new(),
+            start: 0.0,
+            end: 0.0,
+            max_removed: 0.0,
+        };
+        let e = prepare(&task(ungradable), &mut ps, &[]).unwrap_err();
+        assert!(e.contains("cannot grade"), "{e}");
+        let mut t = task(cut_check());
+        t.prerequisite = Some("No phrase".into());
+        assert_eq!(prepare(&t, &mut ps, &[]), Err("No phrase".to_owned()));
+        assert_eq!(ps, vec![talk()]);
     }
 }

@@ -102,6 +102,11 @@ tokens of a normal run, and requires a model that supports `xhigh`.
 Ctrl+C stops the agent and its inherited helpers. No project change is rolled back; saved
 edits remain undoable.
 
+When OpenCode reports an exhausted free allowance or an unavailable model, VeeCut stops
+the run and shows the provider problem. Free access can take a day or more to return.
+Errors that OpenCode writes only to its private log cannot trigger this early stop;
+the evaluation harness still enforces its deadline.
+
 ## The desktop editor
 
 `veecut studio` opens the editor on the workspace; `veecut studio -p PROJECT` opens one project. The welcome screen lists your projects and inbox videos. Under New edit, pick a name, a kind of video, a canvas and a source file, then choose "Auto-edit with the recipe" (runs the recipe and opens the result, without rendering) or "Create empty edit".
@@ -212,6 +217,17 @@ starts a new generation without overwriting prior evidence. `ladder` requires tw
 passes, with a third trial after a split, before recommending a rung. Paid models
 are refused unless the caller explicitly supplies `--allow-paid`. Custom agent
 commands are refused because they can override the requested model.
+
+After fixing a check, use `recheck --failure-class check` to judge retained run artifacts
+without calling a model. Rechecks append linked rows and preserve the original run's
+time, tokens and cost. Reports label these as offline rechecks, count each original
+attempt once, and do not treat a recheck as another reliability trial.
+
+Private task expectations, logs, answers and frozen check inputs live under
+`results/artifacts/<run-id>/`, outside the agent workspace. Tasks start from a state
+that fails their check, so doing nothing cannot pass. A run that accessed private
+check expectations is marked invalid and needs a fresh live trial; recheck cannot
+make that run valid.
 
 `report` prints per-kind, length and task summaries, the screening table and failure
 evidence. `report --out FILE` saves it. Pass `--root DIR` or `--manifest FILE` before

@@ -4729,6 +4729,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

@@ -2,7 +2,7 @@
 //! for people, JSON for agents, and a PNG when the command made a picture.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use veecut_engine::agent::{self, AgentKind};
 use veecut_engine::config::{self, Config};
-use veecut_engine::graphics::Graphics;
+use veecut_engine::graphics::{self, FaceFit, Graphics};
 use veecut_engine::ops::{self, Op};
 use veecut_engine::project::{
     AssetKind, AssetRole, Canvas, CaptionMode, ItemBody, PROJECT_FILE, Project, TrackKind,
@@ -164,6 +164,7 @@ pub struct FrameArgs {
     /// Width in pixels (default 540).
     #[arg(long)]
     pub width: Option<u32>,
+    /// Check PNG destination; default project .cache. inbox/ and outbox/ are protected.
     #[arg(long)]
     pub out: Option<PathBuf>,
     #[command(flatten)]
@@ -177,6 +178,7 @@ pub struct FramesArgs {
     /// Seconds between frames. Default: about 12 frames across the edit.
     #[arg(long)]
     pub every: Option<f64>,
+    /// Check PNG destination; default project .cache. inbox/ and outbox/ are protected.
     #[arg(long)]
     pub out: Option<PathBuf>,
     #[command(flatten)]
@@ -313,6 +315,36 @@ fn rel(ws: &Workspace, path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+/// Resolve existing symlinks before checking protected folders, including a new file's parents.
+fn frame_output_path(ws: &Workspace, path: &Path) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut out = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            _ => {
+                out.push(part);
+                match std::fs::symlink_metadata(&out) {
+                    Ok(_) => out = out.canonicalize()?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+    }
+    for protected in [ws.inbox(), ws.outbox()] {
+        if out.starts_with(protected.canonicalize()?) {
+            bail!(
+                "check frames cannot be saved in inbox/ or outbox/; omit --out to use the project's .cache"
+            );
+        }
+    }
+    Ok(out)
 }
 
 fn time(t: f64) -> String {
@@ -633,10 +665,61 @@ impl Ctx {
         for d in &done {
             let _ = writeln!(text, "- {}", d.summary);
         }
-        let _ = write!(text, "Saved. `veecut render` shows the change.");
+        let layout_changed = list.iter().any(|op| match op {
+            Op::Set { path, .. } => {
+                ["/captions", "/canvas", "/tracks", "/faces"]
+                    .iter()
+                    .any(|&prefix| {
+                        path == prefix
+                            || path
+                                .strip_prefix(prefix)
+                                .is_some_and(|s| s.starts_with('/'))
+                    })
+            }
+            Op::AddMarker { .. } | Op::AddTrack { .. } => false,
+            _ => true,
+        });
+        let layout = layout_changed.then(|| graphics::caption_report(&mut Graphics::new(), &p, 5));
+        if let Some(report) = &layout {
+            let _ = writeln!(
+                text,
+                "Captions requested at {:.3}: {} pages, {} safe-area clamps, {} moved/shrunk, {} hidden, {} unchecked, {} with detection gaps.",
+                report.requested,
+                report.pages,
+                report.clamped,
+                report.moved,
+                report.hidden,
+                report.unchecked,
+                report.gaps
+            );
+            for page in &report.examples {
+                let _ = writeln!(
+                    text,
+                    "  {} {:.2}-{:.2}s: {} box x={:.3} y={:.3} w={:.3} h={:.3}, size={:.3}, face={:?}.",
+                    page.item,
+                    page.start,
+                    page.end,
+                    if page.face == FaceFit::Hidden {
+                        "hidden; proposed"
+                    } else {
+                        "drawn"
+                    },
+                    page.bounds.x,
+                    page.bounds.y,
+                    page.bounds.w,
+                    page.bounds.h,
+                    page.size,
+                    page.face
+                );
+            }
+        }
+        let _ = write!(
+            text,
+            "Saved. Studio previews the change; `veecut frame` checks a still."
+        );
         Ok(Out::new(
             text,
-            json!({ "applied": done, "duration": p.duration() }),
+            json!({ "applied": done, "duration": p.duration(), "caption_layout": layout }),
         ))
     }
 
@@ -725,26 +808,51 @@ impl Ctx {
 
     pub fn frame(&self, args: FrameArgs) -> Result<Out> {
         let (dir, p) = self.project(&args.project)?;
+        let out = frame_output_path(
+            &self.ws,
+            &args
+                .out
+                .unwrap_or_else(|| dir.join(".cache").join(format!("frame-{:.2}.png", args.at))),
+        )?;
         let width = args.width.unwrap_or(540).clamp(64, 3840) & !1;
         let height =
             ((width as f64 * p.canvas.height as f64 / p.canvas.width as f64).round() as u32).max(2)
                 & !1;
         let pixmap = render::render_frame(&p, &dir, args.at, width, height)?;
         let png = pixmap.encode_png().context("encoding the frame")?;
-        let out = args
-            .out
-            .unwrap_or_else(|| dir.join(".cache").join(format!("frame-{:.2}.png", args.at)));
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&out, &png)?;
+        let placement = Graphics::new().caption_placement_at(&p, args.at);
+        let mut text = format!(
+            "Frame at {} saved to {}",
+            time(args.at),
+            rel(&self.ws, &out)
+        );
+        if let Some(page) = &placement {
+            let _ = write!(
+                text,
+                "\nCaption: requested y={:.3}, {} box x={:.3} y={:.3} w={:.3} h={:.3}, size={:.3}, safe-area clamp={}, face={:?}, detection gaps={}.",
+                page.requested,
+                if page.face == FaceFit::Hidden {
+                    "hidden; proposed"
+                } else {
+                    "drawn"
+                },
+                page.bounds.x,
+                page.bounds.y,
+                page.bounds.w,
+                page.bounds.h,
+                page.size,
+                page.clamped,
+                page.face,
+                page.face_gaps
+            );
+        }
         let mut o = Out::new(
-            format!(
-                "Frame at {} saved to {}",
-                time(args.at),
-                rel(&self.ws, &out)
-            ),
-            json!({ "path": rel(&self.ws, &out), "at": args.at }),
+            text,
+            json!({ "path": rel(&self.ws, &out), "at": args.at, "caption_placement": placement }),
         );
         o.png = Some(png);
         Ok(o)
@@ -752,6 +860,12 @@ impl Ctx {
 
     pub fn frames(&self, args: FramesArgs) -> Result<Out> {
         let (dir, p) = self.project(&args.project)?;
+        let out = frame_output_path(
+            &self.ws,
+            &args
+                .out
+                .unwrap_or_else(|| dir.join(".cache").join("frames.png")),
+        )?;
         let length = p.duration();
         if length <= 0.0 {
             bail!("the project is empty");
@@ -785,9 +899,6 @@ impl Ctx {
             );
             image::imageops::overlay(&mut sheet, &tile, x as i64, y as i64);
         }
-        let out = args
-            .out
-            .unwrap_or_else(|| dir.join(".cache").join("frames.png"));
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -1325,6 +1436,47 @@ pub fn skills(
                     .join("\n")
             );
             Ok(Out::new(text, json!({ "kind": kind, "entries": found })))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_frames_reject_protected_folders_and_symlink_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            root: temp.path().to_owned(),
+        };
+        for folder in ["inbox", "outbox", "projects/check/.cache"] {
+            std::fs::create_dir_all(ws.root.join(folder)).unwrap();
+        }
+        let cache = ws
+            .root
+            .join("projects/check/.cache")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(
+            frame_output_path(&ws, &cache.join("check.png")).unwrap(),
+            cache.join("check.png")
+        );
+        for path in [
+            "inbox/check.png",
+            "outbox/new/check.png",
+            "projects/../outbox/check.png",
+        ] {
+            assert!(frame_output_path(&ws, &ws.root.join(path)).is_err());
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(ws.outbox(), cache.join("alias")).unwrap();
+            assert!(frame_output_path(&ws, &cache.join("alias/new/check.png")).is_err());
+            let source = ws.inbox().join("source");
+            std::fs::write(&source, b"original").unwrap();
+            std::os::unix::fs::symlink(&source, cache.join("check.png")).unwrap();
+            assert!(frame_output_path(&ws, &cache.join("check.png")).is_err());
         }
     }
 }

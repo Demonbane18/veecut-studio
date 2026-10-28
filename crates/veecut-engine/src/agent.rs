@@ -45,6 +45,16 @@ pub enum AgentKind {
 /// Stands for the prompt in agent commands, including overrides in config.toml.
 const PROMPT: &str = "{prompt}";
 
+/// The one MCP server a Claude run may load: `veecut mcp`, as the workspace's opencode.json
+/// registers it for OpenCode.
+const VEECUT_MCP_JSON: &str = r#"{"mcpServers":{"veecut":{"command":"veecut","args":["mcp"]}}}"#;
+
+/// The same server for Codex, as a `-c` override: Codex runs with `--ignore-user-config`, so
+/// nothing else registers it. The tools are pre-approved like Claude's `mcp__veecut` rule,
+/// because an `exec` run has nobody to ask.
+const CODEX_VEECUT_MCP: &str =
+    r#"mcp_servers.veecut={command="veecut",args=["mcp"],default_tools_approval_mode="approve"}"#;
+
 /// OpenCode's free model, used when no model is chosen so a run never spends money by accident.
 pub const OPENCODE_DEFAULT_MODEL: &str = "opencode/glm-5.3-flash-free";
 
@@ -95,6 +105,12 @@ pub struct Usage {
     pub cost_usd: Option<f64>,
     /// Model turns (OpenCode steps, Codex turns, Claude `num_turns`) when reported.
     pub turns: Option<u64>,
+    /// Prompt size of the run's first model request: fresh plus cached input tokens, counted
+    /// once. It is the fixed context the agent loads before any work, not a total. `None` when
+    /// the agent does not report it (Gemini, custom commands, or a Codex session file that
+    /// cannot be read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_request_input_tokens: Option<u64>,
 }
 
 impl Usage {
@@ -197,7 +213,9 @@ impl AgentKind {
         match self {
             // The free model needs no account.
             AgentKind::OpenCode => {
-                add(&["opencode", "run", "--format", "json", "--model"]);
+                add(&["opencode", "run", "--format", "json"]);
+                add(self.lean_args());
+                add(&["--model"]);
                 add(&[model.as_deref().unwrap_or(OPENCODE_DEFAULT_MODEL)]);
                 if let Some(effort) = &effort {
                     add(&["--variant", effort]);
@@ -219,11 +237,12 @@ impl AgentKind {
                     "acceptEdits",
                     "--allowedTools",
                     if ultracode {
-                        "Bash(veecut),Bash(veecut *),Workflow"
+                        "Bash(veecut),Bash(veecut *),mcp__veecut,Workflow"
                     } else {
-                        "Bash(veecut),Bash(veecut *)"
+                        "Bash(veecut),Bash(veecut *),mcp__veecut"
                     },
                 ]);
+                add(self.lean_args());
                 if let Some(model) = &model {
                     add(&["--model", model]);
                 }
@@ -243,6 +262,7 @@ impl AgentKind {
                     "workspace-write",
                     "--skip-git-repo-check",
                 ]);
+                add(self.lean_args());
                 if let Some(model) = &model {
                     add(&["-m", model]);
                 }
@@ -265,6 +285,7 @@ impl AgentKind {
                     "--allowed-tools",
                     "run_shell_command(veecut)",
                 ]);
+                add(self.lean_args());
                 if let Some(model) = &model {
                     add(&["-m", model]);
                 }
@@ -272,6 +293,87 @@ impl AgentKind {
             }
         }
         argv
+    }
+
+    /// Per-run flags that keep a default command to VeeCut's own context instead of loading
+    /// the owner's global skills, plugins and MCP servers into every request. Each is a
+    /// documented CLI option; none writes settings, and sign-in is never touched (Claude's
+    /// `--bare` would refuse the OAuth login, so it is not used).
+    ///
+    /// - OpenCode: `--pure` skips external plugins; `--print-logs --log-level ERROR` sends
+    ///   provider errors (such as a used-up free allowance) to stderr, where
+    ///   [`opencode_failure`] reads them. Skills come from [`AgentKind::lean_env`].
+    /// - Claude: user settings (plugins, hooks, user skills and CLAUDE.md) are skipped; with
+    ///   `--strict-mcp-config` only the `veecut mcp` server in [`VEECUT_MCP_JSON`] loads, and
+    ///   its tools are allowed in the command's `--allowedTools`.
+    ///   ponytail: user-level `apiKeyHelper` or provider `env` settings are skipped too; OAuth
+    ///   and `ANTHROPIC_API_KEY` still work. Add `user` back to the sources if that bites.
+    /// - Codex: `--ignore-user-config` skips `config.toml` (its MCP servers, plugins and hooks;
+    ///   the login in `auth.json` stays), so `veecut mcp` is registered again with an `-c`
+    ///   override and its tools are pre-approved, as Claude's are. `skills.include_instructions`
+    ///   drops the catalog of every installed skill; the workspace AGENTS.md names the veecut
+    ///   skill by path.
+    ///   ponytail: model, network and service-tier defaults from `config.toml` do not apply;
+    ///   `~/.codex/AGENTS.md` still loads.
+    /// - Gemini: no extensions, and only a server named `veecut` may start. Needs no sign-in.
+    ///   ponytail: Gemini has no flag for its own skills or hooks.
+    fn lean_args(self) -> &'static [&'static str] {
+        match self {
+            AgentKind::OpenCode => &["--pure", "--print-logs", "--log-level", "ERROR"],
+            AgentKind::Claude => &[
+                "--setting-sources",
+                "project,local",
+                "--strict-mcp-config",
+                "--mcp-config",
+                VEECUT_MCP_JSON,
+            ],
+            AgentKind::Codex => &[
+                "--ignore-user-config",
+                "-c",
+                "skills.include_instructions=false",
+                "-c",
+                CODEX_VEECUT_MCP,
+            ],
+            AgentKind::Gemini => &["-e", "none", "--allowed-mcp-server-names", "veecut"],
+        }
+    }
+
+    /// Environment that goes with [`AgentKind::lean_args`] for a run in `root`.
+    ///
+    /// OpenCode reads skills from `~/.agents/skills` and `~/.claude/skills` (472 on the
+    /// owner's machine) plus `.agents/skills` and `.claude/skills` in the project.
+    /// `OPENCODE_DISABLE_EXTERNAL_SKILLS` turns all of those off, project folders included,
+    /// so the workspace's own `.agents/skills` is added back through the inline config's
+    /// `skills.paths`; `OPENCODE_DISABLE_CLAUDE_CODE` also drops `~/.claude/CLAUDE.md`.
+    /// OpenCode's global config folder (`$XDG_CONFIG_HOME/opencode`: plugins, MCP servers,
+    /// providers, AGENTS.md) is pointed at the workspace's own `.veecut/agent-config`, which
+    /// OpenCode creates empty; its data folder, where the sign-in lives, is untouched, and the
+    /// workspace's `opencode.json` still registers the veecut MCP server.
+    /// ponytail: custom providers defined only in the person's global config are not seen.
+    ///
+    /// Claude's auto-memory is switched off so no per-user memory enters the prompt.
+    fn lean_env(self, root: &Path) -> Vec<(&'static str, String)> {
+        match self {
+            AgentKind::OpenCode => vec![
+                ("OPENCODE_DISABLE_CLAUDE_CODE", "1".into()),
+                ("OPENCODE_DISABLE_EXTERNAL_SKILLS", "1".into()),
+                (
+                    "XDG_CONFIG_HOME",
+                    root.join(".veecut/agent-config")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                (
+                    "OPENCODE_CONFIG_CONTENT",
+                    serde_json::json!({
+                        "skills": { "paths": [root.join(".agents/skills").to_string_lossy()] }
+                    })
+                    .to_string(),
+                ),
+            ],
+            AgentKind::Claude => vec![("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1".into())],
+            AgentKind::Codex | AgentKind::Gemini => Vec::new(),
+        }
     }
 }
 
@@ -459,7 +561,7 @@ pub fn efforts(kind: AgentKind, model: Option<&str>) -> Vec<EffortChoice> {
 pub fn studio_prompt(project: &Path, note: &str) -> String {
     format!(
         "This note comes from VeeCut Studio. The editor is open on this project and previews every change as soon as you apply it.\n\
-         Apply the note with veecut ops. To check the result you may run veecut frame, which saves a PNG in the project's .cache folder.\n\
+         Apply the note with veecut commands. To remove spoken words, run veecut cut-phrase \"exact words\" (add --occurrence N when the words repeat; veecut transcript-search \"exact words\" lists the matches; the MCP tools are cut_phrase and transcript_search). Use veecut ops for every other edit. To check the result you may run veecut frame, which saves a PNG in the project's .cache folder.\n\
          Do not run veecut render and do not open any file unless the note asks for a video.\n\
          Answer in one or two lines, then stop.\n\
          Project: {}\n{note}",
@@ -704,7 +806,13 @@ fn check_command(
         stderr: String::new(),
     };
     let mut too_large = false;
-    let result = launch(program, args, root, &stop, &mut |stream, line| {
+    let spawn = Spawn {
+        program,
+        args,
+        root,
+        env: &[],
+    };
+    let result = launch(&spawn, &stop, &mut |stream, line| {
         if output.stdout.len() + output.stderr.len() + line.len() + 1 > max_output {
             too_large = true;
             stop.stop();
@@ -773,6 +881,8 @@ struct Decoder {
     claude_messages: HashMap<String, Usage>,
     /// Claude: the `result` event has set the final totals.
     claude_done: bool,
+    /// Codex: the thread id from `thread.started`.
+    codex_thread: Option<String>,
 }
 
 fn count(value: &serde_json::Value) -> u64 {
@@ -797,6 +907,7 @@ impl Decoder {
             usage: Usage::default(),
             claude_messages: HashMap::new(),
             claude_done: false,
+            codex_thread: None,
         }
     }
 
@@ -861,6 +972,17 @@ impl Decoder {
                     *usage.cost_usd.get_or_insert(0.0) += cost;
                 }
                 *usage.turns.get_or_insert(0) += 1;
+                let prompt = count(&tokens["input"])
+                    + count(&tokens["cache"]["read"])
+                    + count(&tokens["cache"]["write"]);
+                if usage.first_request_input_tokens.is_none() && prompt > 0 {
+                    usage.first_request_input_tokens = Some(prompt);
+                }
+            }
+            (OutputFormat::Codex, "thread.started") => {
+                // The native session file for this thread holds the first request's size.
+                self.codex_thread = json["thread_id"].as_str().map(str::to_owned);
+                return false;
             }
             (OutputFormat::Codex, "turn.completed") => {
                 // Codex counts cached tokens inside input_tokens.
@@ -884,6 +1006,14 @@ impl Decoder {
                 usage.input_tokens = self.claude_messages.values().map(|u| u.input_tokens).sum();
                 usage.output_tokens = self.claude_messages.values().map(|u| u.output_tokens).sum();
                 usage.cached_tokens = self.claude_messages.values().map(|u| u.cached_tokens).sum();
+                let first = claude_usage(&message["usage"]);
+                if usage.first_request_input_tokens.is_none()
+                    && json["parent_tool_use_id"].is_null()
+                    && first.input_tokens + first.cached_tokens > 0
+                {
+                    usage.first_request_input_tokens =
+                        Some(first.input_tokens + first.cached_tokens);
+                }
             }
             (OutputFormat::Claude, "result") => {
                 // modelUsage covers subagents too (ultracode); usage is the main thread.
@@ -989,10 +1119,14 @@ fn build_command(
 /// as the reply without assuming a JSON format. [`Output::Usage`] reports tokens and cost as the
 /// agent gives them. Blocks until exit or Stop; call from a worker thread in a UI.
 ///
+/// The default commands load only VeeCut's context (see [`AgentKind::lean_args`]): the global
+/// skills, plugins and MCP servers of the person's agent setup stay out of every request, and
+/// their sign-in is untouched. A custom command gets none of that and runs as written.
+///
 /// The default OpenCode command also stops at once with an error when OpenCode says its free
-/// allowance is used up or the model is unavailable. Only messages OpenCode prints on stdout or
-/// stderr are caught; a provider error it keeps in its own log leaves the run going, so a run
-/// that ends without edits or an answer can still be a refused model.
+/// allowance is used up or the model is unavailable. It runs with `--print-logs --log-level
+/// ERROR`, so provider errors reach stderr, where they are caught; a run that ends without
+/// edits or an answer can still be a refused model.
 pub fn run(
     ws: &Workspace,
     kind: AgentKind,
@@ -1021,10 +1155,18 @@ pub fn run(
             .filter(|model| !model.is_empty())
             .unwrap_or(OPENCODE_DEFAULT_MODEL)
     });
+    let env = if custom.is_none() {
+        kind.lean_env(&ws.root)
+    } else {
+        Vec::new()
+    };
     drive(
-        &program,
-        &argv[1..],
-        &ws.root,
+        &Spawn {
+            program: &program,
+            args: &argv[1..],
+            root: &ws.root,
+            env: &env,
+        },
         stop,
         format,
         opencode_model,
@@ -1035,9 +1177,7 @@ pub fn run(
 /// Launches the agent and decodes its output. With `opencode_model` set, a failure OpenCode
 /// reports stops the run and becomes the error, after the output and usage seen so far.
 fn drive(
-    program: &Path,
-    args: &[String],
-    root: &Path,
+    spawn: &Spawn,
     stop: &Stop,
     format: OutputFormat,
     opencode_model: Option<&str>,
@@ -1045,7 +1185,8 @@ fn drive(
 ) -> Result<Outcome> {
     let mut decoder = Decoder::new(format);
     let mut failure: Option<String> = None;
-    let outcome = launch(program, args, root, stop, &mut |stream, line| {
+    let started = chrono::Local::now().date_naive();
+    let outcome = launch(spawn, stop, &mut |stream, line| {
         let found = match opencode_model {
             Some(model) if failure.is_none() => opencode_failure(stream, &line, model),
             _ => None,
@@ -1056,10 +1197,63 @@ fn drive(
             stop.stop();
         }
     });
+    // Codex's JSON stream sums the turn's requests; the first request's size is only in the
+    // session file Codex keeps for the thread.
+    if let Some(thread) = &decoder.codex_thread
+        && let Some(dir) = codex_sessions_dir()
+        && let Some(first) =
+            codex_first_request(&dir, thread, [started, chrono::Local::now().date_naive()])
+    {
+        decoder.usage.first_request_input_tokens = Some(first);
+        on_output(Output::Usage(decoder.usage.clone()));
+    }
     match failure {
         Some(message) => Err(anyhow!(message)),
         None => outcome,
     }
+}
+
+/// `$CODEX_HOME/sessions` (`~/.codex/sessions` unless `CODEX_HOME` is set), where Codex writes
+/// one `rollout-<time>-<thread id>.jsonl` per thread under `YYYY/MM/DD`.
+fn codex_sessions_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))?;
+    Some(home.join("sessions"))
+}
+
+/// The prompt size of the first model request in the Codex session file for `thread`: the
+/// first `token_count` event's `last_token_usage.input_tokens`, which already includes the
+/// cached tokens. Only that number is read from the file. `days` are the local dates the run
+/// may have been filed under (start and end, in case it crossed midnight).
+fn codex_first_request(sessions: &Path, thread: &str, days: [chrono::NaiveDate; 2]) -> Option<u64> {
+    use chrono::Datelike;
+    let suffix = format!("-{thread}.jsonl");
+    let file = days.iter().enumerate().find_map(|(i, day)| {
+        if i == 1 && days[0] == days[1] {
+            return None;
+        }
+        let dir = sessions
+            .join(format!("{:04}", day.year()))
+            .join(format!("{:02}", day.month()))
+            .join(format!("{:02}", day.day()));
+        std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            (name.starts_with("rollout-") && name.ends_with(&suffix)).then(|| entry.path())
+        })
+    })?;
+    BufReader::new(std::fs::File::open(file).ok()?)
+        .lines()
+        .map_while(Result::ok)
+        // The file also holds the conversation; skip every line that is not a token count
+        // before parsing it.
+        .filter(|line| line.contains("\"token_count\""))
+        .find_map(|line| {
+            let json: serde_json::Value = serde_json::from_str(&line).ok()?;
+            (json["payload"]["type"] == "token_count")
+                .then(|| json["payload"]["info"]["last_token_usage"]["input_tokens"].as_u64())?
+        })
 }
 
 /// The error for a line in which OpenCode reports that the free allowance is used up or the
@@ -1098,13 +1292,22 @@ enum Msg {
 /// How long output that is still in the pipes may take to arrive after the agent is gone.
 const DRAIN: Duration = Duration::from_secs(2);
 
-fn launch(
-    program: &Path,
-    args: &[String],
-    root: &Path,
-    stop: &Stop,
-    on_line: &mut dyn FnMut(Stream, String),
-) -> Result<Outcome> {
+/// The process one run starts: `program args` in `root`, plus `env` on top of the inherited
+/// environment.
+struct Spawn<'a> {
+    program: &'a Path,
+    args: &'a [String],
+    root: &'a Path,
+    env: &'a [(&'static str, String)],
+}
+
+fn launch(spawn: &Spawn, stop: &Stop, on_line: &mut dyn FnMut(Stream, String)) -> Result<Outcome> {
+    let Spawn {
+        program,
+        args,
+        root,
+        env,
+    } = *spawn;
     let mut command = Command::new(program);
     command
         .args(args)
@@ -1113,6 +1316,7 @@ fn launch(
         // from wherever the editor or CLI was started.
         .env("PWD", root)
         .env("PATH", search_path())
+        .envs(env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1364,12 +1568,25 @@ fn wait_for_exit(child: &mut Child) {
 /// PATH plus the folder of the running veecut and the usual install folders, so agents and the
 /// tools they need are found even when a desktop app starts with a minimal PATH.
 fn search_dirs() -> Vec<PathBuf> {
+    search_dirs_for(std::env::current_exe().ok().as_deref())
+}
+
+/// The folder next to `exe` when `exe` is a VeeCut product executable (the CLI or Studio),
+/// which ships its helpers beside it. Any other executable that links the engine, such as the
+/// evaluation harness or a test binary, has no bundled helpers; its folder (`target/debug`)
+/// can hold a stale `veecut` that must not shadow the installed one.
+fn bundled_dir(exe: &Path) -> Option<&Path> {
+    let product = matches!(
+        exe.file_stem().and_then(|name| name.to_str()),
+        Some("veecut" | "veecut-studio")
+    );
+    product.then(|| exe.parent()).flatten()
+}
+
+fn search_dirs_for(exe: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf))
-    {
-        out.push(dir);
+    if let Some(dir) = exe.and_then(bundled_dir) {
+        out.push(dir.to_path_buf());
     }
     if let Some(path) = std::env::var_os("PATH") {
         out.extend(std::env::split_paths(&path));
@@ -1413,6 +1630,27 @@ pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_product_executable_puts_its_folder_ahead_of_the_installed_tools() {
+        let build = Path::new("/nowhere/target/debug");
+        for product in ["veecut", "veecut-studio", "veecut.exe", "veecut-studio.exe"] {
+            let dirs = search_dirs_for(Some(&build.join(product)));
+            assert_eq!(dirs.first().map(PathBuf::as_path), Some(build), "{product}");
+        }
+        // The harness and test binaries sit beside whatever `cargo build` left there, which can
+        // be an older `veecut` than the installed one, so their folder is not searched.
+        for helper in ["veecut-eval", "veecut-eval.exe", "veecut_engine-3f9a1c2b7d"] {
+            let dirs = search_dirs_for(Some(&build.join(helper)));
+            assert!(!dirs.iter().any(|dir| dir == build), "{helper}: {dirs:?}");
+        }
+        assert!(!search_dirs_for(None).iter().any(|dir| dir == build));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -1429,9 +1667,13 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let args = ["-c".to_string(), script];
-            let result = launch(Path::new("/bin/sh"), &args, &root, &stop, &mut |_, line| {
-                on_line(&line)
-            });
+            let spawn = Spawn {
+                program: Path::new("/bin/sh"),
+                args: &args,
+                root: &root,
+                env: &[],
+            };
+            let result = launch(&spawn, &stop, &mut |_, line| on_line(&line));
             let _ = tx.send(result);
         });
         rx.recv_timeout(Duration::from_secs(20))
@@ -1533,17 +1775,66 @@ mod tests {
         assert_gone(pid.load(Ordering::SeqCst));
     }
 
+    fn drive_sh(
+        root: &Path,
+        script: &str,
+        format: OutputFormat,
+        opencode_model: Option<&str>,
+        on_output: &mut dyn FnMut(Output),
+    ) -> Result<Outcome> {
+        let args = ["-c".to_string(), script.to_string()];
+        let spawn = Spawn {
+            program: Path::new("/bin/sh"),
+            args: &args,
+            root,
+            env: &[],
+        };
+        drive(&spawn, &Stop::default(), format, opencode_model, on_output)
+    }
+
+    #[test]
+    fn the_run_environment_reaches_the_agent_and_stderr_error_logs_stop_opencode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = ["-c".to_string(), r#"echo "$LEAN_PROBE""#.to_string()];
+        let env = [("LEAN_PROBE", "on".to_string())];
+        let spawn = Spawn {
+            program: Path::new("/bin/sh"),
+            args: &args,
+            root: tmp.path(),
+            env: &env,
+        };
+        let mut seen = Vec::new();
+        drive(
+            &spawn,
+            &Stop::default(),
+            OutputFormat::Plain,
+            None,
+            &mut |output| seen.push(output),
+        )
+        .unwrap();
+        assert_eq!(seen, [Output::Answer("on".into())]);
+
+        // `--print-logs --log-level ERROR` puts OpenCode's private error log on stderr.
+        let error = drive_sh(
+            tmp.path(),
+            r#"echo 'ERROR 2026-10-29T01:00:00 +12ms service=llm providerID=opencode error=FreeUsageLimitError: Free usage limit reached' >&2; sleep 300"#,
+            OutputFormat::OpenCode,
+            Some(OPENCODE_DEFAULT_MODEL),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("free allowance is used up"));
+    }
+
     #[test]
     fn opencode_free_limit_stops_the_run_and_keeps_earlier_usage() {
         let tmp = tempfile::tempdir().unwrap();
         let script = r#"echo '{"type":"step_finish","part":{"cost":0,"tokens":{"input":5,"output":2,"reasoning":0,"cache":{"read":0,"write":0}}}}'; echo 'Error: FreeUsageLimitError' >&2; sleep 300"#;
         let mut seen = Vec::new();
         let started = Instant::now();
-        let error = drive(
-            Path::new("/bin/sh"),
-            &["-c".into(), script.into()],
+        let error = drive_sh(
             tmp.path(),
-            &Stop::default(),
+            script,
             OutputFormat::OpenCode,
             Some(OPENCODE_DEFAULT_MODEL),
             &mut |output| seen.push(output),
@@ -1564,11 +1855,9 @@ mod tests {
         assert!(seen.contains(&Output::Log("Error: FreeUsageLimitError".into())));
 
         // The same text from a custom command (no OpenCode watch) is only output.
-        let outcome = drive(
-            Path::new("/bin/sh"),
-            &["-c".into(), "echo 'Free usage limit reached'".into()],
+        let outcome = drive_sh(
             tmp.path(),
-            &Stop::default(),
+            "echo 'Free usage limit reached'",
             OutputFormat::Plain,
             None,
             &mut |_| {},
@@ -1580,15 +1869,9 @@ mod tests {
     #[test]
     fn opencode_unavailable_model_stops_the_run_with_its_name() {
         let tmp = tempfile::tempdir().unwrap();
-        let error = drive(
-            Path::new("/bin/sh"),
-            &[
-                "-c".into(),
-                r#"echo '{"type":"error","error":{"data":{"message":"Model is unavailable"}}}'; sleep 300"#
-                    .into(),
-            ],
+        let error = drive_sh(
             tmp.path(),
-            &Stop::default(),
+            r#"echo '{"type":"error","error":{"data":{"message":"Model is unavailable"}}}'; sleep 300"#,
             OutputFormat::OpenCode,
             Some("opencode/big-pickle"),
             &mut |_| {},
@@ -1700,6 +1983,8 @@ mod output_tests {
                 cached_tokens: 1000,
                 cost_usd: None,
                 turns: Some(1),
+                // Codex's stream sums the turn; the first request is read from its session file.
+                first_request_input_tokens: None,
             }
         );
         assert_eq!(usage.total_tokens(), 1220);
@@ -1751,6 +2036,8 @@ mod output_tests {
                 cached_tokens: 125,
                 cost_usd: Some(0.25),
                 turns: Some(2),
+                // The first step only: 100 fresh + 50 read + 0 written.
+                first_request_input_tokens: Some(150),
             }
         );
     }
@@ -1774,6 +2061,7 @@ mod output_tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 cached_tokens: 50,
+                first_request_input_tokens: Some(60),
                 ..Usage::default()
             })
         );
@@ -1794,6 +2082,8 @@ mod output_tests {
                 cached_tokens: 100,
                 cost_usd: Some(0.2),
                 turns: Some(2),
+                // The first message: 10 fresh + 20 written + 30 read.
+                first_request_input_tokens: Some(60),
             }
         );
     }
@@ -1866,6 +2156,10 @@ mod output_tests {
                 "run",
                 "--format",
                 "json",
+                "--pure",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
                 "--model",
                 "opencode/glm-5.3-flash-free",
                 "go"
@@ -1878,6 +2172,10 @@ mod output_tests {
                 "run",
                 "--format",
                 "json",
+                "--pure",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
                 "--model",
                 "opencode/beam-free",
                 "--variant",
@@ -1900,7 +2198,12 @@ mod output_tests {
                 "--permission-mode",
                 "acceptEdits",
                 "--allowedTools",
-                "Bash(veecut),Bash(veecut *)",
+                "Bash(veecut),Bash(veecut *),mcp__veecut",
+                "--setting-sources",
+                "project,local",
+                "--strict-mcp-config",
+                "--mcp-config",
+                VEECUT_MCP_JSON,
                 "--",
                 "go"
             ]
@@ -1916,7 +2219,12 @@ mod output_tests {
                 "--permission-mode",
                 "acceptEdits",
                 "--allowedTools",
-                "Bash(veecut),Bash(veecut *)",
+                "Bash(veecut),Bash(veecut *),mcp__veecut",
+                "--setting-sources",
+                "project,local",
+                "--strict-mcp-config",
+                "--mcp-config",
+                VEECUT_MCP_JSON,
                 "--model",
                 "sonnet",
                 "--effort",
@@ -1940,7 +2248,12 @@ mod output_tests {
                 "--permission-mode",
                 "acceptEdits",
                 "--allowedTools",
-                "Bash(veecut),Bash(veecut *),Workflow",
+                "Bash(veecut),Bash(veecut *),mcp__veecut,Workflow",
+                "--setting-sources",
+                "project,local",
+                "--strict-mcp-config",
+                "--mcp-config",
+                VEECUT_MCP_JSON,
                 "--model",
                 "opus",
                 "--effort",
@@ -1969,6 +2282,11 @@ mod output_tests {
                 "--sandbox",
                 "workspace-write",
                 "--skip-git-repo-check",
+                "--ignore-user-config",
+                "-c",
+                "skills.include_instructions=false",
+                "-c",
+                CODEX_VEECUT_MCP,
                 "--",
                 "go"
             ]
@@ -1982,6 +2300,11 @@ mod output_tests {
                 "--sandbox",
                 "workspace-write",
                 "--skip-git-repo-check",
+                "--ignore-user-config",
+                "-c",
+                "skills.include_instructions=false",
+                "-c",
+                CODEX_VEECUT_MCP,
                 "-m",
                 "gpt-5.6-terra",
                 "-c",
@@ -1994,18 +2317,20 @@ mod output_tests {
 
     #[test]
     fn gemini_command_takes_a_model_and_ignores_effort() {
-        let expected = [
+        let base = [
             "gemini",
             "--skip-trust",
             "--approval-mode",
             "auto_edit",
             "--allowed-tools",
             "run_shell_command(veecut)",
-            "-m",
-            "gemini-2.5-pro",
-            "-p",
-            "go",
+            "-e",
+            "none",
+            "--allowed-mcp-server-names",
+            "veecut",
         ];
+        let with = |tail: &[&'static str]| [&base[..], tail].concat();
+        let expected = with(&["-m", "gemini-2.5-pro", "-p", "go"]);
         assert_eq!(
             argv(AgentKind::Gemini, Some("gemini-2.5-pro"), None),
             expected
@@ -2016,16 +2341,7 @@ mod output_tests {
         );
         assert_eq!(
             argv(AgentKind::Gemini, Some("  "), Some("")),
-            [
-                "gemini",
-                "--skip-trust",
-                "--approval-mode",
-                "auto_edit",
-                "--allowed-tools",
-                "run_shell_command(veecut)",
-                "-p",
-                "go"
-            ]
+            with(&["-p", "go"])
         );
     }
 
@@ -2048,6 +2364,237 @@ mod output_tests {
             build_command(AgentKind::Claude, None, &selection, "go").1,
             OutputFormat::Claude
         );
+    }
+
+    #[test]
+    fn studio_prompt_sends_spoken_phrase_cuts_to_the_phrase_tools() {
+        let prompt = studio_prompt(
+            Path::new("/work/projects/talk"),
+            "cut the part about pricing",
+        );
+        for needle in [
+            "veecut cut-phrase \"exact words\"",
+            "--occurrence N",
+            "veecut transcript-search",
+            "cut_phrase and transcript_search",
+            "Use veecut ops for every other edit",
+            "Do not run veecut render",
+            "Project: /work/projects/talk\ncut the part about pricing",
+        ] {
+            assert!(prompt.contains(needle), "missing {needle:?} in {prompt}");
+        }
+        // The old blanket instruction sent phrase cuts through manual ops.
+        assert!(!prompt.contains("Apply the note with veecut ops"));
+    }
+
+    #[test]
+    fn default_commands_load_only_veecut_context_and_keep_the_login() {
+        let flags = |kind: AgentKind| argv(kind, None, None).join(" ");
+        assert!(flags(AgentKind::OpenCode).contains("--pure --print-logs --log-level ERROR"));
+        assert!(
+            flags(AgentKind::Claude)
+                .contains("--setting-sources project,local --strict-mcp-config")
+        );
+        assert!(
+            flags(AgentKind::Codex)
+                .contains("--ignore-user-config -c skills.include_instructions=false")
+        );
+        assert!(flags(AgentKind::Gemini).contains("-e none --allowed-mcp-server-names veecut"));
+        for kind in AgentKind::ALL {
+            // --bare would refuse Claude's OAuth login; nothing may copy or replace credentials.
+            let command = flags(kind);
+            assert!(!command.contains("--bare"), "{command}");
+            assert!(!command.contains("CODEX_HOME"), "{command}");
+        }
+
+        let root = Path::new("/work/space");
+        let env = |kind: AgentKind| kind.lean_env(root);
+        let opencode = env(AgentKind::OpenCode);
+        assert!(opencode.contains(&("OPENCODE_DISABLE_CLAUDE_CODE", "1".to_string())));
+        assert!(opencode.contains(&("OPENCODE_DISABLE_EXTERNAL_SKILLS", "1".to_string())));
+        let (_, config) = opencode
+            .iter()
+            .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")
+            .expect("inline config");
+        let config: serde_json::Value = serde_json::from_str(config).unwrap();
+        let skills = Path::new("/work/space").join(".agents/skills");
+        assert_eq!(
+            config,
+            serde_json::json!({ "skills": { "paths": [skills.to_string_lossy()] } })
+        );
+        assert_eq!(
+            env(AgentKind::Claude),
+            [("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1".to_string())]
+        );
+        assert!(env(AgentKind::Codex).is_empty() && env(AgentKind::Gemini).is_empty());
+    }
+
+    #[test]
+    fn lean_runs_register_only_the_veecut_mcp_server() {
+        let after = |kind: AgentKind, flag: &str| -> String {
+            let args = argv(kind, None, None);
+            let at = args.iter().position(|arg| arg == flag).unwrap();
+            args[at + 1].clone()
+        };
+        // Claude: strict config, exactly one server, and its tools allowed without a prompt.
+        assert!(argv(AgentKind::Claude, None, None).contains(&"--strict-mcp-config".into()));
+        let claude: serde_json::Value =
+            serde_json::from_str(&after(AgentKind::Claude, "--mcp-config")).unwrap();
+        assert_eq!(
+            claude,
+            serde_json::json!({
+                "mcpServers": { "veecut": { "command": "veecut", "args": ["mcp"] } }
+            })
+        );
+        assert!(
+            after(AgentKind::Claude, "--allowedTools")
+                .split(',')
+                .any(|rule| rule == "mcp__veecut")
+        );
+        // Codex: its config.toml is ignored, so the one server comes from the override.
+        let codex = argv(AgentKind::Codex, None, None);
+        assert!(codex.contains(&"--ignore-user-config".into()));
+        let overrides: Vec<&String> = codex
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i > 0 && codex[*i - 1] == "-c")
+            .map(|(_, value)| value)
+            .filter(|value| value.starts_with("mcp_servers."))
+            .collect();
+        assert_eq!(overrides.len(), 1);
+        let table: toml::Table = toml::from_str(overrides[0]).unwrap();
+        let servers = table["mcp_servers"].as_table().unwrap();
+        assert_eq!(servers.keys().collect::<Vec<_>>(), ["veecut"]);
+        assert_eq!(servers["veecut"]["command"].as_str(), Some("veecut"));
+        assert_eq!(servers["veecut"]["args"][0].as_str(), Some("mcp"));
+        assert_eq!(
+            servers["veecut"]["default_tools_approval_mode"].as_str(),
+            Some("approve")
+        );
+        // OpenCode: the workspace's opencode.json carries the server and the person's global
+        // config folder is replaced by one inside the workspace.
+        let env = AgentKind::OpenCode.lean_env(Path::new("/work/space"));
+        let (_, config_home) = env
+            .iter()
+            .find(|(key, _)| *key == "XDG_CONFIG_HOME")
+            .expect("config home");
+        assert_eq!(
+            Path::new(config_home),
+            Path::new("/work/space").join(".veecut/agent-config")
+        );
+        assert!(
+            env.iter()
+                .all(|(key, _)| *key != "XDG_DATA_HOME" && *key != "HOME")
+        );
+    }
+
+    #[test]
+    fn first_request_tokens_come_from_the_first_request_only() {
+        let first =
+            |format, lines: &[&str]| last_usage_of(format, lines).first_request_input_tokens;
+        let step = |input: u64, read: u64| {
+            format!(
+                r#"{{"type":"step_finish","part":{{"cost":0,"tokens":{{"input":{input},"output":3,"reasoning":0,"cache":{{"read":{read},"write":10}}}}}}}}"#
+            )
+        };
+        let (one, two) = (step(100, 40), step(500, 400));
+        assert_eq!(
+            first(OutputFormat::OpenCode, &[one.as_str(), two.as_str()]),
+            Some(100 + 40 + 10)
+        );
+
+        // Claude: the first main-thread message, cache read and written counted once; a later
+        // message, a subagent message and the final result do not replace it.
+        let main = |id: &str, input: u64, read: u64, parent: &str| {
+            format!(
+                r#"{{"type":"assistant","parent_tool_use_id":{parent},"message":{{"id":"{id}","content":[],"usage":{{"input_tokens":{input},"cache_creation_input_tokens":7,"cache_read_input_tokens":{read},"output_tokens":2}}}}}}"#
+            )
+        };
+        let result = r#"{"type":"result","usage":{"input_tokens":900,"output_tokens":9},"total_cost_usd":0.1,"num_turns":2}"#;
+        let (side, a, b) = (
+            main("s", 5, 5, r#""toolu_1""#),
+            main("a", 20, 1000, "null"),
+            main("b", 30, 5000, "null"),
+        );
+        assert_eq!(
+            first(
+                OutputFormat::Claude,
+                &[side.as_str(), a.as_str(), b.as_str(), result]
+            ),
+            Some(20 + 1000 + 7)
+        );
+        assert_eq!(first(OutputFormat::Claude, &[result]), None);
+        assert_eq!(
+            first(
+                OutputFormat::Codex,
+                &[
+                    r#"{"type":"turn.completed","usage":{"input_tokens":900,"cached_input_tokens":100,"output_tokens":9}}"#
+                ]
+            ),
+            None
+        );
+        assert_eq!(Usage::default().first_request_input_tokens, None);
+        assert!(
+            !serde_json::to_string(&Usage::default())
+                .unwrap()
+                .contains("first_request")
+        );
+    }
+
+    /// The running usage after every line, decoded as stdout.
+    fn last_usage_of(format: OutputFormat, lines: &[&str]) -> Usage {
+        let mut decoder = Decoder::new(format);
+        for line in lines {
+            decoder.decode(Stream::Stdout, (*line).into(), &mut |_| {});
+        }
+        decoder.usage
+    }
+
+    #[test]
+    fn codex_first_request_is_read_from_its_own_session_file_only() {
+        use chrono::NaiveDate;
+        let tmp = tempfile::tempdir().unwrap();
+        let day = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+        let other = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+        let dir = tmp.path().join("2026/10/29");
+        std::fs::create_dir_all(&dir).unwrap();
+        let rollout = |input: u64, last: u64| {
+            [
+                r#"{"type":"session_meta","payload":{"id":"t1"}}"#.to_string(),
+                // Rate-limit-only event before any request: no info yet.
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":null}}"#.into(),
+                format!(
+                    r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{input}}},"last_token_usage":{{"input_tokens":{input},"cached_input_tokens":6528}}}}}}}}"#
+                ),
+                format!(
+                    r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{last}}},"last_token_usage":{{"input_tokens":{last}}}}}}}}}"#
+                ),
+            ]
+            .join("\n")
+        };
+        std::fs::write(
+            dir.join("rollout-2026-10-29T01-36-15-thread-a.jsonl"),
+            rollout(37_301, 80_487),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("rollout-2026-10-29T01-40-00-thread-b.jsonl"),
+            rollout(11, 22),
+        )
+        .unwrap();
+        let find = |thread, days| codex_first_request(tmp.path(), thread, days);
+        assert_eq!(find("thread-a", [day, day]), Some(37_301));
+        assert_eq!(find("thread-b", [other, day]), Some(11));
+        assert_eq!(find("thread-c", [day, day]), None);
+        assert_eq!(find("thread-a", [other, other]), None);
+
+        let mut decoder = Decoder::new(OutputFormat::Codex);
+        decoder.decode(
+            Stream::Stdout,
+            r#"{"type":"thread.started","thread_id":"thread-a"}"#.into(),
+            &mut |_| {},
+        );
+        assert_eq!(decoder.codex_thread.as_deref(), Some("thread-a"));
     }
 
     #[test]

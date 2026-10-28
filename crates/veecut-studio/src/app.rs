@@ -31,6 +31,10 @@ use crate::{
     timeline::Timeline,
 };
 
+// Unpinned review records stay off the timeline and survive ripple cuts.
+pub(crate) const AUTO_REVIEW_AT: f64 = -1.0;
+pub(crate) const AUTO_REVIEW_PREFIX: &str = "Auto-edit review: ";
+
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Media,
@@ -52,6 +56,55 @@ struct Document {
 impl Document {
     fn dir(&self) -> &Path {
         self.path.parent().unwrap_or(Path::new("."))
+    }
+
+    fn apply(&mut self, changes: &[Op]) -> Result<bool> {
+        if changes.is_empty() {
+            return Ok(false);
+        }
+        let before = self.project.clone();
+        ops::apply_all(&mut self.project, changes)?;
+        if self.project == before {
+            return Ok(false);
+        }
+        // ponytail: 100 in-memory undo steps; older saves remain in the workspace history.
+        if self.undo.len() == 100 {
+            self.undo.remove(0);
+        }
+        self.undo.push(before);
+        self.redo.clear();
+        self.dirty = Some(Instant::now());
+        Ok(true)
+    }
+
+    fn add_reviews(&mut self, review: &[String]) -> Result<bool> {
+        let changes: Vec<_> = review
+            .iter()
+            .map(|text| Op::AddMarker {
+                at: AUTO_REVIEW_AT,
+                note: format!("{AUTO_REVIEW_PREFIX}{text}"),
+            })
+            .collect();
+        self.apply(&changes)
+    }
+
+    fn undo(&mut self, redo: bool) -> bool {
+        let snapshot = if redo {
+            self.redo.pop()
+        } else {
+            self.undo.pop()
+        };
+        let Some(snapshot) = snapshot else {
+            return false;
+        };
+        let current = std::mem::replace(&mut self.project, snapshot);
+        if redo {
+            self.undo.push(current);
+        } else {
+            self.redo.push(current);
+        }
+        self.dirty = Some(Instant::now());
+        true
     }
 }
 
@@ -261,30 +314,17 @@ impl Studio {
     }
 
     fn apply(&mut self, changes: Vec<Op>) {
-        if changes.is_empty() {
-            return;
-        }
         let Some(doc) = &mut self.document else {
             return;
         };
-        let before = doc.project.clone();
-        match ops::apply_all(&mut doc.project, &changes) {
-            Ok(_) => {
-                if doc.project == before {
-                    return;
-                }
-                // ponytail: 100 in-memory undo steps; older saves remain in the workspace history.
-                if doc.undo.len() == 100 {
-                    doc.undo.remove(0);
-                }
-                doc.undo.push(before);
-                doc.redo.clear();
-                doc.dirty = Some(Instant::now());
+        match doc.apply(&changes) {
+            Ok(true) => {
                 self.selection.retain(|id| doc.project.find(id).is_some());
                 self.playhead = self.playhead.min(doc.project.duration());
                 self.invalidate_preview();
                 self.queue_waveforms();
             }
+            Ok(false) => {}
             Err(error) => self.notice(format!("{error:#}")),
         }
     }
@@ -293,15 +333,7 @@ impl Studio {
         let Some(doc) = &mut self.document else {
             return;
         };
-        let snapshot = if redo { doc.redo.pop() } else { doc.undo.pop() };
-        if let Some(snapshot) = snapshot {
-            let current = std::mem::replace(&mut doc.project, snapshot);
-            if redo {
-                doc.undo.push(current);
-            } else {
-                doc.redo.push(current);
-            }
-            doc.dirty = Some(Instant::now());
+        if doc.undo(redo) {
             self.selection.retain(|id| doc.project.find(id).is_some());
             self.playhead = self.playhead.min(doc.project.duration());
             self.invalidate_preview();
@@ -519,14 +551,21 @@ impl Studio {
                     let mut message = report.summary.join(" | ");
                     if !report.review.is_empty() {
                         message += &format!(
-                            " | {} item(s) need a look: {}",
-                            report.review.len(),
-                            report.review.join(" ")
+                            " | {} item(s) in Needs review in the right inspector",
+                            report.review.len()
                         );
                     }
                     if let Some(dir) = report.projects.first() {
-                        if let Err(error) = self.open_project(dir.clone()) {
-                            message = format!("{error:#}");
+                        let result = self.open_project(dir.clone()).and_then(|_| {
+                            if let Some(doc) = &mut self.document {
+                                doc.add_reviews(&report.review)?;
+                            }
+                            self.save()
+                        });
+                        if let Err(error) = result {
+                            message = format!(
+                                "{message} | Could not open or save Auto-edit review: {error:#}"
+                            );
                         }
                     }
                     self.notice(message);
@@ -1308,6 +1347,10 @@ impl Studio {
 }
 
 impl eframe::App for Studio {
+    fn on_exit(&mut self) {
+        self.services.stop_agent();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
@@ -1535,5 +1578,73 @@ mod tests {
         assert_eq!(parse_timecode("00:60:00:00", 30.0), None);
         assert_eq!(parse_timecode("00:00:00:30", 30.0), None);
         assert_eq!(parse_timecode("invalid", 30.0), None);
+    }
+
+    #[test]
+    fn auto_edit_review_survives_cuts_reopen_and_undoable_dismissal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            root: tmp.path().into(),
+        };
+        let (dir, project) = ws
+            .create_project("review", VideoKind::TalkingHeadShort, Canvas::vertical())
+            .unwrap();
+        let path = dir.join(PROJECT_FILE);
+        let document = |project| Document {
+            project,
+            path: path.clone(),
+            modified: mtime(&path),
+            dirty: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        };
+        let mut doc = document(project);
+        doc.apply(&[Op::AddMarker {
+            at: 1.0,
+            note: "Pinned user note".into(),
+        }])
+        .unwrap();
+        let review = vec![
+            "Possible retake kept at 17.00-19.00s of the source.".into(),
+            "Caption hidden at timeline 2.0 s.".into(),
+        ];
+        doc.add_reviews(&review).unwrap();
+        doc.apply(&[Op::CutRange { from: 0.0, to: 2.0 }]).unwrap();
+        assert_eq!(doc.project.markers.len(), review.len());
+        for (marker, text) in doc.project.markers.iter().zip(&review) {
+            assert_eq!(marker.at, AUTO_REVIEW_AT);
+            assert_eq!(
+                marker.note.strip_prefix(AUTO_REVIEW_PREFIX),
+                Some(text.as_str())
+            );
+            assert!(!marker.done);
+        }
+        ws.save_project(&dir, &doc.project).unwrap();
+
+        let mut doc = document(Project::load(&path).unwrap());
+        assert_eq!(doc.project.markers.len(), review.len());
+        assert!(doc.project.markers.iter().all(|marker| !marker.done));
+        doc.apply(&[Op::Set {
+            path: "/markers/0/done".into(),
+            value: json!(true),
+        }])
+        .unwrap();
+        ws.save_project(&dir, &doc.project).unwrap();
+        let reopened = Project::load(&path).unwrap();
+        assert!(reopened.markers[0].done);
+        assert!(!reopened.markers[1].done);
+
+        assert!(doc.undo(false));
+        assert!(doc.project.markers.iter().all(|marker| !marker.done));
+        ws.save_project(&dir, &doc.project).unwrap();
+        assert!(
+            Project::load(&path)
+                .unwrap()
+                .markers
+                .iter()
+                .all(|marker| !marker.done)
+        );
+        assert!(doc.undo(true));
+        assert!(doc.project.markers[0].done);
     }
 }

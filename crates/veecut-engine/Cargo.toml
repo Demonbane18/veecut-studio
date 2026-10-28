@@ -34,6 +34,12 @@ tempfile = "3"
 tiny-skia = "0.12"
 ureq = { version = "3", features = ["json"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 

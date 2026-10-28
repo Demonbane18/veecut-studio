@@ -10,6 +10,8 @@ use serde_json::{Map, Value, json};
 use veecut_engine::ops::Op;
 use veecut_engine::project::*;
 
+use crate::app::{AUTO_REVIEW_AT, AUTO_REVIEW_PREFIX};
+
 const LOOKS: [(LookPreset, &str); 7] = [
     (LookPreset::Natural, "Natural"),
     (LookPreset::Warm, "Warm"),
@@ -69,6 +71,7 @@ const MODES: [(CaptionMode, &str); 5] = [
 pub(crate) fn show(ui: &mut Ui, project: &Project, selected: Option<&str>) -> Vec<Op> {
     let mut ops = Vec::new();
     scroll(ui, "inspector", |ui| {
+        needs_review(ui, project, &mut ops);
         let found = selected
             .and_then(|id| project.find(id))
             .map(|(t, i)| (&project.tracks[t], &project.tracks[t].items[i]));
@@ -82,6 +85,38 @@ pub(crate) fn show(ui: &mut Ui, project: &Project, selected: Option<&str>) -> Ve
         }
     });
     ops
+}
+
+fn needs_review(ui: &mut Ui, project: &Project, ops: &mut Vec<Op>) {
+    let mut pending = project
+        .markers
+        .iter()
+        .enumerate()
+        .filter(|(_, marker)| {
+            marker.at == AUTO_REVIEW_AT
+                && !marker.done
+                && marker.note.starts_with(AUTO_REVIEW_PREFIX)
+        })
+        .peekable();
+    if pending.peek().is_none() {
+        return;
+    }
+    ui.heading("Needs review");
+    ui.weak(
+        "Auto-edit checks. Source times refer to raw footage; timeline times refer to this edit.",
+    );
+    for (index, marker) in pending {
+        ui.push_id(("auto_review", index), |ui| {
+            ui.group(|ui| {
+                ui.label(marker.note.trim_start_matches(AUTO_REVIEW_PREFIX));
+                if ui.button("Dismiss").clicked() {
+                    ops.push(set(&format!("/markers/{index}/done"), json!(true)));
+                }
+            });
+        });
+    }
+    ui.add_space(8.0);
+    ui.separator();
 }
 
 /// Project-wide caption style.

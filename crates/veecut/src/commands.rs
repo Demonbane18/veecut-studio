@@ -925,11 +925,16 @@ impl Ctx {
             })?,
             None => Config::load()?.default_agent(),
         };
-        let status = agent::run(&self.ws, kind, &args.prompt, &mut |line| println!("{line}"))?;
-        if !status.success() {
-            bail!("{} exited with {status}", kind.label());
+        let stop = agent::Stop::default();
+        let signal_stop = stop.clone();
+        ctrlc::set_handler(move || signal_stop.stop()).context("installing agent stop handler")?;
+        match agent::run(&self.ws, kind, &args.prompt, &stop, &mut |output| {
+            println!("{}", output.text())
+        })? {
+            agent::Outcome::Finished(status) if status.success() => Ok(Out::quiet()),
+            agent::Outcome::Finished(status) => bail!("{} exited with {status}", kind.label()),
+            agent::Outcome::Stopped => Ok(Out::new("Stopped.", json!({ "stopped": true }))),
         }
-        Ok(Out::quiet())
     }
 
     pub fn studio(&self, args: ProjectArg) -> Result<Out> {
@@ -1033,12 +1038,6 @@ pub fn doctor(workspace: Option<&Path>) -> Result<Out> {
             line,
         );
     }
-    for (kind, version) in agent::detect() {
-        let detail = version
-            .clone()
-            .unwrap_or_else(|| format!("not installed ({})", kind.install_hint()));
-        check(kind.label(), version.is_some(), detail);
-    }
     match skills::load_catalog() {
         Ok(Some(c)) => check(
             "skills catalog",
@@ -1055,6 +1054,24 @@ pub fn doctor(workspace: Option<&Path>) -> Result<Out> {
             "not synced yet; run `veecut skills sync`".into(),
         ),
         Err(e) => check("skills catalog", false, format!("{e:#}")),
+    }
+    for status in agent::detect() {
+        let label = match status.readiness {
+            agent::Readiness::Ready => "ready",
+            agent::Readiness::NotInstalled => "missing",
+            agent::Readiness::SignedOut => "signed out",
+            agent::Readiness::CheckFailed => "check failed",
+            agent::Readiness::Unverified => "unchecked",
+        };
+        let mut line = format!("{label} {}: {}", status.kind.label(), status.detail);
+        if let Some(fix) = &status.fix {
+            let _ = write!(line, "; {fix}");
+        }
+        lines.push(line);
+        checks.push(json!({
+            "name": status.kind.name(), "ok": status.can_run(), "detail": status.detail,
+            "readiness": status.readiness, "fix": status.fix, "command_override": status.command_override
+        }));
     }
     Ok(Out::new(lines.join("\n"), json!({ "checks": checks })))
 }

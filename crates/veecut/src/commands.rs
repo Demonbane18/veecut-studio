@@ -1044,20 +1044,14 @@ impl Ctx {
     }
 
     pub fn agent(&self, args: AgentArgs) -> Result<Out> {
-        let config = Config::load()?;
-        let named = args
-            .with
-            .as_deref()
-            .map(|w| {
-                AgentKind::from_name(w).ok_or_else(|| {
-                    anyhow!("unknown agent {w:?}; use opencode, claude, codex or gemini")
-                })
-            })
-            .transpose()?;
         if args.models {
-            return agent_models(&named.map_or(AgentKind::ALL.to_vec(), |kind| vec![kind]));
+            return agent_models_for(&args);
         }
-        let kind = named.unwrap_or_else(|| config.default_agent());
+        let config = Config::load()?;
+        let kind = match agent_named(&args)? {
+            Some(kind) => kind,
+            None => config.default_agent(),
+        };
         let Some(prompt) = args.prompt.as_deref() else {
             bail!("say what the agent should do, or use --models");
         };
@@ -1527,6 +1521,31 @@ fn usage_json(usage: Option<&agent::Usage>, seconds: f64) -> Value {
     }
 }
 
+/// `veecut agent`: listing models needs no workspace; a run does.
+pub fn agent_command(workspace: Option<&Path>, args: AgentArgs) -> Result<Out> {
+    if args.models {
+        agent_models_for(&args)
+    } else {
+        Ctx::open(workspace).and_then(|ctx| ctx.agent(args))
+    }
+}
+
+fn agent_named(args: &AgentArgs) -> Result<Option<AgentKind>> {
+    args.with
+        .as_deref()
+        .map(|w| {
+            AgentKind::from_name(w).ok_or_else(|| {
+                anyhow!("unknown agent {w:?}; use opencode, claude, codex or gemini")
+            })
+        })
+        .transpose()
+}
+
+fn agent_models_for(args: &AgentArgs) -> Result<Out> {
+    let kinds = agent_named(args)?.map_or(AgentKind::ALL.to_vec(), |kind| vec![kind]);
+    agent_models(&kinds)
+}
+
 /// The built-in models, plus what OpenCode lists on this machine, and the efforts per agent.
 fn agent_models(kinds: &[AgentKind]) -> Result<Out> {
     let mut text = String::new();
@@ -1619,6 +1638,25 @@ mod tests {
     fn usage_line_without_report_is_only_the_time() {
         assert_eq!(usage_line(None, 41.6), "42 s");
         assert_eq!(usage_json(None, 2.0), json!({ "seconds": 2.0 }));
+    }
+
+    #[test]
+    fn model_listing_needs_no_workspace_but_a_run_does() {
+        let empty = tempfile::tempdir().unwrap();
+        let listing = AgentArgs {
+            models: true,
+            with: Some("gemini".into()),
+            ..Default::default()
+        };
+        let out = agent_command(Some(empty.path()), listing).unwrap();
+        assert!(out.text.starts_with("Gemini CLI (gemini)"), "{}", out.text);
+        let run = AgentArgs {
+            prompt: Some("tighter cuts".into()),
+            with: Some("gemini".into()),
+            ..Default::default()
+        };
+        let error = agent_command(Some(empty.path()), run).err().unwrap();
+        assert!(format!("{error:#}").contains("not a VeeCut workspace"));
     }
 
     #[test]

@@ -118,7 +118,7 @@ fn main() -> ExitCode {
         Command::Style { command } => Ctx::open(ws).and_then(|c| c.style(command)),
         Command::Skills { command } => skills(ws, command, &mut progress),
         Command::Qa { file } => qa(&file),
-        Command::Agent(args) => Ctx::open(ws).and_then(|c| c.agent(args)),
+        Command::Agent(args) => agent_command(ws, args),
         Command::Mcp => mcp::serve(cli.workspace.clone()).map(|()| Out::quiet()),
         Command::Studio(args) => Ctx::open(ws).and_then(|c| c.studio(args)),
         Command::Fonts => fonts(),

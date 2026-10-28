@@ -24,7 +24,7 @@ veecut edit inbox/setup-walkthrough.mov --kind tutorial --json
 - Keeps silent stretches of 2 s or more, because the viewer may need to see them (typing, loading), but plays them 2 to 8 times faster and muted, with an "N× SPEED" label.
 - Shows plain subtitles low in the frame (0.88 of the height), not in capitals, unless the style turns captions off.
 - Uses each `--broll` file (for example a slide or a photo of the result) once as a full-frame cutaway of at most 3 s, muted, at a sentence start after the first 3 s, spread evenly; stills get a slow push-in. In a tutorial the screen usually matters more, so pass B-roll only when the user asks.
-- Adds a music bed and sound effects only as the style asks (see `talking-head-short.md` for the levels).
+- Adds a music bed and sound effects only as the style asks (see `workflows/talking-head-short.md`, relative to the loaded `SKILL.md` directory, for the levels).
 - Renders `outbox/<slug>-v1.mp4` and checks it.
 
 ## Editing rules
@@ -65,7 +65,7 @@ From [gquthier/autonomous-sop-video](https://github.com/gquthier/autonomous-sop-
 | "Show the shortcut" | `{"op":"add_text","text":"Cmd+Shift+P","start":51.0,"duration":2.0,"preset":"label"}` |
 | "Subtitle file for YouTube" | `veecut transcript --srt` |
 
-More in `reference/editor-api.md`.
+More in `reference/editor-api.md`, relative to the loaded `SKILL.md` directory, never the workspace root.
 
 ## More skills
 

@@ -75,7 +75,7 @@ From [EGSECDA/vocaloid-style-mv-pipeline](https://github.com/EGSECDA/vocaloid-st
 
 Do not run `veecut captions --rebuild` on a music video with LRC lyrics: it rebuilds from a speech transcript and would replace the lyric pages.
 
-More in `reference/editor-api.md`.
+More in `reference/editor-api.md`, relative to the loaded `SKILL.md` directory, never the workspace root.
 
 ## More skills
 

@@ -6,7 +6,7 @@ This loop comes from free247editor and Herk Edit Kit (both MIT): the user watche
 
 1. Read `my-rules.md` before every edit (`veecut rules`). Follow every rule in it.
 2. Take the user's notes one at a time. Repeat each back in a few words if it is unclear ("Yung captions, mas mataas?"), and ask only when you cannot tell what they mean.
-3. Turn each note into ops (`reference/editor-api.md`) and apply them with `veecut ops`. A note about one moment can be pinned there first with `veecut note "THE NOTE" --at T`, so it shows up in `veecut status`.
+3. For quoted words, run `veecut transcript-search "PHRASE" --json`, then `veecut cut-phrase "PHRASE"`. Multiple matches require a 1-based `--occurrence N` chosen by the user. Do not calculate phrase cuts from rounded timestamps. For other notes, apply ops with `veecut ops`; read `reference/editor-api.md` relative to the loaded `SKILL.md` directory, never the workspace root. Pin a note about one moment with `veecut note "THE NOTE" --at T` if useful.
 4. Decide whether the note is lasting (below). If it is, save it as a rule.
 5. For a Studio note, optionally check `veecut frame` in the project's `.cache/`, answer in one or two lines and stop. Render or open a video only when the note asks for one. Outside Studio, run `veecut render`, open the next draft (`-v2`, `-v3`) and say what changed.
 6. When the user approves ("ok na", "approved", "final"), run `veecut render --final`.

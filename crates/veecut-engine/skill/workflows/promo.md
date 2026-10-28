@@ -77,7 +77,7 @@ From BrewReel, [Finderchangchang/promo-video-skill](https://github.com/Findercha
 | "Square version" | `veecut render --aspect 1:1` |
 | "No sound effects" | `{"op":"set","path":"/tracks/5/muted","value":true}` after checking that track 5 is `sfx` |
 
-More in `reference/editor-api.md`.
+More in `reference/editor-api.md`, relative to the loaded `SKILL.md` directory, never the workspace root.
 
 ## More skills
 

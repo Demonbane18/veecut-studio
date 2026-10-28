@@ -58,10 +58,10 @@ From [vincentsch/explainroo](https://github.com/vincentsch/explainroo/blob/e9523
 | "Zoom in more on the images" | `patch` the image clips: `{"ken_burns":{"from_scale":1.0,"to_scale":1.2}}` |
 | "Add a heading here" | `{"op":"add_text","text":"Step 2: *compare*","start":18.0,"duration":3.0,"preset":"card"}` |
 | "Show the number big" | `{"op":"add_text","text":"₱12,000","start":24.0,"duration":2.5,"preset":"counter"}` |
-| "Cut this sentence" | `cut_range` over it; the voice and the pictures move together |
+| "Cut this sentence" | `veecut transcript-search "SENTENCE" --json`, then `veecut cut-phrase "SENTENCE"`. If it repeats, ask which match and pass `--occurrence N`. Voice and pictures ripple together. |
 | "Captions too big" | `{"op":"set","path":"/captions/size","value":0.045}` |
 
-More in `reference/editor-api.md`.
+More in `reference/editor-api.md`, relative to the loaded `SKILL.md` directory, never the workspace root.
 
 ## More skills
 

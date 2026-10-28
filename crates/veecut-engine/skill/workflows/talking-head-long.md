@@ -54,10 +54,10 @@ From Herk Edit Kit's playbook (MIT), adapted to long form:
 | "Put my name on screen" | `{"op":"add_text","text":"Maria Santos\nFounder","start":2,"duration":4,"preset":"lower_third"}` |
 | "Chapter cards" | `add_text` with preset `card` or `counter` at each section start (find times in `veecut transcript`) |
 | "No captions on YouTube" | `veecut captions --mode off`, and offer `veecut transcript --srt` for a subtitle file instead |
-| "Cut this section" | `cut_range` from its first word to the next section's first word |
+| "Cut this section" | Read its wording with `veecut transcript --json`, then `veecut transcript-search "SECTION WORDS" --json` and `veecut cut-phrase "SECTION WORDS"`. If it repeats, ask which match and pass `--occurrence N`. |
 | "Vertical teaser" | `veecut edit SAME-FILE --kind clips --clips 1` |
 
-More in `reference/editor-api.md`.
+More in `reference/editor-api.md`, relative to the loaded `SKILL.md` directory, never the workspace root.
 
 ## More skills
 

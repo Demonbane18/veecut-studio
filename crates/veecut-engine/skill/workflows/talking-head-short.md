@@ -105,12 +105,12 @@ Checks before you show the draft:
 | "Too much zooming" | `patch` the clips with `{"zooms":[]}`, or keep one zoom per key line |
 | "Zoom in here" | `{"op":"add_zoom","at":12.0,"duration":1.5,"scale":1.15}` |
 | "You cut my word" | `trim` the clip before the cut outward by about 0.1 s |
-| "Keep the first take" | Put it back with `add_clip` from the source time, then `cut_range` the later take |
+| "Keep the first take" | Put it back with `add_clip` from the source time, then run `veecut transcript-search "TAKE WORDS" --json` and remove the later match with `veecut cut-phrase "TAKE WORDS" --occurrence N` using its 1-based occurrence. |
 | "Add B-roll here" | `veecut add FILE`, then `{"op":"add_clip","asset":"ID","track":"broll","start":12.0,"duration":2.0}` |
 | "Music too loud" | `patch` each music item, for example `{"volume":0.18}` |
 | "Horizontal version too" | `veecut render --aspect 16:9` |
 
-More in `reference/editor-api.md`.
+More in `reference/editor-api.md`, relative to the loaded `SKILL.md` directory, never the workspace root.
 
 ## More skills
 

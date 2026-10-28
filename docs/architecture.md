@@ -75,6 +75,17 @@ Global state lives in `~/.veecut/` (override with `VEECUT_HOME`): `config.toml`,
 `add_track`. `apply` and `apply_all` are atomic and validate the result. The JSON schema comes
 from `schemars::schema_for!(Op)`.
 
+Phrase edits use `Transcript::find_phrase(&Project, &str) -> Result<Vec<PhraseMatch>>` and
+`Transcript::cut_phrase(&mut Project, &str, Option<usize>) -> Result<PhraseCut>`.
+Search matches consecutive transcript words kept on the playing timeline, ignoring case
+and punctuation without substring or fuzzy matching. A removed intervening word breaks
+the match; a cut between neighbouring words does not. Matches include 1-based occurrences,
+word IDs, sentence context and source/timeline start/end seconds rounded to milliseconds.
+`cut_phrase` requires one match or an explicit occurrence; missing and ambiguous matches
+leave the project unchanged. It applies one `CutRange` through `ops::apply`, then the
+command saves one undo step. Matching uses the transcript asset's main-track clips, or
+its audio-track clips when the voice is separate; the cut ripples through every track.
+
 ## Module contracts
 
 Signatures other modules depend on. Owners may add more, but must not change these without
@@ -215,7 +226,7 @@ pub fn detect() -> Vec<AgentStatus>; // bounded, read-only sign-in/config probes
 pub struct Stop; // Clone + Default; one per run. stop() ends the process group/job.
 pub enum Outcome { Finished(std::process::ExitStatus), Stopped }
 pub struct Selection { pub model: Option<String>, pub effort: Option<String> }
-pub struct Usage { pub input_tokens: u64, pub output_tokens: u64, pub cached_tokens: u64, pub cost_usd: Option<f64>, pub turns: Option<u64> }
+pub struct Usage { pub input_tokens: u64, pub output_tokens: u64, pub cached_tokens: u64, pub first_request_input_tokens: Option<u64>, pub cost_usd: Option<f64>, pub turns: Option<u64> }
 pub enum Output { Answer(String), Log(String), Usage(Usage) }
 pub fn run(ws: &Workspace, kind: AgentKind, prompt: &str, selection: &Selection, stop: &Stop, on_output: &mut dyn FnMut(Output)) -> Result<Outcome>;
 pub fn studio_prompt(project: &Path, note: &str) -> String;
@@ -228,10 +239,21 @@ Agents run in a separate Unix process group or a Windows Job Object. Stop and CL
 terminate that group/job, reap the agent and drain output before reporting Stopped. Studio
 also stops its agent on exit. Unix helpers that deliberately create a new session/group
 escape group termination; ordinary inherited hooks and MCP children remain in the group.
-Studio and the evaluation harness share `agent::studio_prompt`: ops, an optional cached frame,
-a short reply, and no render or open unless a video is requested.
+Studio and the evaluation harness share `agent::studio_prompt`: phrase cuts use `cut-phrase`
+with optional `--occurrence` and `transcript-search` to list matches (MCP `cut_phrase` and
+`transcript_search`); other edits use ops. The prompt allows an optional cached frame,
+asks for a short reply, and forbids render or open unless a video is requested.
+Tool discovery and the agent's PATH prepend the executable's directory only for `veecut`
+and `veecut-studio` product binaries. Evaluator and test binaries leave the usual search
+order intact, so a neighbouring stale `target/debug/veecut` does not shadow the installed CLI.
 Codex, OpenCode and Claude structured output separates answers, tool logs and cumulative usage.
 Input tokens exclude cached tokens; `Usage::total_tokens` adds input, output and cached once.
+`first_request_input_tokens` is the first model request's input, including cache reads and
+writes once, not the run's cumulative input or total. It is `None` when unreported and
+omitted from serialized output. Claude uses the first main-thread assistant usage event;
+OpenCode uses the first `step_finish`; Codex reads the first `token_count` event's
+`last_token_usage.input_tokens` from the native rollout identified by `thread.started`.
+Codex's value already includes cached input. Gemini does not report this field.
 Missing usage or cost stays unknown. Studio keeps the latest note, reply, usage and result
 outside the folded log.
 Claude and Codex readiness includes their read-only login checks; failures retain the fix.
@@ -240,8 +262,8 @@ the checks without changing agent settings.
 Model and effort choices live in `[agent.selection.<agent>]` in `config.toml`. Callers resolve
 the config selection and apply per-run overrides before calling `run`; an absent effort in
 `Selection` means the agent's default. OpenCode defaults to `opencode/glm-5.3-flash-free`;
-other agents use their CLI's default model. A custom command vector takes precedence and
-is not given extra model, effort or output-format arguments.
+other agents use their CLI defaults after the per-run restrictions below. A custom command
+vector takes precedence and runs unchanged, without added context, model, effort or output flags.
 The default OpenCode driver stops on reported free-allowance exhaustion and unavailable-model
 errors, preserves usage received so far and returns an actionable error to CLI and Studio.
 Only emitted stdout/stderr errors are observable; private OpenCode log entries are not read.
@@ -249,6 +271,19 @@ Only emitted stdout/stderr errors are observable; private OpenCode log entries a
 Claude `ultracode` maps to `--effort max --settings '{"ultracode":true}'` and adds `Workflow`
 to the allowed tools. The picker labels its roughly fivefold token cost. Gemini has no
 effort flag. Model lists are suggestions; custom model IDs remain accepted.
+
+#### Per-run agent context
+
+Default drivers keep VeeCut workspace instructions and skills while limiting unrelated
+user context through process arguments and environment variables. Global files and OAuth
+credentials are not changed. Custom command overrides bypass these restrictions.
+
+| Agent | Per-run settings | Limits |
+| --- | --- | --- |
+| Claude | `--setting-sources project,local --strict-mcp-config`, explicit VeeCut-only `--mcp-config`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` | VeeCut MCP tools are allowed in headless runs. User settings, plugins, hooks, skills and `CLAUDE.md` are excluded. User-level `apiKeyHelper`, environment and provider settings are also excluded. OAuth login stays available; VeeCut does not use API-key-only `--bare`. |
+| OpenCode | `--pure --print-logs --log-level ERROR`, `OPENCODE_DISABLE_CLAUDE_CODE=1`, `OPENCODE_DISABLE_EXTERNAL_SKILLS=1`, workspace `.agents/skills` through `OPENCODE_CONFIG_CONTENT`, `XDG_CONFIG_HOME=<workspace>/.veecut/agent-config` | The per-run config location excludes inherited global config, plugins and MCP servers. Workspace `opencode.json` supplies VeeCut MCP. Sign-in data stays in its original data directory; credentials are not copied. Providers defined only in global config are unavailable. |
+| Codex | `--ignore-user-config`, `-c skills.include_instructions=false`, `-c 'mcp_servers.veecut={command="veecut",args=["mcp"],default_tools_approval_mode="approve"}'` | Authentication remains available. The global skill catalog is omitted; workspace `AGENTS.md` points to the VeeCut skill by path. User config defaults, including model, network access and service tier, do not apply; `~/.codex/AGENTS.md` still loads. |
+| Gemini | `-e none --allowed-mcp-server-names veecut` | No equivalent flag disables user skills, `GEMINI.md` or settings hooks. Signed-in execution has not been verified. |
 
 
 ### `skills`
@@ -290,7 +325,13 @@ when their global config selects Groq.
 
 Commands that work on a project take `-p/--project P` (a slug, a project folder or a
 `project.json` path); without it they use the most recently changed project in the workspace.
-Every command accepts `--json` for machine-readable output and `--workspace DIR`.
+CLI and MCP share this resolver. Folder and file paths may be absolute, relative to the
+current directory or relative to the workspace. CLI `-p` works before or after the
+subcommand. Without `--workspace`, an existing folder or `project.json` path discovers its
+owning workspace, even from outside a workspace. An explicit `--workspace DIR` is
+authoritative; MCP stays rooted in its server workspace. Both reject project paths outside
+the selected workspace, including symlink escapes. Every command accepts `--json` for
+machine-readable output.
 
 ```
 veecut init [DIR]                     set up a workspace (folders, built-in skill, agent config)
@@ -298,20 +339,23 @@ veecut doctor                         check ffmpeg, transcription, agents and th
 veecut edit [FILE...] [--kind K] [--aspect 9:16|16:9|4:5|1:1] [--broll FILE...] [--music FILE]
             [--voice FILE] [--copy TEXT|FILE] [--name NAME] [--hook TEXT] [--language CODE]
             [--clips N] [--no-render]
-                                      run the recipe for kind K (default talking-head-short) on the
-                                      files, or the newest inbox video; prints projects, drafts,
-                                      what it did and what needs review
+                                      run the recipe for kind K on the files, or the newest inbox video;
+                                      defaults to talking-head-short (talking-head-long for horizontal style);
+                                      prints projects, drafts, what it did and what needs review
 veecut status                         kind, length, tracks and items, drafts, open notes
 veecut add FILE... [--role source|broll|music|sfx|voice|image|logo]
                                       bring files into the project as assets; prints ids for add_clip
-veecut transcript [--srt|--vtt|--raw]   sentences with timeline times; captions as SRT/VTT; raw words
+veecut transcript [--srt|--vtt|--raw]   sentence source/timeline ranges to milliseconds; captions as SRT/VTT; raw words
+veecut transcript-search "PHRASE"     exact spoken-word matches with word timings and 1-based occurrences
+veecut cut-phrase "PHRASE" [--occurrence N]
+                                      remove one selected match; refuses ambiguous cuts
 veecut ops JSON|--file F|-            apply Editor API ops atomically; layout changes also report actual caption bounds
 veecut schema                         JSON schema of the ops
 veecut undo / veecut redo
 veecut render [--final] [--aspect A] [--range A-B] [--out FILE]
                                       draft to outbox/<slug>-v<n>.mp4, final to outbox/<slug>-final.mp4
-veecut frame --at T [--width W] [--out FILE]      composited PNG plus caption placement at T
-veecut frames [--every S] [--out FILE]            contact sheet of frames
+veecut frame [--at T] [--width W] [--out FILE]    composited PNG plus caption placement; defaults T=0, W=540
+veecut frames [--every S] [--out FILE]            contact sheet; default interval max(length/12, 0.5) seconds
                                       check PNGs default to project .cache; inbox/outbox destinations are refused,
                                       including symlink aliases, before rendering
 veecut captions [--rebuild] [--mode word_pop|highlight|pills|subtitle|off]
@@ -327,9 +371,14 @@ veecut studio                         open the desktop editor
 veecut fonts                          list caption and text fonts
 ```
 
-MCP tools: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `note`,
-`undo` (with `redo: true` to redo), `skills_search`, `skills_install`. Each takes the same
-arguments as the matching command; `frame` and `frames` also return the PNG as an image.
+MCP tools: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`,
+`transcript_search`, `cut_phrase`, `captions`, `note`, `undo`, `redo`, `skills_search`,
+`skills_install`. `project` accepts the same selectors as CLI `-p`; `frame` and `frames`
+also return the PNG as an image. `transcript_search` takes `phrase`; `cut_phrase` adds
+optional 1-based `occurrence`.
+CLI and MCP share these defaults; explicit frame-sheet intervals are clamped to at least
+0.1 seconds. MCP rejects unknown fields and reports missing required arguments.
+Redo uses its own tool; `undo` rejects a `redo` argument.
 
 ## Evaluation harness (`veecut-eval`)
 
@@ -365,6 +414,8 @@ under `results/YYYY-MM-DD.jsonl`: fixture, kind, length, task, level, agent, mod
 trial, pass, check detail, seconds, input/output/cached tokens, reported cost, claimed
 success and failure class. Logs and failing workspaces remain inspectable. Failure classes
 are `model`, `app`, `environment` and `check`; classification includes supporting evidence.
+Rows also carry `first_request_input_tokens` when reported, and the full parsed `Usage`
+object under `evidence.usage`. First-request input is a separate measure, not additional spend.
 
 Custom agent commands are refused because they override model selection. Free runs accept
 the known free models; paid runs require `--allow-paid`. Screening runs 49 cells sequentially:
@@ -372,6 +423,27 @@ nine free models at their default variant on five tasks and four image-capable m
 the visual task. Existing cells are skipped; `--rerun` preserves earlier generations.
 Ladders require two passes, trying a third trial on a split. Reports separate one-trial
 screening outcomes from reliable rungs and show medians and failure evidence.
+
+`ladder --rungs` filters before probing or running models. Its comma-separated selectors
+accept case-insensitive providers `free`/`opencode`, `claude`, `codex`, or `MODEL[@EFFORT]`.
+A model alone selects all its ladder efforts; `@default` selects no explicit effort.
+Invalid selectors list valid rung IDs, and paid selections without `--allow-paid` fail
+before any run. Omitting `--rungs` keeps the default ladder.
+
+Each selected free model receives at most one small real availability request through
+`agent::run` per batch, just before its first trial. `--probe-timeout` is 20 seconds by
+default (range 5 to 600). Environment failures, quota/model availability errors or a
+deadline without a reply defer the rung. A reported exhausted free allowance defers all
+remaining selected free rungs without more probes; unavailable-model errors and timeouts
+stay per model. Only that probe's own output is read, never OpenCode's shared log; paid
+models are not probed. Deferrals go to `results/deferred/YYYY-MM-DD.jsonl` with the reason,
+probe duration, workspace and log tail. They are not trial rows and do not affect
+reliability, recommendations or result totals. Paid escalation waits while a selected free
+rung for that task is deferred. A paid-only `--rungs` selection skips free probes entirely.
+
+`report` lists open deferrals under "Deferred rungs (not model trials)". Rerun the same
+command to retry. A newer real attempt for the same fixture/task/agent/model/effort clears
+the open deferral; previous evidence remains on disk.
 
 `recheck` evaluates retained artifacts without a model call, appending a linked row with
 `rechecked = true` and an incremented generation. It preserves source-run costs rather
@@ -384,7 +456,8 @@ private checker expectations keep `invalid = true` across rechecks and require l
 `crates/veecut-engine/skill/` holds the agent skill copied into every workspace by
 `veecut init`: `SKILL.md` (router), `workflows/<kind>.md` (one per `VideoKind::slug()`) and
 `reference/{editor-api,notes-and-rules,style-setup}.md`. The workspace module embeds these
-files with `include_str!`.
+files with `include_str!`. All workflow and reference paths resolve relative to the loaded
+`SKILL.md` directory (`.agents/skills/veecut/` or `.claude/skills/veecut/`), never the workspace root.
 
 ## Credits
 

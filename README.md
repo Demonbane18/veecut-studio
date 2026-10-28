@@ -46,7 +46,7 @@ Transcription runs locally with whisper.cpp; the first run downloads a model to 
 
 ## Using it with a coding agent
 
-`veecut init` copies the VeeCut skill into `.agents/skills/veecut/` and `.claude/skills/veecut/`, writes `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` so agents use it, and registers `veecut mcp` as an MCP server in `opencode.json`.
+`veecut init` copies the VeeCut skill into `.agents/skills/veecut/` and `.claude/skills/veecut/`, writes `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` so agents use it, and registers `veecut mcp` as an MCP server in `opencode.json`. Workflow and reference paths are relative to the loaded `SKILL.md` directory, never the workspace root.
 
 OpenCode with GLM 5.3 Flash Free (no account needed):
 
@@ -78,6 +78,8 @@ with `opencode models`. `--model default` uses VeeCut's default: free GLM for Op
 or the CLI's own model for other agents. `--effort default` uses the agent's own effort.
 Gemini has no effort setting. Usage appears after a run when reported by the agent;
 unknown token counts or cost are not treated as zero.
+Reported first-request input counts the first model request's input, including cache reads
+and writes once. It is separate from cumulative run tokens and stays unknown when unreported.
 
 Studio saves model and effort choices per agent in `~/.veecut/config.toml`:
 
@@ -92,8 +94,17 @@ effort = "low"
 ```
 
 Omit `effort` to use the agent's default. OpenCode defaults to GLM 5.3 Flash Free; the other
-agents use their CLI's default model. Existing custom command overrides take precedence;
-VeeCut does not add model, effort or output-format flags to them.
+agents use their CLI defaults after the per-run context restrictions below. Existing custom
+command overrides take precedence and run as written.
+
+VeeCut-started runs keep workspace instructions and skills while suppressing unrelated
+user context where each CLI supports it. Existing OAuth sign-ins stay intact; VeeCut does
+not rewrite global agent settings. Claude and Codex skip user settings/config while explicitly
+registering VeeCut MCP; Codex omits the global skill catalog. OpenCode uses a workspace-local
+config location with workspace skills and VeeCut MCP, leaving sign-in data untouched.
+User-configured model/provider defaults may not apply. Codex and Gemini retain some global
+instructions their flags cannot disable. See [per-run context limits](docs/architecture.md#per-run-agent-context)
+for details. These restrictions do not change an agent you start yourself.
 
 Claude's `ultracode` effort enables its workflow planner, uses `max` effort and allows
 `Workflow` in headless mode. This is the most expensive choice, roughly five times the
@@ -106,6 +117,26 @@ When OpenCode reports an exhausted free allowance or an unavailable model, VeeCu
 the run and shows the provider problem. Free access can take a day or more to return.
 Errors that OpenCode writes only to its private log cannot trigger this early stop;
 the evaluation harness still enforces its deadline.
+
+## Cutting a phrase
+
+```sh
+veecut transcript-search "the words to remove" -p SLUG --json
+veecut cut-phrase "the words to remove" -p SLUG
+```
+
+Search matches whole spoken words, ignoring case and punctuation. It reports source and
+timeline start/end times to millisecond precision; `veecut transcript` also reports sentence
+ranges. If wording occurs more than once, choose the 1-based `--occurrence N`.
+Without a selection, an ambiguous cut refuses to change the project.
+Cuts use the transcript's word timings and can be undone with `veecut undo`.
+
+CLI `-p` and MCP `project` accept a slug, project folder or `project.json` path. Omit the
+selector to use the most recently changed project. CLI `-p` works before or after the
+subcommand; an existing project path can find its workspace from outside it. An explicit
+`--workspace` takes precedence, and MCP stays in its server workspace. Paths cannot escape
+the selected workspace. MCP exposes `transcript_search` and `cut_phrase` with `phrase`,
+plus optional `occurrence` for the cut.
 
 ## The desktop editor
 
@@ -196,6 +227,8 @@ cargo run -p veecut-eval -- run --screening
 cargo run -p veecut-eval -- run --fixture ths-s-mark-pond-31s --task caption-size \
   --agent opencode --model opencode/glm-5.3-flash-free --trials 2
 cargo run -p veecut-eval -- ladder --fixture ths-s-mark-pond-31s --level 2
+cargo run -p veecut-eval -- ladder --fixture ths-s-mark-pond-31s --level 2 \
+  --rungs haiku@low,gpt-5.6-luna@low --allow-paid
 cargo run -p veecut-eval -- report
 ```
 
@@ -217,6 +250,19 @@ starts a new generation without overwriting prior evidence. `ladder` requires tw
 passes, with a third trial after a split, before recommending a rung. Paid models
 are refused unless the caller explicitly supplies `--allow-paid`. Custom agent
 commands are refused because they can override the requested model.
+
+`ladder --rungs` selects a comma-separated list before any probe or trial: `free` (or
+`opencode`), `claude`, `codex`, or a model with optional `@EFFORT`, such as `haiku@low`.
+A model alone selects all its ladder efforts; `@default` selects no explicit effort.
+Paid selections still require `--allow-paid`.
+
+Before a free model's first trial in a batch, the harness makes one small real availability
+request, bounded by `--probe-timeout` (20 seconds by default). An unavailable model is
+recorded under `results/deferred/`, not as a failed trial, and does not affect reliability
+or result totals. An exhausted free allowance defers the remaining selected free rungs
+without more probes. A deferred free rung blocks paid escalation for that task; a paid-only
+`--rungs` selection skips free probes. Run the same command later to retry; `report` lists
+open deferrals separately.
 
 After fixing a check, use `recheck --failure-class check` to judge retained run artifacts
 without calling a model. Rechecks append linked rows and preserve the original run's

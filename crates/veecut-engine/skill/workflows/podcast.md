@@ -59,7 +59,7 @@ From the podcast and interview recipe in [kmilo93sd/agent-video-editor](https://
 | "Make it for podcast apps too" | After the YouTube final, `{"op":"set","path":"/audio/target_lufs","value":-16}`, then `veecut render --final --out outbox/<slug>-podcast-feed.mp4`, then set it back to -14 |
 | "Clips for Shorts" | `veecut edit SAME-FILE --kind clips --clips 5` |
 
-More in `reference/editor-api.md`.
+More in `reference/editor-api.md`, relative to the loaded `SKILL.md` directory, never the workspace root.
 
 ## More skills
 

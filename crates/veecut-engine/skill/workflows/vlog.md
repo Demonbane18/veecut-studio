@@ -69,7 +69,7 @@ From [znyupup/ai-video-editing-skill](https://github.com/znyupup/ai-video-editin
 | "Warmer colors" | `{"op":"set","path":"/look/preset","value":"warm"}` |
 | "Music fades too early" | `patch` the music item's `fade_out`, for example `{"fade_out":3.0}` |
 
-More in `reference/editor-api.md`.
+More in `reference/editor-api.md`, relative to the loaded `SKILL.md` directory, never the workspace root.
 
 ## More skills
 

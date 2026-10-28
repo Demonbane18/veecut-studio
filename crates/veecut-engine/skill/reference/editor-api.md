@@ -14,18 +14,33 @@ veecut ops -                                         ops from standard input
 ## Times, places and ids
 
 - Times in ops are timeline seconds: where things are in the edited video, after the cuts. 2:05 is `125`.
-- `veecut transcript` shows each sentence with its timeline time and its source time, so you can find where words sit in the edit. The review list from `veecut edit` gives source times; look them up there.
+- `veecut transcript` shows sentence `source_start`, `source_end`, `timeline_start` and `timeline_end` to millisecond precision. `--json` returns numeric seconds; a cut endpoint is `null` (`(cut)` in text). Repeated source words use their first placement in this sentence view. For quoted words and every occurrence, use `veecut transcript-search "PHRASE" --json`; do not infer phrase boundaries from a whole sentence.
 - Positions are fractions of the frame. `{"x":0,"y":0}` is the top-left corner, `{"x":1,"y":1}` the bottom-right, `{"x":0.5,"y":0.5}` the center.
 - Sizes of text are fractions of the frame height. `0.045` is a medium caption.
 - `veecut status --json` lists every track with its items. Each item has an `id`, a `start` and a `duration`. Clip ids look like `clip-3`, text ids like `text-1`, caption pages like `cap-12`. Assets have ids like `asset-1`.
 - The standard tracks are `main` (the magnetic main track), `broll`, `text`, `captions`, `music` and `sfx`. Some recipes add a `voice` track. On the main track, clips play back to back and their starts are computed, so you change their order, not their start.
 - Edits on the main track keep every track in sync. `cut_range`, deleting a main clip and trimming one shorter cut that time from all tracks. Inserting a main clip before the end (`add_clip` with `index` or `start`, `duplicate`) or trimming one longer pushes later items on every track along; appending at the end moves nothing. Items that start at or after that point move; an item that runs across it stays where it is, so `split` that track there first if its second half should move too. Reordering main clips with `move` does not move the other tracks, so run `veecut captions --rebuild` after reordering. When the voice is on its own track (podcasts with `--voice` or several cameras, explainers), new picture time has no voice under it; add the matching voice piece with `add_clip` on the `voice` track.
 
+## Cutting spoken words
+
+```sh
+veecut transcript-search "the words to remove" -p SLUG --json
+veecut cut-phrase "the words to remove" -p SLUG --json
+```
+
+Search matches whole spoken words, ignoring case and punctuation. It does not use substrings or fuzzy matching. Results list 1-based `occurrence`, `asset`, `sentence`, matched `words`, and `source_start`, `source_end`, `timeline_start`, `timeline_end` in seconds rounded to milliseconds. Each word has the same time fields, `id` and `text`. These are transcript-derived timings, not a guarantee that transcription matches the audio exactly.
+
+If several matches exist, ask which one to remove and pass `--occurrence N`. A missing phrase, an invalid occurrence or an ambiguous cut changes nothing. Search again after an edit because occurrence numbers and timeline times can change.
+
+`cut-phrase` maps words through cuts and clip speed, applies one atomic ripple cut, and saves one undo step. Its JSON includes `phrase`, the selected match in `cut`, the generated `op` and its `applied` result. Words must be consecutive in the transcript and still present in the edit; a removed intervening word breaks the match. Do not calculate these cuts yourself.
+
+Both commands accept `-p` as a slug, project folder or `project.json` path. MCP equivalents are `transcript_search` with `{"phrase":"the words to remove","project":"SLUG"}` and `cut_phrase` with the same fields plus optional `occurrence`.
+
 ## The ops
 
 ### cut_range
 
-Removes a stretch of the timeline from every track and closes the gap. Use it for pauses, mistakes and anything the viewer should not see.
+Removes a stretch of the timeline from every track and closes the gap. Use it for explicit time ranges, pauses or visual-only stretches. For spoken words, use `transcript-search` and `cut-phrase` above.
 
 ```json
 {"op":"cut_range","from":12.4,"to":14.1}
@@ -199,12 +214,13 @@ Never copy, move or convert files in `inbox/` to do this; the project points at 
 
 ## Notes and the ops that fix them
 
-Look up ids with `veecut status --json` and times with `veecut transcript` first.
+Look up ids with `veecut status --json` and times with `veecut transcript --json`. For phrase cuts, use `transcript-search` and `cut-phrase` instead of timestamp arithmetic.
 
 | The user says | Do this |
 | --- | --- |
 | "Faster", "tighter", "bilisan mo" | Cut the pauses they mean with `cut_range`. For the whole video, also save a rule and run `veecut style set pace tight` so the next edit cuts every pause. Never speed up the voice. |
 | "Cut 0:05 to 0:07", "tanggalin mo yung 0:05 hanggang 0:07" | `{"op":"cut_range","from":5,"to":7}` |
+| "Cut the part where I say 'PHRASE'" | `veecut transcript-search "PHRASE" --json`, then `veecut cut-phrase "PHRASE"`. For repeated wording, ask which match and pass `--occurrence N`. |
 | "Bigger captions", "lakihan mo yung captions" | `{"op":"set","path":"/captions/size","value":0.06}` |
 | "Captions higher", "itaas mo yung captions" | `{"op":"set","path":"/captions/position","value":0.25}`. A smaller number is higher. |
 | "Captions cover my face" | Check the affected time with `veecut frame --at T` and read the actual caption bounds reported by `veecut ops`. A lower requested position may be clamped by the safe area. Reduce caption size or words per page if needed; use an upper slot only when clear of both the face and hook. Check again before claiming the face is clear. |

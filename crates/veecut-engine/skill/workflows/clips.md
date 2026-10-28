@@ -56,13 +56,13 @@ All the short-form rules in `talking-head-short.md` (from Herk Edit Kit, MIT) ap
 | Note | Fix |
 | --- | --- |
 | "Clip 2 starts too late" | In clip 2's project, put back the lead-in with `add_clip` from the source time on `main` with `"index":0` (see `veecut transcript -p SLUG`). Everything after it moves along, the hook too; move the hook back with `{"op":"move","item":"text-1","start":0}` if it should still open the clip. |
-| "Cut the first sentence" | `cut_range` from 0 to where the second sentence starts |
+| "Cut the first sentence" | Read it with `veecut transcript -p SLUG --json`, search its text with `veecut transcript-search "SENTENCE" -p SLUG --json`, then `veecut cut-phrase "SENTENCE" -p SLUG`. If it repeats, select the matching 1-based `--occurrence N`. |
 | "Better title" | `patch` the hook text item: `{"op":"patch","item":"text-1","patch":{"text":"The *one* pricing mistake"}}` |
 | "Make 3 more" | `veecut edit SAME-FILE --kind clips --clips 6`. It reuses the transcript, but makes all six again, so the first three repeat the earlier ones. |
 | "I don't like clip 3" | Leave its project and draft alone and say so; nothing needs deleting |
 | "Horizontal too" | `veecut render -p SLUG --aspect 16:9` |
 
-More in `reference/editor-api.md`.
+More in `reference/editor-api.md`, relative to the loaded `SKILL.md` directory, never the workspace root.
 
 ## More skills
 

@@ -23,7 +23,7 @@ Leave out `--hook` here: it would put the same title on every clip. Fix titles o
 
 - Transcribes the long video once and plans its cuts once.
 - Finds the strongest self-contained moments of 20 to 60 s. A moment starts and ends on a sentence and scores higher for a strong first sentence (a question, a number, a bold claim, talking to "you"), for the video's topic words, for lively delivery and for ending on a full sentence. Openings like "and" or "it" score lower.
-- Makes one vertical project and one draft per moment, best first, with tight cuts, a face crop, 1.15x punch-ins (no shot past 2.8 s), a hook title over the first 3 s (the moment's opening words, at most 7) and captions.
+- Makes one vertical project and one draft per moment, best first, with tight cuts, a face crop, 1.15x punch-ins (no shot past 2.8 s) and captions. The opening hook uses a complete short sentence from that moment; if none fits, it is omitted with a review item.
 - Adds a ducked music bed only from `--music` or when the style sound is `sfx_music`, and sound effects on text unless the style is `voice_only`.
 - The summary lists each clip with its length, score and why it scored, for example "opens with a question; topic words: pricing, clients".
 

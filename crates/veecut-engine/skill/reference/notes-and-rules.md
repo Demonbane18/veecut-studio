@@ -1,6 +1,6 @@
 # Notes and rules
 
-This loop comes from free247editor and Herk Edit Kit (both MIT): the user watches a draft, says what to change in plain words, you fix it and render the next version. When a note will hold for every video, you also write it down as a rule, so the user never has to say it twice.
+This loop comes from free247editor and Herk Edit Kit (both MIT): the user watches a draft, says what to change in plain words, and you fix it. VeeCut Studio previews the change; outside Studio, render the next version. When a note will hold for every video, also save it as a rule.
 
 ## One round
 
@@ -8,7 +8,7 @@ This loop comes from free247editor and Herk Edit Kit (both MIT): the user watche
 2. Take the user's notes one at a time. Repeat each back in a few words if it is unclear ("Yung captions, mas mataas?"), and ask only when you cannot tell what they mean.
 3. Turn each note into ops (`reference/editor-api.md`) and apply them with `veecut ops`. A note about one moment can be pinned there first with `veecut note "THE NOTE" --at T`, so it shows up in `veecut status`.
 4. Decide whether the note is lasting (below). If it is, save it as a rule.
-5. Run `veecut render`. The next draft gets the next number: `-v2`, `-v3`. Open it and say in one or two lines what changed.
+5. For a Studio note, optionally check `veecut frame` in the project's `.cache/`, answer in one or two lines and stop. Render or open a video only when the note asks for one. Outside Studio, run `veecut render`, open the next draft (`-v2`, `-v3`) and say what changed.
 6. When the user approves ("ok na", "approved", "final"), run `veecut render --final`.
 
 ## When a note becomes a rule

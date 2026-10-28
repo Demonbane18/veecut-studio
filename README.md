@@ -40,7 +40,7 @@ veecut edit                 # edits the newest video in inbox/ and renders outbo
 veecut studio               # opens the desktop editor on the same projects
 ```
 
-`veecut doctor` checks ffmpeg, transcription, the coding agents it can find and the skills catalog. `veecut edit --kind tutorial` (or any kind below) picks another recipe.
+`veecut doctor` checks ffmpeg, transcription, agent readiness and the skills catalog. Claude Code and Codex checks distinguish signed-out accounts from broken configuration; fixes include `claude auth login` and `codex login`. Checks do not change your settings. `veecut edit --kind tutorial` (or any kind below) picks another recipe.
 
 Transcription runs locally with whisper.cpp; the first run downloads a model to `~/.veecut/models`. For faster transcription, put a free Groq key from https://console.groq.com/keys in the workspace `.env` as `GROQ_API_KEY=...`. With the key set, audio is uploaded to Groq.
 
@@ -63,6 +63,9 @@ Gemini CLI: run `gemini` in the workspace and say "edit this". It reads `GEMINI.
 
 To hand a request to an agent without opening it, run `veecut agent "edit this"`. It uses OpenCode with the free model by default; `--with claude`, `--with codex` or `--with gemini` picks another one.
 
+Ctrl+C stops the agent and its inherited helpers. No project change is rolled back; saved
+edits remain undoable.
+
 ## The desktop editor
 
 `veecut studio` opens the editor on the workspace; `veecut studio -p PROJECT` opens one project. The welcome screen lists your projects and inbox videos. Under New edit, pick a name, a kind of video, a canvas and a source file, then choose "Auto-edit with the recipe" (runs the recipe and opens the result, without rendering) or "Create empty edit".
@@ -74,6 +77,21 @@ With a project open:
 - The preview sits in the middle, with play, frame steps and an `HH:MM:SS:FF` timecode.
 - The inspector on the right edits the selected item, or the project when nothing is selected.
 - The timeline at the bottom has the magnetic main track, overlay, text, caption and audio tracks, with waveforms and snapping.
+- Studio notes apply ops and refresh the preview. Agents render or open a video only when
+  the note asks for one. The Agent tab shows elapsed time, Stop, and a readiness Refresh button.
+  Your latest note and reply stay visible; tool output is folded below them.
+- Talking-head Auto-edit keeps face boxes over time and places captions clear of the mouth
+  and chin through crops and punch-ins. It moves or shrinks crowded pages, tries an upper
+  slot clear of the hook, and reports pages it cannot safely show or check. Existing projects
+  need Auto-edit again to collect face data.
+- `veecut ops` reports safe-area clamps and actual caption boxes for layout changes;
+  `veecut frame --at T` reports the caption placement at that time.
+- Check frames stay in the project's `.cache/` by default. `frame` and `frames` refuse
+  destinations in `inbox/` or `outbox/`, including symlink aliases.
+- Automatic hooks use complete short sentences. If none fits, Auto-edit omits the hook
+  and asks for a line in review.
+- Auto-edit decisions stay under **Needs review** in the inspector until dismissed. They
+  survive reopening and cuts; Dismiss is saved and supports Undo within the current session.
 
 Keyboard shortcuts (Cmd on macOS, Ctrl elsewhere):
 

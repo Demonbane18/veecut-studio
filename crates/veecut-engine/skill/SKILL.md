@@ -24,21 +24,25 @@ my-sounds/sfx/    sound effects the recipes may use
 
 ## First time in a workspace
 
-1. Run `veecut doctor`. It checks ffmpeg, ffprobe, transcription, coding agents and the skills catalog. If something says `missing`, tell the user in one line what to install.
+1. Run `veecut doctor`. It checks ffmpeg, ffprobe, transcription, agent sign-in/config and the skills catalog. Report missing tools or failed checks with the fix it names. For signed-out Claude Code or Codex, the user runs `claude auth login` or `codex login`; never edit their agent settings.
 2. Run `veecut style show`. If every value is still the default (vertical, hook on, natural pace, highlight captions in the upper third), offer the short style setup in `reference/style-setup.md`. It takes two or three quick rounds of questions. If the user says skip, use the defaults.
 3. Transcription runs on the user's computer with whisper.cpp unless a Groq key is set. The first local run downloads a model. If it is slow, tell the user they can get a free key at https://console.groq.com/keys and add it themselves: they open `.env` and put `GROQ_API_KEY=...` on its own line. Say plainly that with the key set, the audio is uploaded to Groq for transcription. Never ask them to paste a key into the chat, and never read `.env` aloud.
+
+## Notes from VeeCut Studio
+
+The editor is already open and previews changes. Apply the note with ops, optionally check `veecut frame` (saved in the project's `.cache/`), reply in one or two lines, and stop. Do not render or open a video unless the note explicitly asks for a video, draft or export. This overrides the render/open steps in every workflow below. If a Studio note needs a recipe, use `veecut edit --no-render`.
 
 ## The edit loop
 
 1. Read the rules first: `veecut rules`. They beat the style, and the style beats the recipe defaults.
 2. Pick the kind of video (table below) and open its file in `workflows/`. Ask only the questions that file lists.
 3. Run the recipe: `veecut edit [FILE] --kind K --json`. FILE is a path or the name of a file in `inbox/`. Without FILE it edits the newest video in `inbox/`. Long recordings take minutes; wait for it.
-4. Read the result. `summary` says what the recipe did, `drafts` lists the rendered files, `projects` the project folders, and `review` lists decisions left to you, such as a possible retake it kept. Review times are source seconds; run `veecut transcript` to see where those words sit on the timeline.
-5. If you can look at images, look before the user does: `veecut frames` saves a contact sheet, `veecut frame --at T` saves one frame. Check that captions stay off the mouth, the hook is readable and nothing is cut off at the edges.
-6. Open the draft for the user: `open outbox/<slug>-v1.mp4` on macOS, `start "" outbox\<slug>-v1.mp4` on Windows, `xdg-open outbox/<slug>-v1.mp4` on Linux.
+4. Read the result. `summary` says what the recipe did, `drafts` lists rendered files, `projects` the project folders, and `review` decisions still needing a look. Review times say source or timeline; use `veecut transcript` to map source words to the edit. Studio keeps these items under Needs review until dismissed. Never dismiss them without checking or asking the user.
+5. If you can look at images, look before the user does: `veecut frames` saves a contact sheet, `veecut frame --at T` saves one frame. Both default to the project's `.cache/`; leave check images there, never in `inbox/` or `outbox/`. Check that captions stay off the mouth, the hook is readable and nothing is cut off at the edges.
+6. Outside Studio, open the draft for the user: `open outbox/<slug>-v1.mp4` on macOS, `start "" outbox\<slug>-v1.mp4` on Windows, `xdg-open outbox/<slug>-v1.mp4` on Linux.
 7. Tell them what changed in 3 to 5 short bullets, then ask for notes. Turn review items into plain questions ("At 0:12 you said the intro twice. Keep the second one?").
 8. Turn each note into Editor API ops (`reference/editor-api.md`) and apply them with `veecut ops`. To use a new file (more B-roll, music, a logo), bring it in first with `veecut add FILE` and use the asset id it prints. If a note is lasting, save it as a rule (`reference/notes-and-rules.md`) and confirm in one line.
-9. After each round of notes, run `veecut render`. Drafts count up: `-v2`, `-v3`. Open the new draft and say in one or two lines what you fixed.
+9. Outside Studio, run `veecut render` after each round of notes. Drafts count up: `-v2`, `-v3`. Open the new draft and say in one or two lines what you fixed. In Studio, follow "Notes from VeeCut Studio" above.
 10. When the user approves ("ok na", "approved", "final", "goods na", "ship it"), run `veecut render --final`. It writes `outbox/<slug>-final.mp4`. If their style format is `both`, the recipe's first draft already comes in two shapes (for example `<slug>-v1.mp4` and `<slug>-v1-16x9.mp4`). For later drafts and the final, run the render a second time with `--aspect 16:9` for a vertical edit, or `--aspect 9:16` for a horizontal one.
 
 ## Pick the kind
@@ -63,7 +67,7 @@ These habits keep small models on track, and they work for big ones too.
 
 - Run one command at a time and read its output before the next one.
 - Add `--json` to commands whose output you need to read.
-- Let the recipes and ops do the work. Do not write scripts, ffmpeg commands or code to edit a video.
+- Let recipes and ops do the work. Never run ffmpeg yourself, including for check frames, probes or exports. Use `veecut frame`, `veecut frames`, `veecut render` and `veecut qa`. Do not write scripts or code to edit a video.
 - When you are unsure what the project holds, run `veecut status --json`. It lists the tracks, every item id, the assets, drafts and open notes. Copy ids from it; never guess them.
 - Commands work on the most recently changed project. When there are several (the `clips` recipe makes one per clip), pass `-p SLUG` with the folder name from `projects/`.
 - Never edit `project.json` by hand. Every change goes through `veecut ops`, so it can be checked and undone with `veecut undo` (and `veecut redo`).

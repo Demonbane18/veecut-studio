@@ -60,6 +60,12 @@ Global state lives in `~/.veecut/` (override with `VEECUT_HOME`): `config.toml`,
   transition, Ken Burns, duck), `Text` (preset, style overrides, position, animations;
   `*word*` = accent color) and `Caption` (words with times relative to the item start).
 - `Project::source_to_timeline(asset, t)` maps a source time through the cuts.
+- `faces` stores timestamped face boxes in source coordinates, keyed by asset id. Recipes set
+  it through ops. Caption layout maps the boxes through the same crop and zoom as the picture.
+  Old projects load without face data; rerun Auto-edit to analyze them.
+- Studio stores Auto-edit review items in `markers`, with `at = -1` and an
+  `Auto-edit review: ` prefix. These unpinned notes survive ripple cuts. Dismiss sets `done`
+  through ops; pending and dismissed states survive reopening, with in-session editor Undo.
 
 ## Editor API (`ops.rs`, done)
 
@@ -112,10 +118,22 @@ impl Graphics {
     /// canvas aspect ratio at any size; drawing scales to it.
     pub fn draw(&mut self, project: &Project, t: f64, pixmap: &mut tiny_skia::PixmapMut);
     pub fn font_families(&self) -> Vec<String>;
+    /// Caption page bounds and placement decisions, shared with draw. Word-pop bounds include
+    /// its maximum animated size. Hidden pages report the box that could not be placed.
+    pub fn caption_placement_at(&mut self, project: &Project, t: f64) -> Option<CaptionPlacement>;
+    pub fn caption_placements(&mut self, project: &Project) -> Vec<CaptionPlacement>;
 }
 /// Area clear of platform buttons and captions for this canvas, normalized.
 pub fn safe_area(canvas: &Canvas) -> Rect;
+/// Totals and at most `limit` examples: safe-area clamps, moved/shrunk pages, hidden pages,
+/// unchecked pages and detection gaps.
+pub fn caption_report(graphics: &mut Graphics, project: &Project, limit: usize) -> CaptionReport;
 ```
+
+Captions use one placement per page. The requested position is tried first, then a lower slot
+at smaller sizes, then an upper slot clear of text. Pages with no clear slot are hidden and
+reported for review. Missing face detections are reported as unchecked, never as clear.
+
 
 ### `transcribe`
 
@@ -140,8 +158,10 @@ pub struct Beats { pub tempo: f64, pub beats: Vec<f64>, pub downbeats: Vec<f64>,
 pub fn beats(pcm: &[f32], sample_rate: u32) -> Beats;
 /// Index of the loudest speaker per window, for multi-mic podcasts: (start, speaker).
 pub fn speaker_turns(tracks: &[Vec<f32>], sample_rate: u32, min_shot: f64) -> Vec<(f64, usize)>;
-/// Median face center over `samples` frames of `range`, if a face is found.
-pub fn face_focus(path: &Path, range: (f64, f64), samples: usize) -> Result<Option<Point>>;
+/// Largest frontal face about every half second (at most 1,200 samples), in source coordinates.
+pub fn face_track(path: &Path, range: (f64, f64)) -> Result<Vec<FaceSample>>;
+/// Median center of the detected boxes, used for crop focus.
+pub fn focus(faces: &[FaceSample]) -> Option<Point>;
 pub struct Highlight { pub start: f64, pub end: f64, pub score: f32, pub title: String, pub reason: String }
 pub fn highlights(transcript: &Transcript, min_len: f64, max_len: f64, count: usize) -> Vec<Highlight>;
 /// Words worth emphasizing in captions: numbers, money, names, strong words.
@@ -185,9 +205,27 @@ pub struct Config { .. }    // Config::load(), save(); skills auto-sync/auto-upd
 pub fn load_dotenv(root: &Path); // sets variables from <root>/.env that are not already set
 // agent.rs
 pub enum AgentKind { OpenCode, Claude, Codex, Gemini }
-pub fn detect() -> Vec<(AgentKind, Option<String>)>;
-pub fn run(ws: &Workspace, kind: AgentKind, prompt: &str, on_line: &mut dyn FnMut(&str)) -> Result<std::process::ExitStatus>;
+pub enum Readiness { Ready, NotInstalled, SignedOut, CheckFailed, Unverified }
+pub struct AgentStatus { pub kind: AgentKind, pub readiness: Readiness, pub detail: String, pub fix: Option<String>, pub command_override: bool }
+pub fn detect() -> Vec<AgentStatus>; // bounded, read-only sign-in/config probes
+pub struct Stop; // Clone + Default; one per run. stop() ends the process group/job.
+pub enum Outcome { Finished(std::process::ExitStatus), Stopped }
+pub enum Output { Answer(String), Log(String) }
+pub fn run(ws: &Workspace, kind: AgentKind, prompt: &str, stop: &Stop, on_output: &mut dyn FnMut(Output)) -> Result<Outcome>;
 ```
+
+Agents run in a separate Unix process group or a Windows Job Object. Stop and CLI Ctrl+C
+terminate that group/job, reap the agent and drain output before reporting Stopped. Studio
+also stops its agent on exit. Unix helpers that deliberately create a new session/group
+escape group termination; ordinary inherited hooks and MCP children remain in the group.
+Studio prefixes notes with its live-preview policy: ops, optional cached frame, short reply;
+no render or open unless a video is requested.
+Codex and OpenCode structured output separates answers from tool logs; plain agents separate
+stdout from stderr. Studio keeps the latest note, reply and result outside the folded log.
+Claude and Codex readiness includes their read-only login checks; failures retain the fix.
+Other providers and custom command overrides disclose what was not checked. Refresh reruns
+the checks without changing agent settings.
+
 
 ### `skills`
 
@@ -235,13 +273,15 @@ veecut status                         kind, length, tracks and items, drafts, op
 veecut add FILE... [--role source|broll|music|sfx|voice|image|logo]
                                       bring files into the project as assets; prints ids for add_clip
 veecut transcript [--srt|--vtt|--raw]   sentences with timeline times; captions as SRT/VTT; raw words
-veecut ops JSON|--file F|-            apply Editor API ops atomically (one op, an array, or JSON lines)
+veecut ops JSON|--file F|-            apply Editor API ops atomically; layout changes also report actual caption bounds
 veecut schema                         JSON schema of the ops
 veecut undo / veecut redo
 veecut render [--final] [--aspect A] [--range A-B] [--out FILE]
                                       draft to outbox/<slug>-v<n>.mp4, final to outbox/<slug>-final.mp4
-veecut frame --at T [--width W] [--out FILE]      one composited frame as PNG (for vision models)
+veecut frame --at T [--width W] [--out FILE]      composited PNG plus caption placement at T
 veecut frames [--every S] [--out FILE]            contact sheet of frames
+                                      check PNGs default to project .cache; inbox/outbox destinations are refused,
+                                      including symlink aliases, before rendering
 veecut captions [--rebuild] [--mode word_pop|highlight|pills|subtitle|off]
 veecut note "NOTE" [--at T] [--rule]             pin a note; --rule also saves it to my-rules.md
 veecut rules [add "RULE" --words "USER WORDS"]   list or add lasting rules

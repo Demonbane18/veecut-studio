@@ -207,7 +207,7 @@ Look up ids with `veecut status --json` and times with `veecut transcript` first
 | "Cut 0:05 to 0:07", "tanggalin mo yung 0:05 hanggang 0:07" | `{"op":"cut_range","from":5,"to":7}` |
 | "Bigger captions", "lakihan mo yung captions" | `{"op":"set","path":"/captions/size","value":0.06}` |
 | "Captions higher", "itaas mo yung captions" | `{"op":"set","path":"/captions/position","value":0.25}`. A smaller number is higher. |
-| "Captions cover my face" | Move them away from the face: `0.75` if the face is high in the frame, `0.25` if it is low. Check with `veecut frame --at T`. |
+| "Captions cover my face" | Check the affected time with `veecut frame --at T` and read the actual caption bounds reported by `veecut ops`. A lower requested position may be clamped by the safe area. Reduce caption size or words per page if needed; use an upper slot only when clear of both the face and hook. Check again before claiming the face is clear. |
 | "Change the hook" | Find the text item with preset `hook` and `{"op":"patch","item":"text-1","patch":{"text":"New *hook* line"}}`. |
 | "No hook" | `{"op":"delete","item":"text-1"}` (the hook's id) |
 | "Music too loud", "hinaan mo yung music" | Patch every item on the `music` track, for example `{"op":"patch","item":"clip-30","patch":{"volume":0.18}}`. For more dip only under speech, `{"op":"set","path":"/audio/duck_db","value":18}`. |
@@ -226,4 +226,4 @@ Look up ids with `veecut status --json` and times with `veecut transcript` first
 | "Horizontal version" | `veecut render --aspect 16:9` |
 | "Undo that", "ibalik mo" | `veecut undo` |
 
-After the ops, run `veecut render` for the next draft.
+After ops from Studio, check a frame if needed, answer briefly and stop. Render or open a video only when the note asks for one. Outside Studio, run `veecut render` for the next draft.

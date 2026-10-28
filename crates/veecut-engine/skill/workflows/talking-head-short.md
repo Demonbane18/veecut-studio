@@ -10,7 +10,7 @@ The user recorded themselves talking and wants a short social video. This is als
 
 Nothing, usually. Ask only if it helps:
 
-- Do they have a hook line in mind? Pass it with `--hook`; otherwise the recipe takes it from the first sentence.
+- Do they have a hook line in mind? Pass it with `--hook`; otherwise the recipe chooses a complete short sentence or asks for one in review.
 - Which language do they speak in it, if the style says `auto` and the first try comes out wrong? Pass `--language tl` or `--language en`.
 
 ## Command
@@ -29,9 +29,9 @@ Without a file it edits the newest video in `inbox/`.
 - Cuts pauses and mistakes. The pace comes from the style: `tight` cuts pauses over 0.25 s, `natural` cuts pauses over 0.55 s, and each trimmed pause keeps a breath of 0.14 to 0.24 s. Stutters, false starts and high-confidence retakes are cut, keeping the last take. Medium and low-confidence ones stay in and appear in the review list.
 - Crops around the face.
 - Alternates punch-ins (1.15x) and the wide shot at cuts and phrase boundaries, so no shot runs past 2.8 s.
-- Puts hook text over the first 3 s when the style has `hook = true`: the `--hook` text, or the first sentence cut to at most 7 words with the strongest word in the accent color. It sits clear of the captions and the face. A picked hook goes in the review list.
+- Puts hook text over the first 3 s when the style has `hook = true`: the `--hook` text, or a complete short sentence with the strongest word in the accent color. It never truncates a long sentence. If nothing fits, it leaves the hook out and adds a review item. A picked hook also goes in review.
 - Uses each `--broll` file once, full frame over the speaker, starting at a sentence after the first 3 s and spread evenly through the video. Each cutaway lasts at most 3 s and plays muted; stills get a slow push-in.
-- Adds captions in the style's mode and moves them off the face. Text and captions get a dark or light scrim when the footage behind them would make them hard to read.
+- Adds captions in the style's mode. Face boxes over time guide each page through crops and punch-ins: lower slot, smaller text, then upper slot clear of the hook. Pages that cannot fit are omitted and reported; missing detections need a visual check. Text and captions get a dark or light scrim when the footage behind them would make them hard to read.
 - Adds a music bed from `--music`, or the first file in `my-sounds/music/` when the style sound is `sfx_music`. It sits 11 dB under the voice, ducks under speech and fades in and out over 1.5 s.
 - Adds sound effects from `my-sounds/sfx/` when text lands, unless the style is `voice_only`.
 - Renders `outbox/<slug>-v1.mp4` and checks it.

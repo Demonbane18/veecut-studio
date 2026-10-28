@@ -10,12 +10,12 @@ use crate::transcript::Transcript;
 const PAUSE: f64 = 0.4;
 
 /// One clip of the transcript's asset: where it sits on the timeline and which source it plays.
-struct Span {
-    start: f64,
-    end: f64,
-    src_in: f64,
-    src_out: f64,
-    speed: f64,
+pub(crate) struct Span {
+    pub(crate) start: f64,
+    pub(crate) end: f64,
+    pub(crate) src_in: f64,
+    pub(crate) src_out: f64,
+    pub(crate) speed: f64,
 }
 
 /// A transcript word placed on the timeline.
@@ -31,7 +31,7 @@ struct Placed<'a> {
 
 /// Clips of `asset` on the main track or, when it is not there (narration on an audio track in
 /// faceless videos), its clips on audio tracks.
-fn spans(project: &Project, asset: &str) -> Vec<Span> {
+pub(crate) fn spans(project: &Project, asset: &str) -> Vec<Span> {
     let of = |kind: TrackKind| -> Vec<Span> {
         project
             .tracks

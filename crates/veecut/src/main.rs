@@ -2,7 +2,11 @@
 //! `--json` gives agents structured output, and `veecut mcp` serves the same commands as MCP tools.
 
 mod commands;
+mod cutout_cmd;
+mod footage_cmd;
 mod mcp;
+mod sfx_cmd;
+mod verify_cmd;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -54,6 +58,8 @@ enum Command {
     TranscriptSearch(TranscriptSearchArgs),
     /// Cut an exact spoken phrase; choose --occurrence when it repeats.
     CutPhrase(CutPhraseArgs),
+    /// Cut the speaker out over a picture, with an optional word behind their head.
+    Cutout(cutout_cmd::CutoutArgs),
     /// Apply Editor API operations (JSON) atomically.
     Ops(OpsArgs),
     /// JSON schema of the Editor API operations.
@@ -88,7 +94,12 @@ enum Command {
         command: Option<SkillsCommand>,
     },
     /// Check a rendered video: size, length, loudness, black frames.
-    Qa { file: PathBuf },
+    Qa {
+        file: PathBuf,
+        /// Transcribe the render again and list the project's words that were masked or clipped.
+        #[arg(long)]
+        words: bool,
+    },
     /// Hand a request to a coding agent (OpenCode with a free model by default).
     Agent(AgentArgs),
     /// Run the MCP server on stdio for agents.
@@ -97,6 +108,18 @@ enum Command {
     Studio(ProjectArg),
     /// Fonts available for captions and text.
     Fonts,
+    /// The built-in synthesized sound kit: clicks, swishes, hits, pads.
+    Sfx {
+        /// Write every kit file again.
+        #[arg(long)]
+        regenerate: bool,
+    },
+    /// Search free, licence-tracked footage and pictures; numbered results and a contact sheet.
+    Find(footage_cmd::FindArgs),
+    /// Download a found file into footage/ and add it to the project with its licence.
+    Fetch(footage_cmd::FetchArgs),
+    /// The rights table of found files; --credits for the description; --approve after the user checked.
+    Sources(footage_cmd::SourcesArgs),
 }
 
 fn main() -> ExitCode {
@@ -114,6 +137,7 @@ fn main() -> ExitCode {
         Command::Transcript(args) => open_project().and_then(|c| c.transcript(args)),
         Command::TranscriptSearch(args) => open_project().and_then(|c| c.transcript_search(args)),
         Command::CutPhrase(args) => open_project().and_then(|c| c.cut_phrase(args)),
+        Command::Cutout(args) => open_project().and_then(|c| c.cutout(args, &mut progress)),
         Command::Ops(args) => open_project().and_then(|c| c.ops(args)),
         Command::Schema => schema(),
         Command::Undo(args) => open_project().and_then(|c| c.undo(args, false)),
@@ -127,7 +151,17 @@ fn main() -> ExitCode {
         Command::Rules { command } => Ctx::open(ws).and_then(|c| c.rules(command)),
         Command::Style { command } => Ctx::open(ws).and_then(|c| c.style(command)),
         Command::Skills { command } => skills(ws, command, &mut progress),
-        Command::Qa { file } => qa(&file),
+        Command::Sfx { regenerate } => Ctx::open(ws).and_then(|c| c.sfx(regenerate)),
+        Command::Find(args) => Ctx::open(ws).and_then(|c| c.find(args)),
+        Command::Fetch(args) => open_project().and_then(|c| c.fetch(args, &mut progress)),
+        Command::Sources(args) => open_project().and_then(|c| c.sources(args)),
+        Command::Qa { file, words: false } => qa(&file),
+        Command::Qa { file, words: true } => open_project().and_then(|c| {
+            let project = ProjectArg {
+                project: cli.project.clone(),
+            };
+            c.verify_words(verify_cmd::VerifyWordsArgs { file, project }, &mut progress)
+        }),
         Command::Agent(args) => agent_command(ws, args),
         Command::Mcp => mcp::serve(cli.workspace.clone()).map(|()| Out::quiet()),
         Command::Studio(args) => open_project().and_then(|c| c.studio(args)),

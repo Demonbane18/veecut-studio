@@ -59,7 +59,8 @@ pub struct ProjectArg {
 pub struct EditArgs {
     /// Recordings to edit (paths, or names of files in inbox/). Default: the newest video in inbox/.
     pub files: Vec<PathBuf>,
-    /// talking-head-short, talking-head-long, tutorial, podcast, clips, vlog, explainer, promo or music-video.
+    /// talking-head-short, talking-head-long, tutorial, podcast, clips, vlog, explainer, promo,
+    /// music-video or documentary.
     #[arg(long, short)]
     pub kind: Option<String>,
     /// 9:16, 16:9, 4:5 or 1:1.
@@ -90,6 +91,9 @@ pub struct EditArgs {
     /// Build the project but do not render a draft.
     #[arg(long)]
     pub no_render: bool,
+    /// Documentary edits: search free, licence-tracked footage for lines without --broll files.
+    #[arg(long)]
+    pub find: bool,
 }
 
 #[derive(Args, Deserialize, JsonSchema, Default)]
@@ -438,7 +442,7 @@ impl Ctx {
     }
 
     /// An input file: a path as given, or a name inside inbox/ or the workspace.
-    fn input(&self, path: &Path) -> Result<PathBuf> {
+    pub(crate) fn input(&self, path: &Path) -> Result<PathBuf> {
         for candidate in [
             path.to_path_buf(),
             self.ws.inbox().join(path),
@@ -485,6 +489,7 @@ impl Ctx {
             req.clips = n;
         }
         req.render = !args.no_render;
+        req.find = args.find;
         let report = recipes::edit(&self.ws, &req, progress)?;
         let mut text = String::new();
         for line in &report.summary {
@@ -838,6 +843,10 @@ impl Ctx {
 
     pub fn render(&self, args: RenderArgs, progress: &mut dyn FnMut(&str)) -> Result<Out> {
         let (dir, mut p) = self.project(&args.project)?;
+        // A final render refuses flagged found files nobody approved; drafts are never blocked.
+        if args.final_ {
+            veecut_engine::footage::check_final(&p)?;
+        }
         let slug = dir
             .file_name()
             .unwrap_or_default()
@@ -1257,6 +1266,11 @@ pub fn doctor(workspace: Option<&Path>) -> Result<Out> {
         media::ffprobe()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|e| format!("{e:#}")),
+    );
+    check(
+        "cutout model",
+        veecut_engine::matte::ready(),
+        veecut_engine::matte::status(),
     );
     let ws = workspace
         .map(Path::to_path_buf)

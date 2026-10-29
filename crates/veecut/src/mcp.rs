@@ -44,7 +44,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "edit",
-                description: "Edit recordings with the recipe for a kind of video (talking-head-short, talking-head-long, tutorial, podcast, clips, vlog, explainer, promo, music-video) and render a draft to outbox/. Without files it edits the newest video in inbox/. Takes minutes for long recordings.",
+                description: "Edit recordings with the recipe for a kind of video (talking-head-short, talking-head-long, tutorial, podcast, clips, vlog, explainer, promo, music-video, documentary) and render a draft to outbox/. Without files it edits the newest video in inbox/. Documentary edits take B-roll files and find=true to search free, licence-tracked footage. Takes minutes for long recordings.",
                 schema: input_schema::<EditArgs>(),
             },
             Tool {
@@ -93,6 +93,11 @@ fn tools() -> &'static [Tool] {
                 schema: input_schema::<CutPhraseArgs>(),
             },
             Tool {
+                name: "cutout",
+                description: "Cut the speaker out for at/dur seconds inside one main-track clip. Optional world picture and mega word sit behind it. Downloads Apache-2.0 MODNet on first use; saves one undo step.",
+                schema: input_schema::<crate::cutout_cmd::CutoutArgs>(),
+            },
+            Tool {
                 name: "captions",
                 description: "Change caption mode or rebuild caption pages from transcript.json. Saves an undo step.",
                 schema: input_schema::<CaptionsArgs>(),
@@ -121,6 +126,26 @@ fn tools() -> &'static [Tool] {
                 name: "skills_install",
                 description: "Install a catalog repo's agent skills into this workspace. Ask the user first.",
                 schema: input_schema::<SkillsInstallArgs>(),
+            },
+            Tool {
+                name: "verify_words",
+                description: "Transcribe a rendered video again (locally unless the user's config picked Groq) and compare it with the project's transcript: lists words that are missing or heard differently, with their timeline time, whether a cut is within 0.25 s and which sound or music clip starts there, plus a verdict. Takes about as long as transcription.",
+                schema: input_schema::<crate::verify_cmd::VerifyWordsArgs>(),
+            },
+            Tool {
+                name: "find_footage",
+                description: "Search free, licence-tracked footage and pictures (NASA, Wikimedia Commons, Internet Archive, Openverse; Pexels with PEXELS_API_KEY) for an idea: the real thing a line is about, or a picture metaphor. Returns numbered candidates with licence and flags, plus a contact sheet PNG to look at. Then fetch_footage with the number.",
+                schema: input_schema::<crate::footage_cmd::FindArgs>(),
+            },
+            Tool {
+                name: "fetch_footage",
+                description: "Download a candidate (its number from the last find_footage, or its id) into footage/ and add it to the project as an asset with its source, licence and credit. Returns the asset id for add_clip. Saves one undo step.",
+                schema: input_schema::<crate::footage_cmd::FetchArgs>(),
+            },
+            Tool {
+                name: "sources",
+                description: "The project's rights table of found files: licence, author, page, flags. flag (with reason) marks a file for a rights check; credits returns description-ready credit lines. A final render refuses flagged files nobody approved. Approving is the user's decision only: show them the flags and ask them to run `veecut sources --approve <asset>` after checking the rights; never approve on your own.",
+                schema: input_schema::<crate::footage_cmd::SourcesArgs>(),
             },
         ]
     });
@@ -199,6 +224,7 @@ fn call(workspace: &Option<PathBuf>, name: &str, args: &Value) -> Result<Out> {
         "status" => project_call(ws, args, Ctx::status),
         "add" => project_call(ws, args, Ctx::add),
         "edit" => project_call(ws, args, |ctx, args| ctx.edit(args, &mut progress)),
+        "cutout" => project_call(ws, args, |ctx, args| ctx.cutout(args, &mut progress)),
         "ops" => {
             let mut args = args.clone();
             if let Some(ops) = args.get_mut("ops") {
@@ -241,6 +267,10 @@ fn call(workspace: &Option<PathBuf>, name: &str, args: &Value) -> Result<Out> {
                 &mut progress,
             )
         }
+        "verify_words" => project_call(ws, args, |ctx, args| ctx.verify_words(args, &mut progress)),
+        "find_footage" => project_call(ws, args, Ctx::find),
+        "fetch_footage" => project_call(ws, args, |ctx, args| ctx.fetch(args, &mut progress)),
+        "sources" => project_call(ws, args, Ctx::sources),
         _ => Err(anyhow!("unknown tool {name:?}")),
     }
 }

@@ -36,6 +36,7 @@ pub(crate) struct Capture {
     started: Instant,
     tx: mpsc::Sender<Result<()>>,
     rx: mpsc::Receiver<Result<()>>,
+    single: bool,
 }
 
 impl Capture {
@@ -61,6 +62,7 @@ impl Capture {
             started: Instant::now(),
             tx,
             rx,
+            single: std::env::var_os("VEECUT_STUDIO_TAB").is_some(),
         }))
     }
 
@@ -81,6 +83,10 @@ impl Capture {
         if let Ok(saved) = self.rx.try_recv() {
             saved?;
             match self.stage {
+                Stage::AwaitPaused if self.single => {
+                    self.stage = Stage::Done;
+                    return Ok(Action::Close);
+                }
                 Stage::AwaitPaused => {
                     self.stage = Stage::First;
                     return Ok(Action::Play);
@@ -99,7 +105,7 @@ impl Capture {
         }
         match self.stage {
             Stage::Preview if preview_ready => {
-                self.request(ctx, "00-paused.png", 0.0);
+                self.request(ctx, "00-paused.png", position.unwrap_or_default());
                 self.stage = Stage::AwaitPaused;
             }
             Stage::First if position.is_some_and(|at| at >= 1.0) => {

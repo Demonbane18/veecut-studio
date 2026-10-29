@@ -22,6 +22,10 @@ pub struct StudioOptions {
 /// `02-playback.png` from its own framebuffer, then opens the Agent tab and saves
 /// `03-agent.png` (agent, model and effort pickers), then closes. Playback captures are one
 /// second apart. The hook is inactive when the variable is unset and never captures other windows.
+/// Set `VEECUT_STUDIO_TAB=media|sources|footage` to capture only the selected tab and close.
+/// `VEECUT_STUDIO_SELECT` selects an item id; `VEECUT_STUDIO_QUERY` supplies the real Footage
+/// search (default `moon`). Footage captures wait for the search and thumbnails to finish.
+/// `VEECUT_STUDIO_AT` seeks to a nonnegative time in seconds before the first capture.
 pub fn run(opts: StudioOptions) -> anyhow::Result<()> {
     let app = app::Studio::new(opts)?;
     let native = eframe::NativeOptions {

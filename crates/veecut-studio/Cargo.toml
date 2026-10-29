@@ -8,11 +8,13 @@ license.workspace = true
 anyhow.workspace = true
 eframe = "0.37"
 hound = "3.5"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 open = "5"
 rfd = "0.17"
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 serde_json.workspace = true
 tiny-skia = "0.12"
+ureq = "3"
 veecut-engine = { path = "../veecut-engine" }
 
 [dev-dependencies]

@@ -31,6 +31,11 @@ use crate::{
     timeline::Timeline,
 };
 
+#[path = "documentary.rs"]
+mod documentary;
+#[path = "footage_panel.rs"]
+mod footage_panel;
+
 // Unpinned review records stay off the timeline and survive ripple cuts.
 pub(crate) const AUTO_REVIEW_AT: f64 = -1.0;
 pub(crate) const AUTO_REVIEW_PREFIX: &str = "Auto-edit review: ";
@@ -38,6 +43,8 @@ pub(crate) const AUTO_REVIEW_PREFIX: &str = "Auto-edit review: ";
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Media,
+    Footage,
+    Sources,
     Text,
     Captions,
     LookAudio,
@@ -177,6 +184,12 @@ pub(crate) struct Studio {
     new_kind: VideoKind,
     new_canvas: Canvas,
     new_source: Option<PathBuf>,
+    new_find: bool,
+    new_broll: Vec<PathBuf>,
+    footage: footage_panel::FootagePanel,
+    doc_work: Option<documentary::Work>,
+    cutout: documentary::Cutout,
+    source_reasons: HashMap<String, String>,
     close_error: Option<String>,
     capture: Option<Capture>,
     auto: Option<AutoEdit>,
@@ -237,6 +250,12 @@ impl Studio {
             new_kind: VideoKind::default(),
             new_canvas: Canvas::vertical(),
             new_source: None,
+            new_find: false,
+            new_broll: Vec::new(),
+            footage: footage_panel::FootagePanel::default(),
+            doc_work: None,
+            cutout: documentary::Cutout::default(),
+            source_reasons: HashMap::new(),
             close_error: None,
             capture: None,
             auto: None,
@@ -251,6 +270,29 @@ impl Studio {
         }
         studio.capture =
             Capture::from_env(studio.document.as_ref().map(|doc| doc.project.duration()))?;
+        if studio.capture.is_some() {
+            studio.tab = match std::env::var("VEECUT_STUDIO_TAB").as_deref() {
+                Ok("footage") => Tab::Footage,
+                Ok("sources") => Tab::Sources,
+                _ => Tab::Media,
+            };
+            if let Ok(item) = std::env::var("VEECUT_STUDIO_SELECT") {
+                studio.selection.insert(item);
+            }
+            if let Ok(at) = std::env::var("VEECUT_STUDIO_AT") {
+                let at: f64 = at.parse().context("VEECUT_STUDIO_AT must be seconds")?;
+                anyhow::ensure!(
+                    at.is_finite() && at >= 0.0,
+                    "VEECUT_STUDIO_AT must be finite and nonnegative"
+                );
+                studio.seek(at);
+            }
+            if studio.tab == Tab::Footage {
+                studio
+                    .footage
+                    .search(std::env::var("VEECUT_STUDIO_QUERY").unwrap_or_else(|_| "moon".into()));
+            }
+        }
         Ok(studio)
     }
 
@@ -432,6 +474,7 @@ impl Studio {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        self.poll_documentary();
         let reload = self.services.poll();
         if let Some(notice) = self.services.notice.take() {
             self.notice(notice);
@@ -653,6 +696,12 @@ impl Studio {
                     ui.colored_label(Color32::from_rgb(240, 202, 125), message);
                 }
             }
+            if let Some(work) = &self.doc_work {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(&work.progress);
+                });
+            }
         });
     }
 
@@ -680,6 +729,22 @@ impl Studio {
                     canvas_combo(ui, "new_canvas", &mut self.new_canvas);
                     if ui.button("Choose source file...").clicked() { self.new_source = rfd::FileDialog::new().add_filter("Video or audio", &["mp4", "mov", "mkv", "webm", "m4v", "mp3", "wav", "m4a", "aiff", "flac"]).pick_file(); }
                     if let Some(path) = &self.new_source { ui.label(path.display().to_string()); }
+                    if self.new_kind == VideoKind::Documentary {
+                        ui.checkbox(&mut self.new_find, "Find footage online (free, licence-tracked)");
+                        if ui.button("Choose B-roll files...").clicked() {
+                            if let Some(paths) = rfd::FileDialog::new().add_filter("Video or pictures", &["mp4", "mov", "mkv", "webm", "png", "jpg", "jpeg", "webp"]).pick_files() {
+                                self.new_broll.extend(paths);
+                            }
+                        }
+                        let mut remove = None;
+                        for (index, path) in self.new_broll.iter().enumerate() {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(filename(path));
+                                if ui.small_button("Remove").clicked() { remove = Some(index); }
+                            });
+                        }
+                        if let Some(index) = remove { self.new_broll.remove(index); }
+                    }
                     let ready = self.new_source.is_some() && !self.new_name.trim().is_empty() && self.auto.is_none();
                     ui.horizontal(|ui| {
                         if ui.add_enabled(ready, egui::Button::new("Auto-edit with the recipe")).on_hover_text("Transcribe, cut, frame, caption and mix by the rules for this kind of video, then open the result").clicked() {
@@ -726,6 +791,10 @@ impl Studio {
         request.sources = vec![source];
         request.canvas = Some(self.new_canvas.clone());
         request.name = Some(self.new_name.trim().to_string());
+        if self.new_kind == VideoKind::Documentary {
+            request.find = self.new_find;
+            request.broll = self.new_broll.clone();
+        }
         // The editor previews in place; render from Export when the edit looks right.
         request.render = false;
         let workspace = self.workspace.clone();
@@ -753,6 +822,8 @@ impl Studio {
                 ui.horizontal_wrapped(|ui| {
                     for (tab, label) in [
                         (Tab::Media, "Media"),
+                        (Tab::Footage, "Footage"),
+                        (Tab::Sources, "Sources"),
                         (Tab::Text, "Text"),
                         (Tab::Captions, "Captions"),
                         (Tab::LookAudio, "Look & Audio"),
@@ -767,6 +838,13 @@ impl Studio {
                     .id_salt("library_scroll")
                     .show(ui, |ui| match self.tab {
                         Tab::Media => self.media_ui(ui),
+                        Tab::Footage => {
+                            let can_add = self.doc_work.is_none();
+                            if let Some((id, at_playhead)) = self.footage.show(ui, can_add) {
+                                self.fetch_footage(id, at_playhead);
+                            }
+                        }
+                        Tab::Sources => self.sources_ui(ui),
                         Tab::Text => {
                             ui.heading("Text presets");
                             for (preset, label) in text_presets() {
@@ -1247,7 +1325,41 @@ impl Studio {
                             self.export.path = path.display().to_string();
                         }
                     }
-                    if ui.button("Export").clicked() {
+                    let blockers = if self.export.final_quality {
+                        self.document
+                            .as_ref()
+                            .map(|doc| veecut_engine::footage::blocking_sources(&doc.project))
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    for (asset, source) in &blockers {
+                        ui.colored_label(
+                            Color32::LIGHT_RED,
+                            format!(
+                                "{}: {}",
+                                source.title,
+                                source
+                                    .flag_reason
+                                    .as_deref()
+                                    .unwrap_or("Rights need review")
+                            ),
+                        );
+                        if ui
+                            .button(format!("Approve (I checked the rights): {asset}"))
+                            .clicked()
+                        {
+                            self.apply(vec![documentary::source_set(
+                                asset,
+                                "approved",
+                                json!(true),
+                            )]);
+                        }
+                    }
+                    if ui
+                        .add_enabled(blockers.is_empty(), egui::Button::new("Export"))
+                        .clicked()
+                    {
                         start = true;
                     }
                 });
@@ -1294,6 +1406,12 @@ impl Studio {
         let Some(doc) = &self.document else {
             return;
         };
+        if self.export.final_quality {
+            if let Err(error) = veecut_engine::footage::check_final(&doc.project) {
+                self.notice(format!("{error:#}"));
+                return;
+            }
+        }
         let out = PathBuf::from(self.export.path.trim());
         if out.as_os_str().is_empty() {
             self.notice("Choose an output path");
@@ -1386,6 +1504,7 @@ impl eframe::App for Studio {
                     egui::ScrollArea::vertical()
                         .id_salt("inspector_scroll")
                         .show(ui, |ui| {
+                            self.cutout_ui(ui);
                             if let Some(doc) = &self.document {
                                 let selected = self.selection.iter().next().map(String::as_str);
                                 let changes = inspector::show(ui, &doc.project, selected);
@@ -1399,13 +1518,14 @@ impl eframe::App for Studio {
         }
         self.export_dialog(&ctx);
         if let Some(capture) = &mut self.capture {
-            let preview_ready = self.texture.is_some()
+            let preview_ready = (self.tab != Tab::Footage || self.footage.ready())
+                && self.texture.is_some()
                 && self
                     .wave_pending
                     .iter()
                     .all(|id| self.waveforms.contains_key(id));
             let agent_ready = self.services.agents_ready();
-            match capture.advance(&ctx, preview_ready, self.playback.position(), agent_ready) {
+            match capture.advance(&ctx, preview_ready, Some(self.playhead), agent_ready) {
                 Ok(capture::Action::Play) => self.toggle_play(&ctx),
                 Ok(capture::Action::ShowAgent) => {
                     self.tab = Tab::Agent;
@@ -1506,7 +1626,7 @@ fn canvas_combo(ui: &mut egui::Ui, id: &str, canvas: &mut Canvas) -> bool {
         });
     changed
 }
-fn text_presets() -> [(TextPreset, &'static str); 11] {
+fn text_presets() -> [(TextPreset, &'static str); 16] {
     [
         (TextPreset::Hook, "Hook"),
         (TextPreset::Title, "Title"),
@@ -1519,6 +1639,11 @@ fn text_presets() -> [(TextPreset, &'static str); 11] {
         (TextPreset::List, "List"),
         (TextPreset::Kinetic, "Kinetic"),
         (TextPreset::Cta, "Call to action"),
+        (TextPreset::Keyword, "Keyword"),
+        (TextPreset::Chapter, "Chapter"),
+        (TextPreset::Shock, "Shock"),
+        (TextPreset::BlackCard, "Black card"),
+        (TextPreset::Mega, "Mega"),
     ]
 }
 fn format_timecode(seconds: f64, fps: f64) -> String {

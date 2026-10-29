@@ -25,12 +25,17 @@ const FITS: [(Fit, &str); 2] = [
     (Fit::Cover, "Cover (fill and crop)"),
     (Fit::Contain, "Contain (letterbox)"),
 ];
-const TRANSITIONS: [(TransitionKind, &str); 3] = [
+const TRANSITIONS: [(TransitionKind, &str); 8] = [
     (TransitionKind::Crossfade, "Crossfade"),
     (TransitionKind::Dip, "Dip to black"),
     (TransitionKind::Flash, "Flash"),
+    (TransitionKind::Negative, "Negative"),
+    (TransitionKind::Glitch, "Glitch"),
+    (TransitionKind::Tiles, "Tiles"),
+    (TransitionKind::Focus, "Focus"),
+    (TransitionKind::Whip, "Whip"),
 ];
-const PRESETS: [(TextPreset, &str); 11] = [
+const PRESETS: [(TextPreset, &str); 16] = [
     (TextPreset::Hook, "Hook"),
     (TextPreset::Title, "Title"),
     (TextPreset::Card, "Card"),
@@ -42,6 +47,11 @@ const PRESETS: [(TextPreset, &str); 11] = [
     (TextPreset::List, "List"),
     (TextPreset::Kinetic, "Kinetic"),
     (TextPreset::Cta, "Call to action"),
+    (TextPreset::Keyword, "Keyword"),
+    (TextPreset::Chapter, "Chapter"),
+    (TextPreset::Shock, "Shock"),
+    (TextPreset::BlackCard, "Black card"),
+    (TextPreset::Mega, "Mega"),
 ];
 const ANIMS: [(Anim, &str); 9] = [
     (Anim::None, "None"),
@@ -59,12 +69,22 @@ const ALIGNS: [(Align, &str); 3] = [
     (Align::Center, "Center"),
     (Align::Right, "Right"),
 ];
-const MODES: [(CaptionMode, &str); 5] = [
+const MODES: [(CaptionMode, &str); 6] = [
     (CaptionMode::WordPop, "Word pop"),
     (CaptionMode::Highlight, "Highlight"),
     (CaptionMode::Pills, "Pills"),
     (CaptionMode::Subtitle, "Subtitle"),
+    (CaptionMode::Reveal, "Reveal"),
     (CaptionMode::Off, "Off"),
+];
+const GRADES: [(Option<TreatLook>, &str); 7] = [
+    (None, "None"),
+    (Some(TreatLook::Natural), "Natural"),
+    (Some(TreatLook::Teal), "Teal"),
+    (Some(TreatLook::Mono), "Mono"),
+    (Some(TreatLook::Warm), "Warm"),
+    (Some(TreatLook::Cold), "Cold"),
+    (Some(TreatLook::Invert), "Invert"),
 ];
 
 /// Inspector for the selected item, or project settings when nothing is selected.
@@ -138,6 +158,9 @@ pub(crate) fn captions(ui: &mut Ui, project: &Project) -> Vec<Op> {
         ch |= slider(ui, "Outline (fraction of size)", &mut s.stroke, 0.0..=0.5);
         ch |= ui.checkbox(&mut s.shadow, "Shadow").changed();
         ch |= ui.checkbox(&mut s.uppercase, "Uppercase").changed();
+        ch |= ui
+            .checkbox(&mut s.ink_on_light, "Ink on light pictures")
+            .changed();
         ch |= slider(
             ui,
             "Vertical position (0 top, 1 bottom)",
@@ -357,6 +380,55 @@ fn clip_fields(ui: &mut Ui, project: &Project, item: &Item, kind: TrackKind, c: 
         ch |= optional(ui, "Subject focus", &mut c.focus, Point::CENTER, point);
         ch
     });
+    ch |= section(ui, "Grade", true, |ui| {
+        let mut look = c.grade.as_ref().map(|grade| grade.look);
+        let mut ch = pick(ui, "grade", "Look", &mut look, &GRADES);
+        if ch {
+            match look {
+                Some(look) => c.grade.get_or_insert_with(Treatment::default).look = look,
+                None => c.grade = None,
+            }
+        }
+        if let Some(grade) = &mut c.grade {
+            ch |= slider(ui, "Halftone", &mut grade.halftone, 0.0..=1.0);
+            ch |= slider(ui, "Vignette", &mut grade.vignette, 0.0..=1.0);
+            ch |= optional(
+                ui,
+                "Recolor",
+                &mut grade.recolor,
+                Recolor {
+                    from: 0.0,
+                    to: 30.0,
+                    target: 120.0,
+                },
+                |_, _| false,
+            );
+            if let Some(recolor) = &mut grade.recolor {
+                ch |= slider(ui, "From (degrees)", &mut recolor.from, 0.0..=360.0);
+                ch |= slider(ui, "To (degrees)", &mut recolor.to, 0.0..=360.0);
+                ch |= slider(ui, "Target (degrees)", &mut recolor.target, 0.0..=360.0);
+            }
+        }
+        ch
+    });
+    if c.mask.is_some() {
+        ch |= section(ui, "Mask", true, |ui| {
+            let Some(mask) = &mut c.mask else {
+                return false;
+            };
+            let name = project
+                .asset(&mask.asset)
+                .and_then(|asset| asset.path.file_name())
+                .map(|name| name.to_string_lossy());
+            ui.label(name.as_deref().unwrap_or(&mask.asset));
+            let mut ch = slider(ui, "Outline", &mut mask.outline, 0.0..=0.05);
+            if ui.button("Remove mask").clicked() {
+                c.mask = None;
+                ch = true;
+            }
+            ch
+        });
+    }
     ch |= section(ui, "Zooms", true, |ui| {
         let mut ch = false;
         let mut remove = None;
@@ -402,23 +474,28 @@ fn clip_fields(ui: &mut Ui, project: &Project, item: &Item, kind: TrackKind, c: 
     ch |= section(ui, "Fades and transition", true, |ui| {
         let mut ch = drag(ui, "Fade in", &mut c.fade_in, 0.0..=dur, 0.02, " s");
         ch |= drag(ui, "Fade out", &mut c.fade_out, 0.0..=dur, 0.02, " s");
-        if kind == TrackKind::Main {
-            let default = Transition {
-                kind: TransitionKind::Crossfade,
-                duration: 0.5,
-            };
-            ch |= optional(
-                ui,
-                "Transition from previous clip",
-                &mut c.transition,
-                default,
-                |ui, t| {
-                    let mut ch = combo(ui, "transition", &mut t.kind, &TRANSITIONS);
-                    ch |= dv(ui, &mut t.duration, 0.0..=10.0, 0.02, " s");
-                    ch
-                },
-            );
-        }
+        let default = Transition {
+            kind: TransitionKind::Crossfade,
+            duration: transition_default(TransitionKind::Crossfade, project.canvas.fps, dur),
+        };
+        ch |= optional(
+            ui,
+            if kind == TrackKind::Main {
+                "Transition from previous clip"
+            } else {
+                "Entrance transition"
+            },
+            &mut c.transition,
+            default,
+            |ui, t| {
+                let mut ch = combo(ui, "transition", &mut t.kind, &TRANSITIONS);
+                if ch {
+                    t.duration = transition_default(t.kind, project.canvas.fps, dur);
+                }
+                ch |= dv(ui, &mut t.duration, 0.0..=dur, 0.02, " s");
+                ch
+            },
+        );
         ch
     });
     ch |= section(ui, "Frame (picture in picture)", false, |ui| {
@@ -440,6 +517,16 @@ fn clip_fields(ui: &mut Ui, project: &Project, item: &Item, kind: TrackKind, c: 
         ch
     });
     ch
+}
+
+fn transition_default(kind: TransitionKind, fps: f64, duration: f64) -> f64 {
+    let seconds = match kind {
+        TransitionKind::Crossfade | TransitionKind::Dip => 0.5,
+        TransitionKind::Flash => 1.0 / fps,
+        TransitionKind::Negative | TransitionKind::Glitch | TransitionKind::Whip => 4.0 / fps,
+        TransitionKind::Tiles | TransitionKind::Focus => 9.0 / fps,
+    };
+    seconds.min(duration)
 }
 
 fn text_fields(ui: &mut Ui, t: &mut Text) -> bool {
@@ -768,6 +855,24 @@ fn rect(ui: &mut Ui, r: &mut Rect) -> bool {
 mod tests {
     use super::*;
     use veecut_engine::ops;
+
+    #[test]
+    fn transition_defaults_use_project_frames_and_fit_clip() {
+        for fps in [24.0, 60.0] {
+            for (kind, _) in TRANSITIONS {
+                let expected = match kind {
+                    TransitionKind::Crossfade | TransitionKind::Dip => 0.5,
+                    TransitionKind::Flash => 1.0 / fps,
+                    TransitionKind::Negative | TransitionKind::Glitch | TransitionKind::Whip => {
+                        4.0 / fps
+                    }
+                    TransitionKind::Tiles | TransitionKind::Focus => 9.0 / fps,
+                };
+                assert_eq!(transition_default(kind, fps, 2.0), expected);
+                assert_eq!(transition_default(kind, fps, 0.01), 0.01);
+            }
+        }
+    }
 
     fn text_item() -> Item {
         Item {

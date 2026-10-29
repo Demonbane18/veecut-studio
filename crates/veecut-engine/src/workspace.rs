@@ -58,9 +58,10 @@ This folder is a VeeCut video editing workspace.
 <!-- veecut:end -->
 ";
 
-const GITIGNORE: &str = "inbox/\noutbox/\nprojects/*/.cache/\n.env\nmy-sounds/\n";
+const GITIGNORE: &str =
+    "inbox/\noutbox/\nprojects/*/.cache/\n.env\nmy-sounds/\nfootage/\n.veecut/find/\n";
 
-const ENV_TEMPLATE: &str = "# Optional keys for VeeCut. This file is never committed or shown.\n# Free Groq key for fast transcription: https://console.groq.com/keys\n# GROQ_API_KEY=\n# Raises GitHub's rate limit for skill installs.\n# GITHUB_TOKEN=\n";
+const ENV_TEMPLATE: &str = "# Optional keys for VeeCut. This file is never committed or shown.\n# Free Groq key for fast transcription: https://console.groq.com/keys\n# GROQ_API_KEY=\n# Raises GitHub's rate limit for skill installs.\n# GITHUB_TOKEN=\n# Free Pexels key: adds Pexels photos and videos to `veecut find`. https://www.pexels.com/api/\n# PEXELS_API_KEY=\n";
 
 /// A VeeCut workspace folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,6 +130,11 @@ impl Workspace {
 
     pub fn outbox(&self) -> PathBuf {
         self.root.join("outbox")
+    }
+
+    /// Downloaded found material (`veecut fetch`), never edited after download.
+    pub fn footage(&self) -> PathBuf {
+        self.root.join("footage")
     }
 
     pub fn projects(&self) -> PathBuf {
@@ -550,7 +556,7 @@ fn slugify(name: &str) -> String {
 }
 
 /// `to` written relative to the folder `from` (both absolute and sharing a root).
-fn relative(from: &Path, to: &Path) -> PathBuf {
+pub(crate) fn relative(from: &Path, to: &Path) -> PathBuf {
     let from: Vec<_> = from.components().collect();
     let to: Vec<_> = to.components().collect();
     let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();

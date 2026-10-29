@@ -98,7 +98,7 @@ pub(super) fn punch_ins(
     }
 }
 
-fn source_video(job: &Job) -> Result<PathBuf> {
+pub(super) fn source_video(job: &Job) -> Result<PathBuf> {
     job.req
         .sources
         .first()
@@ -107,14 +107,14 @@ fn source_video(job: &Job) -> Result<PathBuf> {
         .context("no video to edit: put a recording in inbox/ or pass its path")
 }
 
-fn stem(path: &Path) -> String {
+pub(super) fn stem(path: &Path) -> String {
     path.file_stem()
         .unwrap_or_default()
         .to_string_lossy()
         .replace(['_', '.'], " ")
 }
 
-fn note_reviews(job: &mut Job, removed: &[analyze::Removal]) {
+pub(super) fn note_reviews(job: &mut Job, removed: &[analyze::Removal]) {
     for r in removed.iter().filter(|r| r.review) {
         job.report.review.push(format!(
             "Possible {:?} kept at {:.2}-{:.2}s of the source: \"{}\". If it is a mistake, cut it.",
@@ -123,7 +123,7 @@ fn note_reviews(job: &mut Job, removed: &[analyze::Removal]) {
     }
 }
 
-fn cut_summary(job: &mut Job, removed: &[analyze::Removal], before: f64, after: f64) {
+pub(super) fn cut_summary(job: &mut Job, removed: &[analyze::Removal], before: f64, after: f64) {
     let applied = removed.iter().filter(|r| !r.review);
     let (mut pauses, mut mistakes) = (0, 0);
     for r in applied {
@@ -460,7 +460,7 @@ pub(super) fn podcast(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<(
 }
 
 /// Points every main-track clip's framing and punch-ins at the face.
-fn set_focus(p: &mut Project, face: Option<Point>) {
+pub(super) fn set_focus(p: &mut Project, face: Option<Point>) {
     let Some(f) = face else { return };
     for item in &mut p.main_mut().items {
         if let Some(c) = item.clip_mut() {

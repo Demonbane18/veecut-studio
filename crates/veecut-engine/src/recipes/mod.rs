@@ -5,6 +5,7 @@
 //! MIT); see CREDITS.md.
 
 mod beat;
+mod documentary;
 mod speech;
 
 use std::path::{Path, PathBuf};
@@ -24,7 +25,7 @@ use crate::style::{Format, Pace, Sound, Style};
 use crate::transcribe::{self, Provider, TranscribeOptions};
 use crate::transcript::Transcript;
 use crate::workspace::Workspace;
-use crate::{captions, media, qa};
+use crate::{captions, media, qa, sfx};
 
 /// What to edit.
 #[derive(Clone, Debug)]
@@ -52,6 +53,8 @@ pub struct EditRequest {
     pub clips: usize,
     /// Render a draft at the end.
     pub render: bool,
+    /// Documentary edits: search free, licence-tracked footage for lines without B-roll.
+    pub find: bool,
 }
 
 impl EditRequest {
@@ -70,6 +73,7 @@ impl EditRequest {
             transcribe: None,
             clips: 3,
             render: true,
+            find: false,
         }
     }
 }
@@ -110,8 +114,7 @@ pub fn edit(
         VideoKind::Vlog | VideoKind::Promo | VideoKind::MusicVideo => {
             beat::edit(&mut job, progress)?
         }
-        // TEMP: the documentary recipe lands with the integrator's next pass.
-        VideoKind::Documentary => speech::talking_head(&mut job, progress)?,
+        VideoKind::Documentary => documentary::edit(&mut job, progress)?,
     }
     Ok(job.report)
 }
@@ -129,9 +132,13 @@ impl Job<'_> {
         let mut canvas = match (&self.req.canvas, self.req.kind) {
             (Some(c), _) => c.clone(),
             (None, VideoKind::TalkingHeadShort | VideoKind::Clips) => Canvas::vertical(),
-            (None, VideoKind::TalkingHeadLong | VideoKind::Tutorial | VideoKind::Podcast) => {
-                Canvas::landscape()
-            }
+            (
+                None,
+                VideoKind::TalkingHeadLong
+                | VideoKind::Tutorial
+                | VideoKind::Podcast
+                | VideoKind::Documentary,
+            ) => Canvas::landscape(),
             (None, _) => self
                 .style
                 .canvases()
@@ -481,13 +488,11 @@ pub(crate) fn music_bed(
 }
 
 /// Sound effects on visible actions (text landing), never on every cut, cycling through the
-/// files in `my-sounds/sfx` so repeats do not sound like a loop. Skipped for voice-only styles.
+/// files in `my-sounds/sfx` so repeats do not sound like a loop; without files, a soft tick from
+/// the built-in synthesized kit (an idea from NextPhase Editor V1, whose kit is made in code).
+/// Skipped for voice-only styles.
 pub(crate) fn text_sfx(job: &mut Job, dir: &Path, project: &mut Project) -> Result<()> {
     if job.style.sound() == Sound::VoiceOnly {
-        return Ok(());
-    }
-    let files = audio_files(&job.ws.root.join("my-sounds/sfx"));
-    if files.is_empty() {
         return Ok(());
     }
     let starts: Vec<f64> = project
@@ -499,6 +504,26 @@ pub(crate) fn text_sfx(job: &mut Job, dir: &Path, project: &mut Project) -> Resu
         .map(|i| i.start)
         .collect();
     if starts.is_empty() {
+        return Ok(());
+    }
+    let files = audio_files(&job.ws.root.join("my-sounds/sfx"));
+    if files.is_empty() {
+        let cues: Vec<sfx::Cue> = starts
+            .iter()
+            .map(|&at| sfx::Cue {
+                at,
+                sound: sfx::Sound::Tick,
+            })
+            .collect();
+        let voice = project
+            .assets
+            .iter()
+            .find(|a| matches!(a.role, AssetRole::Source | AssetRole::Voice) && a.has_audio)
+            .and_then(|a| sfx::loudness(&project.asset_path(dir, a), None).ok());
+        let placed = sfx::place(job.ws, project, dir, &cues, voice)?;
+        job.report.summary.push(format!(
+            "Sound effects on {placed} text moments (a soft tick from the built-in kit)"
+        ));
         return Ok(());
     }
     let mut ids = Vec::new();

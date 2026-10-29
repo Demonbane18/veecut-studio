@@ -375,8 +375,8 @@ fn apply_inner(p: &mut Project, op: &Op) -> Result<Applied> {
                     preset: *preset,
                     style: style.clone().unwrap_or_default(),
                     position: *position,
-                    anim_in: anim_in.unwrap_or_default(),
-                    anim_out: anim_out.unwrap_or_default(),
+                    anim_in: anim_in.unwrap_or(preset.default_anim()),
+                    anim_out: anim_out.unwrap_or(preset.default_anim()),
                 }),
             });
             Ok(applied(

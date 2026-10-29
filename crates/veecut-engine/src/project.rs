@@ -611,7 +611,7 @@ pub enum Fit {
 /// A camera move inside a clip: punch-in when `ease` is 0, a smooth push otherwise.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Zoom {
-    /// Seconds from the clip's timeline start.
+    /// Seconds from the clip's timeline start. Negative when the zoom began before the clip.
     pub at: f64,
     pub duration: f64,
     /// 1.0 is no zoom; 1.12 is a typical punch-in.
@@ -864,6 +864,17 @@ pub enum TextPreset {
     /// A huge red word behind the speaker. It is drawn under the overlay tracks, so a cut-out of
     /// the speaker on an overlay track stands in front of it.
     Mega,
+}
+
+impl TextPreset {
+    /// The animation `add_text` uses when none is given. Shock words, black cards and the mega
+    /// word cut on hard; the keyword's blur-in belongs to its preset look, not to this.
+    pub fn default_anim(self) -> Anim {
+        match self {
+            TextPreset::Shock | TextPreset::BlackCard | TextPreset::Mega => Anim::None,
+            _ => Anim::Fade,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1349,7 +1360,10 @@ impl Project {
                     }
                 }
                 for z in &c.zooms {
-                    if !(z.scale >= 1.0 && z.scale <= 4.0) || z.duration <= 0.0 || z.at < 0.0 {
+                    // A negative `at` keeps the phase of a zoom that began before this clip,
+                    // for example on a cut-out copied from part of a main-track clip.
+                    if !(z.scale >= 1.0 && z.scale <= 4.0) || z.duration <= 0.0 || !z.at.is_finite()
+                    {
                         bail!(
                             "clip {id}: zoom at {}s needs scale 1..4 and a positive duration",
                             z.at
@@ -1371,7 +1385,10 @@ impl Project {
                         bail!("clip {id}: grade halftone and vignette must be between 0 and 1");
                     }
                     if let Some(r) = g.recolor {
-                        if ![r.from, r.to, r.target].iter().all(|d| (0.0..=360.0).contains(d)) {
+                        if ![r.from, r.to, r.target]
+                            .iter()
+                            .all(|d| (0.0..=360.0).contains(d))
+                        {
                             bail!("clip {id}: recolor hues must be degrees between 0 and 360");
                         }
                     }
@@ -1385,8 +1402,12 @@ impl Project {
                         Some(_) => bail!("clip {id}: mask asset {:?} has no picture", m.asset),
                         None => bail!("clip {id}: mask asset {:?} is not in the project", m.asset),
                     }
-                    if !(m.offset.is_finite() && m.offset >= 0.0) || !(0.0..=0.05).contains(&m.outline) {
-                        bail!("clip {id}: mask offset must be 0 or more and outline between 0 and 0.05");
+                    if !(m.offset.is_finite() && m.offset >= 0.0)
+                        || !(0.0..=0.05).contains(&m.outline)
+                    {
+                        bail!(
+                            "clip {id}: mask offset must be 0 or more and outline between 0 and 0.05"
+                        );
                     }
                 }
                 Ok(())

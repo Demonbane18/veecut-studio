@@ -701,6 +701,15 @@ impl Preset {
                 p.position.y = safe.y + safe.h * 0.53;
                 p.uppercase = true;
             }
+            // TEMP: the graphics owner gives each documentary preset its own look.
+            TextPreset::Keyword
+            | TextPreset::Chapter
+            | TextPreset::Shock
+            | TextPreset::BlackCard
+            | TextPreset::Mega => {
+                p.size = 0.12;
+                p.uppercase = true;
+            }
         }
         p
     }

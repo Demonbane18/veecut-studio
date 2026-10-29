@@ -34,9 +34,12 @@ const SKILL_FILES: &[(&str, &str)] = &[
     skill_file!("workflows/explainer.md"),
     skill_file!("workflows/promo.md"),
     skill_file!("workflows/music-video.md"),
+    skill_file!("workflows/documentary.md"),
     skill_file!("reference/editor-api.md"),
     skill_file!("reference/notes-and-rules.md"),
     skill_file!("reference/style-setup.md"),
+    skill_file!("reference/sourcing.md"),
+    skill_file!("reference/sound.md"),
 ];
 
 const BLOCK_START: &str = "<!-- veecut:start -->";

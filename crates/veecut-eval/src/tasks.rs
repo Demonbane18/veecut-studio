@@ -151,6 +151,7 @@ pub fn templates(
         VideoKind::Explainer => "Make an explainer from this narration and these pictures",
         VideoKind::Promo => "Make a product promo from these clips, music and copy",
         VideoKind::MusicVideo => "Make a music video with these visuals, song and lyrics",
+        VideoKind::Documentary => "Make a fast documentary edit of my talking-head video",
     };
     let files = fixture
         .files

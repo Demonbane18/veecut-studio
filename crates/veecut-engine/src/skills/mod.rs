@@ -254,7 +254,7 @@ pub fn recommended<'a>(catalog: &'a Catalog, kind: VideoKind, n: usize) -> Vec<&
         VideoKind::Tutorial => &["explainer", "editing"],
         VideoKind::Explainer => &["explainer", "motion"],
         VideoKind::Promo => &["promo", "motion"],
-        VideoKind::Vlog => &["editing", "motion"],
+        VideoKind::Vlog | VideoKind::Documentary => &["editing", "motion"],
         VideoKind::MusicVideo => &["music"],
     };
     let mut found: Vec<&Entry> = catalog

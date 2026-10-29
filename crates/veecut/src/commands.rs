@@ -34,7 +34,7 @@ pub struct Out {
 }
 
 impl Out {
-    fn new(text: impl Into<String>, json: Value) -> Self {
+    pub(crate) fn new(text: impl Into<String>, json: Value) -> Self {
         Out {
             text: text.into(),
             json,
@@ -344,7 +344,7 @@ fn aspect_of(s: &str) -> Result<Canvas> {
         .ok_or_else(|| anyhow!("unknown aspect {s:?}; use 9:16, 16:9, 4:5 or 1:1"))
 }
 
-fn rel(ws: &Workspace, path: &Path) -> String {
+pub(crate) fn rel(ws: &Workspace, path: &Path) -> String {
     path.strip_prefix(&ws.root)
         .unwrap_or(path)
         .display()

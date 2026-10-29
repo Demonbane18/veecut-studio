@@ -110,6 +110,8 @@ pub fn edit(
         VideoKind::Vlog | VideoKind::Promo | VideoKind::MusicVideo => {
             beat::edit(&mut job, progress)?
         }
+        // TEMP: the documentary recipe lands with the integrator's next pass.
+        VideoKind::Documentary => speech::talking_head(&mut job, progress)?,
     }
     Ok(job.report)
 }

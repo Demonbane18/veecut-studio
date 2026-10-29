@@ -38,10 +38,13 @@ pub enum VideoKind {
     Promo,
     /// Music or lyric video.
     MusicVideo,
+    /// Talking head cut into a fast documentary: found footage on most lines, the speaker's face
+    /// between runs, a click on every change (idea from NextPhase Editor V1).
+    Documentary,
 }
 
 impl VideoKind {
-    pub const ALL: [VideoKind; 9] = [
+    pub const ALL: [VideoKind; 10] = [
         VideoKind::TalkingHeadShort,
         VideoKind::TalkingHeadLong,
         VideoKind::Tutorial,
@@ -51,6 +54,7 @@ impl VideoKind {
         VideoKind::Explainer,
         VideoKind::Promo,
         VideoKind::MusicVideo,
+        VideoKind::Documentary,
     ];
 
     /// Kebab-case name used on the command line and in workflow file names.
@@ -65,6 +69,7 @@ impl VideoKind {
             VideoKind::Explainer => "explainer",
             VideoKind::Promo => "promo",
             VideoKind::MusicVideo => "music-video",
+            VideoKind::Documentary => "documentary",
         }
     }
 
@@ -79,6 +84,7 @@ impl VideoKind {
             VideoKind::Explainer => "Faceless explainer",
             VideoKind::Promo => "Product promo",
             VideoKind::MusicVideo => "Music or lyric video",
+            VideoKind::Documentary => "Documentary edit (talking head with found footage)",
         }
     }
 
@@ -372,6 +378,9 @@ pub enum CaptionMode {
     Pills,
     /// Full-sentence subtitles, no animation.
     Subtitle,
+    /// Small words appear one by one in their final places as they are said, and the line clears
+    /// when it ends. Emphasis words switch to the serif accent face (documentary style).
+    Reveal,
     /// No captions.
     Off,
 }
@@ -401,6 +410,10 @@ pub struct CaptionStyle {
     /// and busy footage alike (Herk Edit Kit's house look).
     #[serde(default)]
     pub boxed: bool,
+    /// On light pictures the words turn dark ink with a soft light halo, instead of getting a
+    /// dark box behind them (documentary style).
+    #[serde(default)]
+    pub ink_on_light: bool,
     #[serde(default = "yes")]
     pub uppercase: bool,
     /// Vertical center of the caption block as a fraction of the canvas height
@@ -451,6 +464,7 @@ impl Default for CaptionStyle {
             stroke: default_caption_stroke(),
             shadow: true,
             boxed: false,
+            ink_on_light: false,
             uppercase: true,
             position: default_caption_position(),
             max_words: default_caption_words(),
@@ -482,6 +496,8 @@ pub enum AssetRole {
     Voice,
     Image,
     Logo,
+    /// A cut-out mask made by `veecut cutout`: brightness is opacity. Not shown on its own.
+    Mask,
 }
 
 /// A media file the project uses. The file is never modified.
@@ -615,15 +631,94 @@ pub enum TransitionKind {
     Crossfade,
     /// Dip through black.
     Dip,
-    /// A quick white flash.
+    /// A quick white flash. On an overlay clip: a white box the size of its frame.
     Flash,
+    /// Inverted frames on both sides of the cut: a chapter entry or a hard turn.
+    Negative,
+    /// A few frames of sliced, colour-split datamosh landing on this clip.
+    Glitch,
+    /// A 3x3 grid whose panes switch to this clip one per frame in a shuffled order, each pane
+    /// a white box for one frame first.
+    Tiles,
+    /// This clip opens out of focus and racks sharp.
+    Focus,
+    /// The previous picture zooms out faster and faster over its last frames, then this clip
+    /// cuts in.
+    Whip,
 }
 
-/// Transition from the previous main-track clip into this one.
+/// How a clip comes in. On the main track it is a transition from the previous clip; on an
+/// overlay track it is how the clip enters over the picture below it (crossfade fades it in,
+/// flash is a white box in its frame, tiles reveal it pane by pane). Only crossfade overlaps the
+/// previous main-track clip; the others are cut effects whose `duration` is the effect length.
+/// Typical lengths at 30 fps: flash 1 frame, negative 4 (2 out, 2 in), glitch 4, tiles 9,
+/// focus 9, whip 4.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Transition {
     pub kind: TransitionKind,
     pub duration: f64,
+}
+
+/// A per-clip colour treatment, so every piece of found material looks like part of one film.
+/// The speaker's own camera normally has none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TreatLook {
+    /// The picture as it is, with a little contrast and colour push.
+    #[default]
+    Natural,
+    /// Split tone: teal shadows and cream highlights, partly desaturated. Places, buildings.
+    Teal,
+    /// Hard black and white with deep contrast. Documents, prices, archive, a serious beat.
+    Mono,
+    /// Amber and sepia. Fire, money, history.
+    Warm,
+    /// Cold steel blue. Technology, night, distance.
+    Cold,
+    /// A photographic negative. Flashes and strobe images.
+    Invert,
+}
+
+/// Turns one band of hues into another hue ("the red one, then the green one").
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Recolor {
+    /// Start of the hue band in degrees (0 red, 120 green, 240 blue). `from` above `to` wraps
+    /// through red.
+    pub from: f32,
+    /// End of the hue band in degrees.
+    pub to: f32,
+    /// The hue the band becomes, in degrees.
+    pub target: f32,
+}
+
+/// Colour treatment for one clip, applied to its own picture before it is composited.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Treatment {
+    #[serde(default)]
+    pub look: TreatLook,
+    /// Strength (0 to 1) of a printed dot screen in the shadows, so stock stills look less stock.
+    #[serde(default)]
+    pub halftone: f32,
+    /// Darkening toward the edges, 0 to 1.
+    #[serde(default)]
+    pub vignette: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recolor: Option<Recolor>,
+}
+
+/// Cuts a clip out along a mask, for example the speaker cut out of their own camera. The mask
+/// is a video the size of the clip's asset whose brightness is the clip's opacity; it is framed
+/// exactly like the clip. Mask time = the clip's source time minus `offset`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Mask {
+    /// Asset id of the mask video.
+    pub asset: String,
+    /// Source time in the clip's asset where the mask video starts.
+    #[serde(default)]
+    pub offset: f64,
+    /// Width of a white sticker edge around the cut-out, as a fraction of the canvas height.
+    #[serde(default)]
+    pub outline: f32,
 }
 
 /// Slow pan and zoom over a still image (or a video).
@@ -678,6 +773,12 @@ pub struct Clip {
     /// Audio tracks: lower this clip while someone speaks (music beds).
     #[serde(default)]
     pub duck: bool,
+    /// Colour treatment of this clip's own picture (documentary grades).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade: Option<Treatment>,
+    /// Cut the clip out along a mask video (the speaker in front of a changing world).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<Mask>,
 }
 
 impl Clip {
@@ -699,6 +800,8 @@ impl Clip {
             transition: None,
             ken_burns: None,
             duck: false,
+            grade: None,
+            mask: None,
         }
     }
 
@@ -750,6 +853,17 @@ pub enum TextPreset {
     Kinetic,
     /// End card call to action.
     Cta,
+    /// The stressed word of a line: big white sans that blurs in (documentary).
+    Keyword,
+    /// A chapter name or a proper title in italic serif with a chrome fill and a drop shadow.
+    Chapter,
+    /// One shocking word in red serif capitals that cuts on hard. Once or twice a minute at most.
+    Shock,
+    /// A small word alone on a black frame: "nothing", "no one", a beat of silence.
+    BlackCard,
+    /// A huge red word behind the speaker. It is drawn under the overlay tracks, so a cut-out of
+    /// the speaker on an overlay track stands in front of it.
+    Mega,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -858,6 +972,49 @@ pub struct FaceSample {
     pub h: f32,
 }
 
+/// Where a found file came from and what its licence allows. `veecut fetch` and the documentary
+/// recipe fill it in; `veecut sources` lists it; a final render refuses flagged sources that
+/// nobody approved.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Source {
+    /// The page that describes the file (not the raw file address).
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// The licence in short form: "public domain", "CC0", "CC BY 4.0", "CC BY-SA 3.0",
+    /// "Pexels License", or "unknown".
+    pub license: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_url: Option<String>,
+    /// The credit line the licence asks for, ready for the video description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit: Option<String>,
+    /// The service it came from: nasa, commons, archive, openverse, pexels, or user.
+    #[serde(default)]
+    pub provider: String,
+    /// The rights are unclear, so a person must check before a final render.
+    #[serde(default)]
+    pub flag: bool,
+    /// Why it is flagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag_reason: Option<String>,
+    /// The user checked the flagged rights and approved the file.
+    #[serde(default)]
+    pub approved: bool,
+    /// Download date, YYYY-MM-DD.
+    #[serde(default)]
+    pub retrieved: String,
+}
+
+impl Source {
+    /// Flagged and not yet approved by a person.
+    pub fn blocks_final(&self) -> bool {
+        self.flag && !self.approved
+    }
+}
+
 /// One edit.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Project {
@@ -882,6 +1039,9 @@ pub struct Project {
     /// them to stay off the mouth and chin. Replace them with `{"op":"set","path":"/faces",...}`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub faces: BTreeMap<String, Vec<FaceSample>>,
+    /// Provenance and licence of found files, by asset id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sources: BTreeMap<String, Source>,
 }
 
 impl Project {
@@ -914,6 +1074,7 @@ impl Project {
             ],
             markers: Vec::new(),
             faces: BTreeMap::new(),
+            sources: BTreeMap::new(),
         }
     }
 
@@ -1130,6 +1291,9 @@ impl Project {
                 bail!("id {:?} is used twice", a.id);
             }
         }
+        if let Some(id) = self.sources.keys().find(|id| self.asset(id).is_none()) {
+            bail!("sources lists {id:?}, which is not an asset of this project");
+        }
         for track in &self.tracks {
             if !ids.insert(track.id.as_str()) {
                 bail!("id {:?} is used twice", track.id);
@@ -1195,6 +1359,34 @@ impl Project {
                 if let Some(f) = c.frame {
                     if f.w <= 0.0 || f.h <= 0.0 {
                         bail!("clip {id}: frame needs a positive width and height");
+                    }
+                }
+                if let Some(tr) = &c.transition {
+                    if !(tr.duration.is_finite() && tr.duration >= 0.0) {
+                        bail!("clip {id}: transition duration must be 0 or more seconds");
+                    }
+                }
+                if let Some(g) = &c.grade {
+                    if !(0.0..=1.0).contains(&g.halftone) || !(0.0..=1.0).contains(&g.vignette) {
+                        bail!("clip {id}: grade halftone and vignette must be between 0 and 1");
+                    }
+                    if let Some(r) = g.recolor {
+                        if ![r.from, r.to, r.target].iter().all(|d| (0.0..=360.0).contains(d)) {
+                            bail!("clip {id}: recolor hues must be degrees between 0 and 360");
+                        }
+                    }
+                }
+                if let Some(m) = &c.mask {
+                    if track.kind == TrackKind::Audio {
+                        bail!("clip {id}: a mask only works on picture tracks");
+                    }
+                    match self.asset(&m.asset) {
+                        Some(a) if a.kind != AssetKind::Audio => {}
+                        Some(_) => bail!("clip {id}: mask asset {:?} has no picture", m.asset),
+                        None => bail!("clip {id}: mask asset {:?} is not in the project", m.asset),
+                    }
+                    if !(m.offset.is_finite() && m.offset >= 0.0) || !(0.0..=0.05).contains(&m.outline) {
+                        bail!("clip {id}: mask offset must be 0 or more and outline between 0 and 0.05");
                     }
                 }
                 Ok(())

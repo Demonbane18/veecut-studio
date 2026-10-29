@@ -313,6 +313,8 @@ fn dip_flash(project: &Project, t: f64) -> (f32, f32) {
             TransitionKind::Dip => black = black.max(peak),
             TransitionKind::Flash => white = white.max(peak),
             TransitionKind::Crossfade => {}
+            // TEMP: the render owner replaces this with the real cut effects.
+            _ => {}
         }
     }
     (black, white)

@@ -1,4 +1,8 @@
-//! Checks a rendered file: size, length, loudness, black frames.
+//! Checks a rendered file: size, length, loudness, black frames; `check_words` checks its words.
+
+mod words;
+
+pub use words::{WordIssue, WordsReport, check_words};
 
 use std::path::Path;
 use std::process::Command;
@@ -117,7 +121,7 @@ fn analyze(path: &Path, has_audio: bool) -> Result<(Option<f32>, Option<f32>, Ve
     Ok((lufs, peak, black_segments(&err)))
 }
 
-fn section_value(text: &str, section: &str, prefix: &str) -> Option<f32> {
+pub(crate) fn section_value(text: &str, section: &str, prefix: &str) -> Option<f32> {
     let rest = text.split(section).nth(1)?;
     let end = rest.find("\n\n").unwrap_or(rest.len().min(400));
     for line in rest[..end].lines() {
@@ -162,7 +166,7 @@ fn first_f32(s: &str) -> Option<f32> {
     num.parse().ok()
 }
 
-fn tail(s: &str) -> String {
+pub(crate) fn tail(s: &str) -> String {
     let lines: Vec<&str> = s.lines().rev().take(6).collect();
     lines.into_iter().rev().collect::<Vec<_>>().join("\n")
 }

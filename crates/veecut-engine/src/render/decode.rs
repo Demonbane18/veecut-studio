@@ -15,10 +15,12 @@ use crate::project::{AssetKind, Clip, Fit, Point, Rect};
 
 use super::math::{self, CropRect};
 
+#[derive(Clone)]
 pub(crate) struct FrameReq {
     pub id: String,
     pub path: PathBuf,
     pub image: bool,
+    /// Picture size the framing is computed for (the clip asset's size).
     pub src_w: u32,
     pub src_h: u32,
     pub src_t: f64,
@@ -30,6 +32,11 @@ pub(crate) struct FrameReq {
     pub dec_w: u32,
     pub dec_h: u32,
     pub pad: [u8; 3],
+    /// The file is another size than `src_w` x `src_h` (a mask): stretch it to that size first
+    /// so it frames exactly like the clip.
+    pub stretch: bool,
+    /// No frame (a mask past its end) is a transparent picture, not an error.
+    pub optional: bool,
 }
 
 pub(crate) fn video_filter(speed: f64, fps: f64, framing: &str) -> String {
@@ -37,18 +44,35 @@ pub(crate) fn video_filter(speed: f64, fps: f64, framing: &str) -> String {
     format!("setpts=(PTS-STARTPTS)/{speed:.6},fps={fps:.6}:round=near,{framing}")
 }
 
-fn framing_filter(req: &FrameReq, crop: Option<(u32, u32, u32, u32)>) -> String {
+/// `clear_pad`: letterbox bars are transparent (sources with an alpha plane).
+fn framing_filter(req: &FrameReq, crop: Option<(u32, u32, u32, u32)>, clear_pad: bool) -> String {
+    let stretch = if req.stretch {
+        format!(
+            "scale={}:{}:flags=bilinear,",
+            req.src_w.max(2),
+            req.src_h.max(2)
+        )
+    } else {
+        String::new()
+    };
     match req.fit {
         Fit::Cover => {
             let (x, y, w, h) = crop.unwrap_or((0, 0, req.src_w.max(2), req.src_h.max(2)));
             format!(
-                "crop={w}:{h}:{x}:{y},scale={}:{}:flags=bicubic,setsar=1",
+                "{stretch}crop={w}:{h}:{x}:{y},scale={}:{}:flags=bicubic,setsar=1",
                 req.dec_w, req.dec_h
             )
         }
         Fit::Contain => format!(
-            "scale={}:{}:force_original_aspect_ratio=decrease:flags=bicubic,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=0x{:02X}{:02X}{:02X},setsar=1",
-            req.dec_w, req.dec_h, req.dec_w, req.dec_h, req.pad[0], req.pad[1], req.pad[2]
+            "{stretch}scale={}:{}:force_original_aspect_ratio=decrease:flags=bicubic,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=0x{:02X}{:02X}{:02X}{},setsar=1",
+            req.dec_w,
+            req.dec_h,
+            req.dec_w,
+            req.dec_h,
+            req.pad[0],
+            req.pad[1],
+            req.pad[2],
+            if clear_pad { "@0" } else { "" }
         ),
     }
 }
@@ -110,7 +134,15 @@ impl Drop for VideoDecoder {
 }
 
 impl VideoDecoder {
-    fn spawn(path: &Path, src_t: f64, src_len: f64, filter: &str, w: u32, h: u32) -> Result<Self> {
+    fn spawn(
+        path: &Path,
+        src_t: f64,
+        src_len: f64,
+        filter: &str,
+        w: u32,
+        h: u32,
+        vp9_alpha: bool,
+    ) -> Result<Self> {
         let mut cmd = Command::new(ffmpeg()?);
         // No -noautorotate: phone rotation metadata is applied. +genpts keeps VFR timestamps usable.
         cmd.args([
@@ -123,6 +155,10 @@ impl VideoDecoder {
         ]);
         cmd.arg("-ss").arg(format!("{src_t:.6}"));
         cmd.arg("-t").arg(format!("{src_len:.6}"));
+        if vp9_alpha {
+            // ffmpeg's own VP9 decoder drops the alpha plane of transparent WebM; libvpx keeps it.
+            cmd.args(["-c:v", "libvpx-vp9"]);
+        }
         cmd.arg("-i").arg(path);
         cmd.args([
             "-vf", filter, "-an", "-f", "rawvideo", "-pix_fmt", "rgba", "-",
@@ -166,11 +202,12 @@ impl VideoDecoder {
         })
     }
 
-    fn read_owned(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut buf = vec![0u8; self.frame_bytes];
-        match self.stdout.read_exact(&mut buf) {
-            Ok(()) => Ok(Some(buf)),
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+    /// Reads the next frame into `buf`. False at the end of the stream.
+    fn read_into(&mut self, buf: &mut Vec<u8>) -> Result<bool> {
+        buf.resize(self.frame_bytes, 0);
+        match self.stdout.read_exact(buf) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
             Err(e) => {
                 let detail = self.stderr_tail();
                 bail!(
@@ -204,6 +241,7 @@ struct Slot {
     image: bool,
     dec: Option<VideoDecoder>,
     pixels: Vec<u8>,
+    spare: Vec<u8>,
     w: u32,
     h: u32,
     map: FocusMap,
@@ -211,6 +249,9 @@ struct Slot {
     step: f64,
     next_i: u64,
     has_frame: bool,
+    /// Some pixel of the source is not opaque (checked on the first frame).
+    alpha: bool,
+    alpha_checked: bool,
     generation: u64,
 }
 
@@ -221,6 +262,7 @@ pub(crate) struct DecoderPool {
     generation: u64,
     resizer: Resizer,
     probes: HashMap<PathBuf, (u32, u32)>,
+    alpha_info: HashMap<PathBuf, AlphaInfo>,
     resize_opts: ResizeOptions,
 }
 
@@ -232,6 +274,7 @@ impl DecoderPool {
             generation: 0,
             resizer: Resizer::new(),
             probes: HashMap::new(),
+            alpha_info: HashMap::new(),
             resize_opts: ResizeOptions::new()
                 .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
                 .use_alpha(false),
@@ -251,8 +294,24 @@ impl DecoderPool {
         Ok((info.width, info.height))
     }
 
+    /// Whether a file has an alpha plane and needs the libvpx decoder to keep it. Probed only
+    /// where it matters: WebM/Matroska (VP9 alpha) and letterboxed fits (clear bars).
+    fn alpha_info(&mut self, path: &Path, fit: Fit) -> AlphaInfo {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        if fit != Fit::Contain && !matches!(ext.as_deref(), Some("webm" | "mkv")) {
+            return AlphaInfo::default();
+        }
+        *self
+            .alpha_info
+            .entry(path.to_path_buf())
+            .or_insert_with(|| probe_alpha(path))
+    }
+
     /// Writes the zoomed picture into `dest` (RGBA, `dest_w` x `dest_h`). Returns whether the
-    /// source pixels are opaque.
+    /// picture may be transparent somewhere (decoded alpha, or no frame for an optional one).
     pub fn fill(
         &mut self,
         req: &FrameReq,
@@ -276,20 +335,39 @@ impl DecoderPool {
             .pixel(focus, req.dec_w as f64, req.dec_h as f64);
         let (x, y, w, h) =
             math::zoom_window(req.dec_w as f64, req.dec_h as f64, scale as f64, fx, fy);
-        let opaque = !self.slots[idx].image;
+        let slot = &self.slots[idx];
+        let alpha = slot.alpha || !slot.has_frame;
         self.blit_zoom(idx, x, y, w, h, dest_w, dest_h, dest)?;
-        Ok(opaque)
+        Ok(alpha)
     }
 
     pub fn end_frame(&mut self) {
         let g = self.generation;
         if self.drop_unused {
             self.slots.retain(|s| s.image || s.generation == g);
-        } else if self.slots.len() > 4 {
+        } else if self.slots.len() > 6 {
             self.slots.sort_by_key(|s| std::cmp::Reverse(s.generation));
-            self.slots.truncate(4);
+            self.slots.truncate(6);
         }
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn spawn(&mut self, req: &FrameReq) -> Result<(FocusMap, VideoDecoder)> {
+        let info = self.alpha_info(&req.path, req.fit);
+        let (map, filter) = video_framing(req, info.alpha);
+        let src_len = (req.src_out - req.src_t)
+            .max(req.speed / req.fps.max(1.0))
+            .max(0.04);
+        let dec = VideoDecoder::spawn(
+            &req.path,
+            req.src_t.max(0.0),
+            src_len,
+            &filter,
+            req.dec_w,
+            req.dec_h,
+            info.libvpx,
+        )?;
+        Ok((map, dec))
     }
 
     fn open_slot(&mut self, req: &FrameReq) -> Result<()> {
@@ -297,18 +375,7 @@ impl DecoderPool {
             let (pixels, map) = frame_image(req)?;
             (pixels, map, None)
         } else {
-            let (map, filter) = video_framing(req);
-            let src_len = (req.src_out - req.src_t)
-                .max(req.speed / req.fps.max(1.0))
-                .max(0.04);
-            let dec = VideoDecoder::spawn(
-                &req.path,
-                req.src_t.max(0.0),
-                src_len,
-                &filter,
-                req.dec_w,
-                req.dec_h,
-            )?;
+            let (map, dec) = self.spawn(req)?;
             (Vec::new(), map, Some(dec))
         };
         let step = req.speed / req.fps.max(1.0);
@@ -317,6 +384,7 @@ impl DecoderPool {
             image: req.image,
             dec,
             pixels,
+            spare: Vec::new(),
             w: req.dec_w,
             h: req.dec_h,
             map,
@@ -324,9 +392,13 @@ impl DecoderPool {
             step,
             next_i: 0,
             has_frame: req.image,
+            alpha: false,
+            alpha_checked: false,
             generation: self.generation,
         };
-        if !req.image {
+        if req.image {
+            check_alpha(&mut slot);
+        } else {
             pull(&mut slot, req)?;
         }
         self.slots.push(slot);
@@ -354,18 +426,7 @@ impl DecoderPool {
             return Ok(());
         }
         // Jump. Restart at the requested source time.
-        let (map, filter) = video_framing(req);
-        let src_len = (req.src_out - req.src_t)
-            .max(req.speed / req.fps.max(1.0))
-            .max(0.04);
-        let dec = VideoDecoder::spawn(
-            &req.path,
-            req.src_t.max(0.0),
-            src_len,
-            &filter,
-            req.dec_w,
-            req.dec_h,
-        )?;
+        let (map, dec) = self.spawn(req)?;
         let slot = &mut self.slots[idx];
         slot.dec = Some(dec);
         slot.map = map;
@@ -413,48 +474,89 @@ impl DecoderPool {
         }
         let src = ImageRef::new(slot.w, slot.h, &slot.pixels, PixelType::U8x4)
             .map_err(|e| anyhow!("decoded frame is the wrong size: {e}"))?;
-        let mut dst = Image::new(dest_w, dest_h, PixelType::U8x4);
-        let opts = resize_opts.use_alpha(slot.image).crop(x, y, w, h);
+        let mut dst = Image::from_slice_u8(dest_w, dest_h, dest, PixelType::U8x4)
+            .map_err(|e| anyhow!("clip buffer is the wrong size: {e}"))?;
+        let opts = resize_opts.use_alpha(slot.alpha).crop(x, y, w, h);
         resizer
             .resize(&src, &mut dst, &opts)
             .map_err(|e| anyhow!("scaling a clip frame failed: {e}"))?;
-        dest.copy_from_slice(dst.buffer());
         Ok(())
     }
 }
 
-fn pull(slot: &mut Slot, req: &FrameReq) -> Result<bool> {
-    let read = match slot.dec.as_mut() {
-        Some(dec) => dec.read_owned(),
-        None => return Ok(slot.has_frame),
+#[derive(Clone, Copy, Default)]
+struct AlphaInfo {
+    alpha: bool,
+    libvpx: bool,
+}
+
+/// Asks ffprobe for the first video stream's codec, pixel format and VP9 alpha tag.
+fn probe_alpha(path: &Path) -> AlphaInfo {
+    let Ok(probe) = media::ffprobe() else {
+        return AlphaInfo::default();
     };
-    match read {
-        Ok(Some(buf)) => {
-            slot.pixels = buf;
-            slot.has_frame = true;
-            slot.next_i += 1;
-            Ok(true)
-        }
-        Ok(None) => {
-            if !slot.has_frame {
-                let detail = slot
-                    .dec
-                    .as_mut()
-                    .map(|d| d.stderr_tail())
-                    .unwrap_or_default();
-                bail!(
-                    "ffmpeg returned no frame from {} at {:.3}s{}",
-                    req.path.display(),
-                    req.src_t,
-                    fmt_detail(&detail)
-                );
-            }
-            // Hold the last frame. The clip ran out a frame early (VFR or a short file).
-            slot.next_i += 1;
-            Ok(false)
-        }
-        Err(e) => Err(e),
+    let mut cmd = Command::new(probe);
+    cmd.args([
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name,pix_fmt:stream_tags=alpha_mode",
+        "-of",
+        "csv=p=0",
+    ])
+    .arg(path);
+    let Ok(out) = media::run(&mut cmd) else {
+        return AlphaInfo::default();
+    };
+    let out = String::from_utf8_lossy(&out);
+    let mut fields = out.trim().split(',');
+    let (codec, fmt, tag) = (fields.next(), fields.next().unwrap_or(""), fields.next());
+    let libvpx = codec == Some("vp9") && tag == Some("1");
+    let alpha_fmt = ["yuva", "gbrap", "ya", "pal8"]
+        .iter()
+        .any(|p| fmt.starts_with(p))
+        || ["rgba", "bgra", "argb", "abgr"]
+            .iter()
+            .any(|p| fmt.contains(p));
+    AlphaInfo {
+        alpha: libvpx || alpha_fmt,
+        libvpx,
     }
+}
+
+fn check_alpha(slot: &mut Slot) {
+    if !slot.alpha_checked && slot.has_frame {
+        slot.alpha = slot.pixels.iter().skip(3).step_by(4).any(|&a| a != 255);
+        slot.alpha_checked = true;
+    }
+}
+
+fn pull(slot: &mut Slot, req: &FrameReq) -> Result<bool> {
+    let Some(dec) = slot.dec.as_mut() else {
+        return Ok(slot.has_frame);
+    };
+    if dec.read_into(&mut slot.spare)? {
+        std::mem::swap(&mut slot.pixels, &mut slot.spare);
+        slot.has_frame = true;
+        slot.next_i += 1;
+        check_alpha(slot);
+        return Ok(true);
+    }
+    if !slot.has_frame && !req.optional {
+        let detail = dec.stderr_tail();
+        bail!(
+            "ffmpeg returned no frame from {} at {:.3}s{}",
+            req.path.display(),
+            req.src_t,
+            fmt_detail(&detail)
+        );
+    }
+    // Hold the last frame. The clip ran out a frame early (VFR or a short file). An optional
+    // picture with no frame at all stays transparent.
+    slot.next_i += 1;
+    Ok(false)
 }
 
 /// The map from source points to the decoded picture, and the source window ffmpeg crops for
@@ -508,13 +610,13 @@ fn video_map(
     }
 }
 
-fn video_framing(req: &FrameReq) -> (FocusMap, String) {
+fn video_framing(req: &FrameReq, clear_pad: bool) -> (FocusMap, String) {
     let (map, crop) = video_map(
         req.fit, req.src_w, req.src_h, req.dec_w, req.dec_h, req.focus,
     );
     (
         map,
-        video_filter(req.speed, req.fps, &framing_filter(req, crop)),
+        video_filter(req.speed, req.fps, &framing_filter(req, crop, clear_pad)),
     )
 }
 
@@ -565,6 +667,13 @@ fn frame_image(req: &FrameReq) -> Result<(Vec<u8>, FocusMap)> {
         .with_context(|| format!("decoding image {}", req.path.display()))?
         .to_rgba8();
     let (sw, sh) = (img.width().max(1), img.height().max(1));
+    // Framing geometry: a stretched mask frames as if it were the clip's size.
+    let (gw, gh) = if req.stretch {
+        (req.src_w.max(1), req.src_h.max(1))
+    } else {
+        (sw, sh)
+    };
+    let (kx, ky) = (sw as f64 / gw as f64, sh as f64 / gh as f64);
     let raw = img.into_raw();
     let src = ImageRef::new(sw, sh, &raw, PixelType::U8x4).map_err(|e| {
         anyhow!(
@@ -579,34 +688,37 @@ fn frame_image(req: &FrameReq) -> Result<(Vec<u8>, FocusMap)> {
     match req.fit {
         Fit::Cover => {
             let crop = math::cover_crop(
-                sw as f64,
-                sh as f64,
+                gw as f64,
+                gh as f64,
                 req.dec_w as f64,
                 req.dec_h as f64,
                 req.focus.x as f64,
                 req.focus.y as f64,
             );
             let mut dst = Image::new(req.dec_w, req.dec_h, PixelType::U8x4);
+            let px_crop = opts.crop(crop.x * kx, crop.y * ky, crop.w * kx, crop.h * ky);
             resizer
-                .resize(&src, &mut dst, &opts.crop(crop.x, crop.y, crop.w, crop.h))
+                .resize(&src, &mut dst, &px_crop)
                 .map_err(|e| anyhow!("scaling image {} failed: {e}", req.path.display()))?;
             let map = FocusMap::Cover {
                 crop,
-                src_w: sw as f64,
-                src_h: sh as f64,
+                src_w: gw as f64,
+                src_h: gh as f64,
             };
             Ok((dst.into_vec(), map))
         }
         Fit::Contain => {
-            let scale = (req.dec_w as f64 / sw as f64).min(req.dec_h as f64 / sh as f64);
-            let iw = ((sw as f64 * scale).round() as u32).clamp(1, req.dec_w);
-            let ih = ((sh as f64 * scale).round() as u32).clamp(1, req.dec_h);
+            let scale = (req.dec_w as f64 / gw as f64).min(req.dec_h as f64 / gh as f64);
+            let iw = ((gw as f64 * scale).round() as u32).clamp(1, req.dec_w);
+            let ih = ((gh as f64 * scale).round() as u32).clamp(1, req.dec_h);
             let mut fitted = Image::new(iw, ih, PixelType::U8x4);
             resizer
                 .resize(&src, &mut fitted, &opts)
                 .map_err(|e| anyhow!("scaling image {} failed: {e}", req.path.display()))?;
+            // Pictures with transparency get clear bars, like videos with an alpha plane.
+            let clear = raw.iter().skip(3).step_by(4).any(|&a| a != 255);
             let mut framed = vec![0u8; req.dec_w as usize * req.dec_h as usize * 4];
-            fill_rgba(&mut framed, req.pad);
+            fill_rgba(&mut framed, req.pad, if clear { 0 } else { 255 });
             let ox = (req.dec_w - iw) / 2;
             let oy = (req.dec_h - ih) / 2;
             blit_opaque(&mut framed, req.dec_w, fitted.buffer(), iw, ih, ox, oy);
@@ -614,20 +726,17 @@ fn frame_image(req: &FrameReq) -> Result<(Vec<u8>, FocusMap)> {
                 ox: ox as f64,
                 oy: oy as f64,
                 scale,
-                src_w: sw as f64,
-                src_h: sh as f64,
+                src_w: gw as f64,
+                src_h: gh as f64,
             };
             Ok((framed, map))
         }
     }
 }
 
-fn fill_rgba(buf: &mut [u8], rgb: [u8; 3]) {
+fn fill_rgba(buf: &mut [u8], rgb: [u8; 3], alpha: u8) {
     for px in buf.chunks_exact_mut(4) {
-        px[0] = rgb[0];
-        px[1] = rgb[1];
-        px[2] = rgb[2];
-        px[3] = 255;
+        px.copy_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
     }
 }
 

@@ -1,8 +1,11 @@
-//! Rust compositor: decodes clips through ffmpeg, applies fit, zooms, transitions and the color look, draws graphics, mixes audio and encodes through ffmpeg.
+//! Rust compositor: decodes clips through ffmpeg, applies fit, zooms, per-clip grades, masks,
+//! transitions and the color look, draws graphics, mixes audio and encodes through ffmpeg.
 
 mod audio;
 mod compose;
 mod decode;
+mod fx;
+mod grade;
 mod math;
 
 use std::io::Write;

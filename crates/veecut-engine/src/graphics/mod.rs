@@ -110,6 +110,11 @@ impl Graphics {
         }
     }
 
+    /// Draws only `mega` text items: the compositor calls it after the main track and before the
+    /// overlay tracks, so a cut-out of the speaker stands in front of the word.
+    /// TEMP: the graphics owner implements it and makes `draw` skip mega items.
+    pub fn draw_behind(&mut self, _project: &Project, _t: f64, _pixmap: &mut PixmapMut<'_>) {}
+
     /// Draws visible text and captions at timeline time `t`, scaled to the pixmap size.
     pub fn draw(&mut self, project: &Project, t: f64, pixmap: &mut PixmapMut<'_>) {
         if !t.is_finite() {

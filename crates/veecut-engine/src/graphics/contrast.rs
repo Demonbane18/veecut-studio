@@ -86,6 +86,10 @@ fn needs_scrim(background: f32, fills: &[f32]) -> bool {
     fills.iter().any(|fill| ratio(*fill, background) < 3.0)
 }
 
+pub(super) fn light_picture(target: &PixmapMut<'_>, region: Rect) -> bool {
+    sample_luminance(target, region) > 0.45
+}
+
 fn sample_luminance(target: &PixmapMut<'_>, region: Rect) -> f32 {
     let (width, height) = (target.width() as usize, target.height() as usize);
     let pixels = target.as_ref();

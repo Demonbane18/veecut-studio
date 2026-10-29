@@ -1,4 +1,6 @@
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, Weight, Wrap};
+use cosmic_text::{
+    Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, SwashCache, Weight, Wrap,
+};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
 
 use super::contrast::ContrastGuard;
@@ -12,6 +14,8 @@ pub(super) struct Span {
     pub color: Color,
     pub scale: f32,
     pub pill: bool,
+    pub italic: bool,
+    pub chrome: bool,
 }
 
 impl Span {
@@ -21,6 +25,8 @@ impl Span {
             color,
             scale: 1.0,
             pill: false,
+            italic: false,
+            chrome: false,
         }
     }
 }
@@ -40,6 +46,8 @@ pub(super) struct Spec<'a> {
     pub accent: Color,
     pub preset: Option<TextPreset>,
     pub weight: u16,
+    pub reveal: bool,
+    pub ink: bool,
 }
 
 pub(super) struct Layer {
@@ -100,15 +108,27 @@ fn shape(fonts: &mut FontSystem, spec: &Spec<'_>, size: f32, width: f32) -> Buff
         .map_or(spec.weight, |f| f.weight.0);
     let attrs = Attrs::new()
         .family(Family::Name(spec.font))
+        .style(if spec.font == "Playfair Display" {
+            Style::Italic
+        } else {
+            Style::Normal
+        })
         .weight(Weight(weight));
     b.set_rich_text(
         spec.spans.iter().enumerate().map(|(i, s)| {
             (
                 s.text.as_str(),
-                attrs
-                    .clone()
-                    .metadata(i)
-                    .metrics(Metrics::new(size * s.scale, size * 1.25 * s.scale)),
+                (if s.italic {
+                    attrs
+                        .clone()
+                        .family(Family::Name("Playfair Display"))
+                        .style(Style::Italic)
+                        .weight(Weight(700))
+                } else {
+                    attrs.clone()
+                })
+                .metadata(i)
+                .metrics(Metrics::new(size * s.scale, size * 1.25 * s.scale)),
             )
         }),
         &attrs,
@@ -272,7 +292,10 @@ pub(super) fn render(
                 },
             ));
             // Dark pill lettering needs no dark outline: it would fill the letter counters.
-            if marked || (spec.stroke <= 0.0 && !spec.shadow) {
+            if spec.spans[glyph.metadata].color.a == 0
+                || marked
+                || (spec.stroke <= 0.0 && !spec.shadow)
+            {
                 continue;
             }
             let physical = glyph.physical((padding, run.line_y + padding), 1.0);
@@ -296,7 +319,55 @@ pub(super) fn render(
         flush(&mut image, pill);
     }
     if let Some(path) = outlines.finish() {
-        if spec.shadow {
+        if spec.shadow
+            && (spec.reveal
+                || matches!(
+                    spec.preset,
+                    Some(TextPreset::Chapter | TextPreset::Shock | TextPreset::Mega)
+                )
+                || spec.ink)
+        {
+            let mut shadow = Pixmap::new(width, height)?;
+            shadow.fill_path(
+                &path,
+                &paint(if spec.ink {
+                    Color::rgba(255, 255, 255, 210)
+                } else {
+                    Color::rgba(0, 0, 0, 180)
+                }),
+                FillRule::Winding,
+                Transform::from_translate(0.0, size * 0.035),
+                None,
+            );
+            let shadow = blurred(&shadow, (size * 0.055).max(1.0))?;
+            image.draw_pixmap(
+                0,
+                0,
+                shadow.as_ref(),
+                &tiny_skia::PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+            if spec.reveal && !spec.ink {
+                let mut bloom = Pixmap::new(width, height)?;
+                bloom.fill_path(
+                    &path,
+                    &paint(Color::rgba(255, 255, 255, 50)),
+                    FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+                let bloom = blurred(&bloom, (size * 0.035).max(1.0))?;
+                image.draw_pixmap(
+                    0,
+                    0,
+                    bloom.as_ref(),
+                    &tiny_skia::PixmapPaint::default(),
+                    Transform::identity(),
+                    None,
+                );
+            }
+        } else if spec.shadow {
             let transform = Transform::from_translate(size * 0.025, size * 0.045);
             image.fill_path(
                 &path,
@@ -334,7 +405,15 @@ pub(super) fn render(
     for run in b.layout_runs() {
         for glyph in run.glyphs {
             let physical = glyph.physical((padding, run.line_y + padding), 1.0);
-            let color = spec.spans[glyph.metadata].color;
+            let span = &spec.spans[glyph.metadata];
+            let color = if spec.ink && span.color == Color::WHITE {
+                Color::rgb(17, 17, 17)
+            } else {
+                span.color
+            };
+            if color.a == 0 {
+                continue;
+            }
             swash.with_pixels(
                 fonts,
                 physical.cache_key,
@@ -347,7 +426,18 @@ pub(super) fn render(
                     let a = (u16::from(pixel.a()) * u16::from(color.a) / 255) as u8;
                     let index = (y as usize * width as usize + x as usize) * 4;
                     let dst = &mut image.data_mut()[index..index + 4];
-                    for (d, c) in dst[..3].iter_mut().zip([pixel.r(), pixel.g(), pixel.b()]) {
+                    let rgb = if span.chrome && !spec.ink {
+                        let p = ((y as f32 - padding) / text_height).clamp(0.0, 1.0);
+                        let grey = if p < 0.45 {
+                            180.0 + 75.0 * p / 0.45
+                        } else {
+                            255.0 - 130.0 * (p - 0.45) / 0.55
+                        } as u8;
+                        [grey; 3]
+                    } else {
+                        [pixel.r(), pixel.g(), pixel.b()]
+                    };
+                    for (d, c) in dst[..3].iter_mut().zip(rgb) {
                         *d = ((u16::from(c) * u16::from(a)
                             + u16::from(*d) * u16::from(255 - a)
                             + 127)
@@ -359,7 +449,14 @@ pub(super) fn render(
         }
     }
     glyphs.sort_by_key(|(line, start, _)| (*line, *start));
-    let contrast = if spec.background.is_none_or(|color| color.a == 0) {
+    // Red display tiers sit directly on the picture, including behind a cut-out head.
+    let contrast = if !spec.ink
+        && !matches!(
+            spec.preset,
+            Some(TextPreset::Shock | TextPreset::Mega | TextPreset::BlackCard)
+        )
+        && spec.background.is_none_or(|color| color.a == 0)
+    {
         rounded_path(outer, radius).and_then(|path| {
             ContrastGuard::new(
                 path,
@@ -381,6 +478,32 @@ pub(super) fn render(
     })
 }
 
+/// Blur premultiplied RGBA, so transparent pixels cannot leave coloured fringes.
+pub(super) fn blurred(image: &Pixmap, sigma: f32) -> Option<Pixmap> {
+    use image::imageops::{FilterType, blur, resize};
+    let rgba = image::RgbaImage::from_raw(image.width(), image.height(), image.data().to_vec())?;
+    let blurred = if sigma >= 2.0 {
+        let small = resize(
+            &rgba,
+            image.width().div_ceil(4),
+            image.height().div_ceil(4),
+            FilterType::Triangle,
+        );
+        resize(
+            &blur(&small, sigma / 4.0),
+            image.width(),
+            image.height(),
+            FilterType::Triangle,
+        )
+    } else {
+        blur(&rgba, sigma)
+    };
+    Pixmap::from_vec(
+        blurred.into_raw(),
+        tiny_skia::IntSize::from_wh(image.width(), image.height())?,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +517,9 @@ mod tests {
             "Bebas Neue",
             "Archivo Black",
             "Inter",
+            "Playfair Display",
+            "Bodoni Moda",
+            "Montserrat",
         ] {
             let spec = Spec {
                 spans: vec![Span::new("Story".into(), Color::WHITE)],
@@ -409,7 +535,9 @@ mod tests {
                 edge: false,
                 accent: ACCENT,
                 preset: None,
-                weight: 800,
+                weight: if font == "Montserrat" { 900 } else { 800 },
+                reveal: false,
+                ink: false,
             };
             let buffer = shape(&mut graphics.fonts, &spec, 60.0, 800.0);
             for glyph in buffer.layout_runs().flat_map(|run| run.glyphs) {
@@ -419,6 +547,12 @@ mod tests {
                     "{font} silently fell back to {:?}",
                     face.families
                 );
+                if font == "Montserrat" {
+                    assert_eq!(face.weight.0, 900);
+                }
+                if font == "Playfair Display" {
+                    assert_eq!(face.style, cosmic_text::fontdb::Style::Italic);
+                }
             }
         }
     }
@@ -442,6 +576,8 @@ mod tests {
             accent: ACCENT,
             preset: None,
             weight: 800,
+            reveal: false,
+            ink: false,
         };
         let layer = render(&mut graphics.fonts, &mut graphics.swash, spec).unwrap();
         let first_line = layer

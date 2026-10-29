@@ -765,3 +765,229 @@ fn pages_without_any_face_data_count_as_unchecked() {
     assert_eq!(report.examples.len(), 2);
     assert!(report.examples.iter().all(|p| p.face == FaceFit::Off));
 }
+
+fn documentary_caption(canvas: Canvas) -> Project {
+    let mut p = Project::new("Documentary captions", VideoKind::Documentary, canvas);
+    p.captions.mode = CaptionMode::Reveal;
+    p.captions.size = 0.057;
+    p.captions.position = 0.52;
+    p.captions.uppercase = false;
+    p.captions.boxed = false;
+    p.tracks[3].items.push(Item {
+        id: "reveal".into(),
+        start: 0.0,
+        duration: 2.0,
+        body: ItemBody::Caption(Caption {
+            words: ["Every", "word", "matters"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, text)| Word {
+                    text: text.into(),
+                    start: i as f64 * 0.5,
+                    end: (i + 1) as f64 * 0.5,
+                    emphasis: i == 2,
+                })
+                .collect(),
+        }),
+    });
+    p
+}
+
+#[test]
+fn reveal_keeps_final_slots_leads_each_word_and_clears_at_page_end() {
+    let mut g = Graphics::new();
+    let p = documentary_caption(Canvas::vertical());
+    let draw = |g: &mut Graphics, t| {
+        let mut image = Pixmap::new(270, 480).unwrap();
+        image.fill(tiny_skia::Color::BLACK);
+        g.draw(&p, t, &mut image.as_mut());
+        image
+    };
+    let first = draw(&mut g, 0.2);
+    assert_eq!(first.data(), draw(&mut g, 0.42).data());
+    let second = draw(&mut g, 0.44);
+    assert_ne!(first.data(), second.data());
+    assert_eq!(second.data(), draw(&mut g, 0.9).data());
+    let final_page = draw(&mut g, 0.94);
+    assert_ne!(second.data(), final_page.data());
+    assert_eq!(final_page.data(), draw(&mut g, 1.49).data());
+    let clear = draw(&mut g, 1.5);
+    assert!(clear.data().chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
+    let ItemBody::Caption(caption) = &p.tracks[3].items[0].body else {
+        unreachable!()
+    };
+    let mut dimensions = Vec::new();
+    let mut positions = Vec::new();
+    for visible in 0..=3 {
+        let layer = g
+            .caption_layer(
+                &caption.words,
+                0..3,
+                3,
+                0,
+                &p.captions,
+                p.captions.size,
+                safe_area(&p.canvas),
+                270,
+                480,
+                visible,
+                false,
+            )
+            .unwrap();
+        dimensions.push((layer.width, layer.height));
+        positions.push(g.layers[&layer.key].glyphs.clone());
+    }
+    assert!(dimensions.windows(2).all(|pair| pair[0] == pair[1]));
+    assert!(positions.windows(2).all(|pair| pair[0] == pair[1]));
+    assert!(g.caption_placement_at(&p, 0.7).is_some());
+    assert!(g.caption_placement_at(&p, 1.5).is_none());
+    assert_eq!(g.caption_placements(&p)[0].end, 1.5);
+}
+
+#[test]
+fn mega_draws_only_behind_with_visibility_and_animation() {
+    let mut g = Graphics::new();
+    let mut p = Project::new("Mega", VideoKind::Documentary, Canvas::vertical());
+    p.tracks[2].items.push(sample(TextPreset::Mega, "WORLD"));
+    let mut frame = Pixmap::new(270, 480).unwrap();
+    g.draw(&p, 1.0, &mut frame.as_mut());
+    assert!(frame.data().iter().all(|&b| b == 0));
+    g.draw_behind(&p, 1.0, &mut frame.as_mut());
+    assert!(frame.data().chunks_exact(4).any(|p| p[3] > 0));
+    for at in [-0.1, 0.0, 4.0, f64::NAN] {
+        frame.fill(tiny_skia::Color::TRANSPARENT);
+        g.draw_behind(&p, at, &mut frame.as_mut());
+        assert!(frame.data().iter().all(|&b| b == 0));
+    }
+    p.tracks[2].hidden = true;
+    g.draw_behind(&p, 1.0, &mut frame.as_mut());
+    assert!(frame.data().iter().all(|&b| b == 0));
+}
+
+#[test]
+fn ink_switches_only_white_on_light_pictures() {
+    let mut g = Graphics::new();
+    let mut p = documentary_caption(Canvas::vertical());
+    let render = |g: &mut Graphics, p: &Project, light: bool| {
+        let mut frame = Pixmap::new(270, 480).unwrap();
+        frame.fill(if light {
+            tiny_skia::Color::WHITE
+        } else {
+            tiny_skia::Color::BLACK
+        });
+        g.draw(p, 1.0, &mut frame.as_mut());
+        frame
+    };
+    let dark = render(&mut g, &p, false);
+    let light_scrim = render(&mut g, &p, true);
+    p.captions.ink_on_light = true;
+    assert_eq!(dark.data(), render(&mut g, &p, false).data());
+    let ink = render(&mut g, &p, true);
+    assert_ne!(light_scrim.data(), ink.data());
+    assert!(
+        ink.data()
+            .chunks_exact(4)
+            .any(|p| p[0] == 17 && p[1] == 17 && p[2] == 17)
+    );
+    p.captions.color = Color::rgb(200, 20, 100);
+    let custom = render(&mut g, &p, true);
+    assert!(
+        custom
+            .data()
+            .chunks_exact(4)
+            .any(|p| p[..3] == [200, 20, 100])
+    );
+    p.tracks[3].items.clear();
+    p.tracks[2]
+        .items
+        .push(sample(TextPreset::Keyword, "White *accent*"));
+    let ink = render(&mut g, &p, true);
+    assert!(ink.data().chunks_exact(4).any(|p| p[..3] == [17, 17, 17]));
+    assert!(
+        ink.data()
+            .chunks_exact(4)
+            .any(|p| p[..3] == [ACCENT.r, ACCENT.g, ACCENT.b])
+    );
+    let dark = render(&mut g, &p, false);
+    assert!(
+        dark.data()
+            .chunks_exact(4)
+            .any(|p| p[..3] == [255, 255, 255])
+    );
+}
+
+/// Documentary presets, motion phases and caption contrast at full export sizes.
+/// Run with `cargo test -p veecut-engine --no-default-features documentary_proof -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn documentary_proof() {
+    let dir = std::path::Path::new("/tmp/veecut-doc/Graphics");
+    std::fs::create_dir_all(dir).unwrap();
+    let mut g = Graphics::new();
+    let mut preview = Canvas::vertical();
+    preview.width = 540;
+    preview.height = 960;
+    for canvas in [Canvas::vertical(), Canvas::landscape(), preview] {
+        for (preset, text) in [
+            (TextPreset::Keyword, "TRUTH"),
+            (TextPreset::Chapter, "New horizons"),
+            (TextPreset::Shock, "EXPOSED"),
+            (TextPreset::BlackCard, "nothing"),
+            (TextPreset::Mega, "WORLD"),
+        ] {
+            let mut p = Project::new("Documentary type", VideoKind::Documentary, canvas.clone());
+            let mut item = sample(preset, text);
+            if let ItemBody::Text(text) = &mut item.body {
+                text.anim_in = preset.default_anim();
+                text.anim_out = preset.default_anim();
+            }
+            p.tracks[2].items.push(item);
+            for (phase, t) in [("entrance", 1.0 / 30.0), ("settled", 1.0), ("exit", 3.95)] {
+                let mut frame = gradient(canvas.width, canvas.height);
+                g.draw_behind(&p, t, &mut frame.as_mut());
+                g.draw(&p, t, &mut frame.as_mut());
+                frame
+                    .save_png(dir.join(format!(
+                        "{preset:?}-{phase}-{}x{}.png",
+                        canvas.width, canvas.height
+                    )))
+                    .unwrap();
+            }
+        }
+        for light in [false, true] {
+            for ink in [false, true] {
+                let mut p = documentary_caption(canvas.clone());
+                p.captions.ink_on_light = ink;
+                for (phase, t) in [
+                    ("first", 0.1),
+                    ("second", 0.6),
+                    ("all", 1.1),
+                    ("clear", 1.6),
+                ] {
+                    let mut frame = Pixmap::new(canvas.width, canvas.height).unwrap();
+                    let v = if light { 235 } else { 24 };
+                    frame.fill(tiny_skia::Color::from_rgba8(v, v, v, 255));
+                    g.draw(&p, t, &mut frame.as_mut());
+                    frame
+                        .save_png(dir.join(format!(
+                            "Reveal-light{light}-ink{ink}-{phase}-{}x{}.png",
+                            canvas.width, canvas.height
+                        )))
+                        .unwrap();
+                }
+            }
+        }
+    }
+    let p = documentary_caption(Canvas::vertical());
+    let mut frame = Pixmap::new(1080, 1920).unwrap();
+    frame.fill(tiny_skia::Color::BLACK);
+    g.draw(&p, 1.0, &mut frame.as_mut());
+    let start = std::time::Instant::now();
+    for _ in 0..300 {
+        g.draw(&p, 1.0, &mut frame.as_mut());
+    }
+    println!(
+        "Documentary Reveal warm draw at 1080x1920: {:.3} ms/frame (300 frames, excludes clear/decode)",
+        start.elapsed().as_secs_f64() * 1000.0 / 300.0
+    );
+}

@@ -5,6 +5,16 @@
 //! Caption choices follow free247editor (MIT). Font files are OFL; licenses sit beside them.
 //! Montserrat comes from JulietaUla/Montserrat/fonts/ttf; other families from google/fonts/ofl.
 //! Inter is a static instance of that upstream font at wght=600, opsz=14 (fontTools 4.68).
+//! Playfair Display Bold Italic is Google's official static release at google/fonts commit
+//! d08233f9c581786e8c834a1f0695a4f27869c119. Bodoni Moda is a fontTools 4.68 static
+//! instance (wght=700, opsz=96) from google/fonts/ofl/bodonimoda at
+//! 634558fcbd9225a88591dec164f9fdb2716d0bf5. Montserrat Black is the designer's static TTF
+//! at 679ead9bcd0d6cef6d3712369dc49fe72e8bd8d7. All three retain their upstream OFL text.
+//! Documentary type sizes and six-frame keyword blur are from NextPhase Editor V1's published
+//! measurements. Reveal shapes the complete page, then hides future words without moving slots.
+//! `ink_on_light` changes white unboxed copy to dark ink on sampled light pictures; custom
+//! colours remain intact. Placement and caption reports use the same complete-page bounds.
+//! Run ignored `documentary_proof` for documentary PNGs and a warm draw benchmark.
 //! Run the ignored `visual_proof` test for PNG samples and a warm-frame draw benchmark.
 //! Caption pages keep off the speaker's mouth and chin when the project has face boxes; see
 //! `placement.rs` for the rule and `Graphics::caption_placements` for what was drawn where.
@@ -46,6 +56,9 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../assets/fonts/Poppins/Poppins-Bold.ttf"),
     include_bytes!("../../assets/fonts/ArchivoBlack/ArchivoBlack-Regular.ttf"),
     include_bytes!("../../assets/fonts/Inter/Inter-SemiBold.ttf"),
+    include_bytes!("../../assets/fonts/Montserrat/Montserrat-Black.ttf"),
+    include_bytes!("../../assets/fonts/PlayfairDisplay/PlayfairDisplay-BoldItalic.ttf"),
+    include_bytes!("../../assets/fonts/BodoniModa/BodoniModa-Bold.ttf"),
 ];
 
 /// Shaping and raster caches shared across frames. Keep one instance per playback/export.
@@ -73,6 +86,8 @@ impl Graphics {
             "Poppins",
             "Archivo Black",
             "Inter",
+            "Playfair Display",
+            "Bodoni Moda",
         ];
         let replaced: Vec<_> = fonts
             .db()
@@ -110,10 +125,35 @@ impl Graphics {
         }
     }
 
-    /// Draws only `mega` text items: the compositor calls it after the main track and before the
-    /// overlay tracks, so a cut-out of the speaker stands in front of the word.
-    /// TEMP: the graphics owner implements it and makes `draw` skip mega items.
-    pub fn draw_behind(&mut self, _project: &Project, _t: f64, _pixmap: &mut PixmapMut<'_>) {}
+    /// Draws only `mega` text. The compositor calls this before its first masked overlay track
+    /// (or after all overlays when none is masked), so a cut-out can stand in front of the word.
+    pub fn draw_behind(&mut self, project: &Project, t: f64, pixmap: &mut PixmapMut<'_>) {
+        if !t.is_finite() {
+            return;
+        }
+        let safe = safe_area(&project.canvas);
+        for track in &project.tracks {
+            if track.hidden || !matches!(track.kind, TrackKind::Text | TrackKind::Overlay) {
+                continue;
+            }
+            for item in &track.items {
+                if item.contains(t)
+                    && let ItemBody::Text(text) = &item.body
+                    && text.preset == TextPreset::Mega
+                {
+                    self.text(
+                        item,
+                        text,
+                        t,
+                        project.canvas.fps,
+                        project.captions.ink_on_light,
+                        safe,
+                        pixmap,
+                    );
+                }
+            }
+        }
+    }
 
     /// Draws visible text and captions at timeline time `t`, scaled to the pixmap size.
     pub fn draw(&mut self, project: &Project, t: f64, pixmap: &mut PixmapMut<'_>) {
@@ -156,8 +196,17 @@ impl Graphics {
                     for item in &track.items {
                         if item.contains(t)
                             && let ItemBody::Text(text) = &item.body
+                            && text.preset != TextPreset::Mega
                         {
-                            self.text(item, text, t, safe, pixmap);
+                            self.text(
+                                item,
+                                text,
+                                t,
+                                project.canvas.fps,
+                                project.captions.ink_on_light,
+                                safe,
+                                pixmap,
+                            );
                         }
                     }
                 }
@@ -240,9 +289,20 @@ impl Graphics {
         } else {
             range.clone()
         };
-        let Some(built) = self.caption_layer(
+        let visible = if style.mode == CaptionMode::Reveal {
+            if relative >= words[range.end - 1].end {
+                return;
+            }
+            words[range.clone()]
+                .iter()
+                .take_while(|word| relative >= word.start - 2.0 / fps.max(1.0))
+                .count()
+        } else {
+            usize::MAX
+        };
+        let Some(mut built) = self.caption_layer(
             words,
-            shown,
+            shown.clone(),
             line_break,
             spoken,
             style,
@@ -250,6 +310,8 @@ impl Graphics {
             safe,
             target.width(),
             target.height(),
+            visible,
+            false,
         ) else {
             return;
         };
@@ -264,6 +326,26 @@ impl Graphics {
             m.alpha = 1.0;
         }
         let position = Point::new(safe.x + safe.w / 2.0, choice.anchor);
+        if style.ink_on_light
+            && !style.boxed
+            && style.mode != CaptionMode::Subtitle
+            && light_behind(target, built, position, safe, m.scale)
+            && let Some(ink) = self.caption_layer(
+                words,
+                shown,
+                line_break,
+                spoken,
+                style,
+                style.size * choice.scale,
+                safe,
+                target.width(),
+                target.height(),
+                visible,
+                true,
+            )
+        {
+            built = ink;
+        }
         if let Some(layer) = self.layers.get(&built.key) {
             draw_layer(
                 layer,
@@ -293,8 +375,12 @@ impl Graphics {
         safe: Rect,
         w: u32,
         h: u32,
+        visible: usize,
+        ink: bool,
     ) -> Option<Built> {
         let mut hash = DefaultHasher::new();
+        visible.hash(&mut hash);
+        ink.hash(&mut hash);
         (style.mode as u8).hash(&mut hash);
         style.uppercase.hash(&mut hash);
         for word in &words[shown.clone()] {
@@ -328,9 +414,12 @@ impl Graphics {
                     ));
                 }
                 let pill = style.mode == CaptionMode::Pills && word.emphasis;
-                let color = if pill {
+                let color = if style.mode == CaptionMode::Reveal && index - shown.start >= visible {
+                    Color::rgba(255, 255, 255, 0)
+                } else if pill {
                     DARK
-                } else if word.emphasis || (style.mode == CaptionMode::Highlight && index == spoken)
+                } else if style.mode != CaptionMode::Reveal
+                    && (word.emphasis || (style.mode == CaptionMode::Highlight && index == spoken))
                 {
                     style.highlight
                 } else {
@@ -346,9 +435,21 @@ impl Graphics {
                     color,
                     scale: 1.0,
                     pill,
+                    italic: style.mode == CaptionMode::Reveal && word.emphasis,
+                    chrome: false,
                 });
             }
-            let font = self.family(&style.font).to_owned();
+            let font = self
+                .family(
+                    if style.mode == CaptionMode::Reveal
+                        && style.font == CaptionStyle::default().font
+                    {
+                        "Inter"
+                    } else {
+                        &style.font
+                    },
+                )
+                .to_owned();
             let subtitle = style.mode == CaptionMode::Subtitle;
             let size = fraction(size, 0.033) * h as f32 * if subtitle { 0.72 } else { 1.0 };
             let spec = Spec {
@@ -359,8 +460,12 @@ impl Graphics {
                 height: safe.h * h as f32 / 1.08,
                 max_lines: 2,
                 align: Align::Center,
-                stroke: style.stroke,
-                shadow: style.shadow,
+                stroke: if style.mode == CaptionMode::Reveal || ink {
+                    0.0
+                } else {
+                    style.stroke
+                },
+                shadow: style.shadow || style.mode == CaptionMode::Reveal || ink,
                 background: (style.boxed || subtitle).then_some(if style.boxed {
                     DARK
                 } else {
@@ -369,7 +474,13 @@ impl Graphics {
                 edge: style.boxed,
                 accent: style.highlight,
                 preset: None,
-                weight: 800,
+                weight: if style.mode == CaptionMode::Reveal {
+                    600
+                } else {
+                    800
+                },
+                reveal: style.mode == CaptionMode::Reveal,
+                ink,
             };
             let layer = raster::render(&mut self.fonts, &mut self.swash, spec)?;
             self.cache(key, layer);
@@ -385,6 +496,7 @@ impl Graphics {
 
     /// Finds or renders the layer for a text item on a `w` x `h` px target. Caption placement
     /// measures text through this too, so the hook's box it avoids is the one that draws.
+    #[allow(clippy::too_many_arguments)]
     fn text_layer(
         &mut self,
         item: &Item,
@@ -393,8 +505,10 @@ impl Graphics {
         safe: Rect,
         w: u32,
         h: u32,
+        ink: bool,
     ) -> Option<Built> {
         let mut hash = DefaultHasher::new();
+        ink.hash(&mut hash);
         item.id.hash(&mut hash);
         text.text.hash(&mut hash);
         (text.preset as u8).hash(&mut hash);
@@ -435,6 +549,9 @@ impl Graphics {
                         },
                         if accented { accent } else { color },
                     );
+                    span.chrome = text.preset == TextPreset::Chapter
+                        && text.style.color.is_none()
+                        && !accented;
                     if text.preset == TextPreset::LowerThird && line > 0 {
                         span.scale = 0.57;
                     }
@@ -456,9 +573,17 @@ impl Graphics {
                 height: safe.h * h as f32 / 1.08,
                 max_lines: defaults.lines.max(content.lines().count()),
                 align: text.style.align.unwrap_or(defaults.align),
-                stroke: text.style.stroke.unwrap_or(defaults.stroke),
+                stroke: if ink {
+                    0.0
+                } else {
+                    text.style.stroke.unwrap_or(defaults.stroke)
+                },
                 shadow: true,
-                background: text.style.background.or(defaults.background),
+                background: if text.preset == TextPreset::BlackCard {
+                    Some(Color::rgba(0, 0, 0, 0))
+                } else {
+                    text.style.background.or(defaults.background)
+                },
                 edge: matches!(
                     text.preset,
                     TextPreset::Card | TextPreset::Callout | TextPreset::Cta
@@ -466,6 +591,8 @@ impl Graphics {
                 accent,
                 preset: Some(text.preset),
                 weight: defaults.weight,
+                reveal: false,
+                ink,
             };
             let layer = raster::render(&mut self.fonts, &mut self.swash, spec)?;
             self.cache(key, layer);
@@ -479,17 +606,33 @@ impl Graphics {
         })
     }
 
-    fn text(&mut self, item: &Item, text: &Text, t: f64, safe: Rect, target: &mut PixmapMut<'_>) {
+    #[allow(clippy::too_many_arguments)]
+    fn text(
+        &mut self,
+        item: &Item,
+        text: &Text,
+        t: f64,
+        fps: f64,
+        ink_on_light: bool,
+        safe: Rect,
+        target: &mut PixmapMut<'_>,
+    ) {
         if text.text.trim().is_empty() {
             return;
         }
         let defaults = Preset::for_kind(text.preset, safe);
-        let Some(built) =
-            self.text_layer(item, text, &defaults, safe, target.width(), target.height())
-        else {
+        let Some(built) = self.text_layer(
+            item,
+            text,
+            &defaults,
+            safe,
+            target.width(),
+            target.height(),
+            false,
+        ) else {
             return;
         };
-        let key = built.key;
+        let mut key = built.key;
         let duration = item.duration.min(0.6) as f32 / 2.0;
         let entering = ((t - item.start) as f32 / duration.max(0.001)).clamp(0.0, 1.0);
         let leaving =
@@ -508,6 +651,59 @@ impl Graphics {
             m.scale = 1.0 + 0.28 * (1.0 - entering).powi(3);
         }
         let (position, bounds) = text_place(text, &defaults, safe);
+        if text.preset == TextPreset::BlackCard {
+            let background = text.style.background.unwrap_or(Color::BLACK);
+            target.fill_rect(
+                tiny_skia::Rect::from_xywh(0.0, 0.0, target.width() as f32, target.height() as f32)
+                    .unwrap(),
+                &raster::paint(background.with_alpha((f32::from(background.a) * m.alpha) as u8)),
+                Transform::identity(),
+                None,
+            );
+        } else if ink_on_light
+            && text.style.background.or(defaults.background).is_none()
+            && text.style.color.unwrap_or(defaults.color) == Color::WHITE
+            && light_behind(target, built, position, bounds, m.scale)
+            && let Some(ink) = self.text_layer(
+                item,
+                text,
+                &defaults,
+                safe,
+                target.width(),
+                target.height(),
+                true,
+            )
+        {
+            key = ink.key;
+        }
+        // Cache the six blur steps, never blur full video frames.
+        if text.preset == TextPreset::Keyword && text.anim_in != Anim::None && !exit {
+            let frame = ((t - item.start) * fps.max(1.0)).floor().max(0.0) as u8;
+            if frame < 6 {
+                let mut hash = DefaultHasher::new();
+                ("keyword-blur", key, frame).hash(&mut hash);
+                let blurred_key = hash.finish();
+                if !self.layers.contains_key(&blurred_key)
+                    && let Some(layer) = self.layers.get(&key)
+                    && let Some(image) = raster::blurred(
+                        &layer.image,
+                        layer.size * 0.055 * f32::from(6 - frame) / 6.0,
+                    )
+                {
+                    let blurred = Layer {
+                        image,
+                        glyphs: layer.glyphs.clone(),
+                        line_bottoms: layer.line_bottoms.clone(),
+                        contrast: None,
+                        size: layer.size,
+                    };
+                    self.cache(blurred_key, blurred);
+                }
+                if self.layers.contains_key(&blurred_key) {
+                    key = blurred_key;
+                }
+            }
+        }
         if text.preset == TextPreset::Callout {
             let point = callout_point(text, safe);
             if let Some(layer) = self.layers.get(&key) {
@@ -574,9 +770,36 @@ impl Default for Graphics {
     }
 }
 
+fn light_behind(
+    target: &PixmapMut<'_>,
+    built: Built,
+    position: Point,
+    safe: Rect,
+    scale: f32,
+) -> bool {
+    let rect = layer_box(
+        built.width,
+        built.height,
+        target.width(),
+        target.height(),
+        position,
+        safe,
+        scale,
+    );
+    contrast::light_picture(
+        target,
+        Rect {
+            x: rect.x * target.width() as f32,
+            y: rect.y * target.height() as f32,
+            w: rect.w * target.width() as f32,
+            h: rect.h * target.height() as f32,
+        },
+    )
+}
+
 fn fraction(value: f32, fallback: f32) -> f32 {
     if value.is_finite() {
-        value.clamp(0.001, 0.5)
+        value.clamp(0.001, 0.6)
     } else {
         fallback
     }
@@ -706,14 +929,44 @@ impl Preset {
                 p.position.y = safe.y + safe.h * 0.53;
                 p.uppercase = true;
             }
-            // TEMP: the graphics owner gives each documentary preset its own look.
-            TextPreset::Keyword
-            | TextPreset::Chapter
-            | TextPreset::Shock
-            | TextPreset::BlackCard
-            | TextPreset::Mega => {
-                p.size = 0.12;
+            // Sizes and six-frame keyword entrance from NextPhase Editor V1's published measurements.
+            TextPreset::Keyword => {
+                p.size = 0.14;
+                p.stroke = 0.0;
+                p.lines = 1;
+            }
+            TextPreset::Chapter => {
+                p.font = "Playfair Display";
+                p.size = 0.126;
+                p.weight = 700;
+                p.stroke = 0.0;
+                p.lines = 2;
+            }
+            TextPreset::Shock => {
+                p.font = "Bodoni Moda";
+                p.size = 0.163;
+                p.weight = 700;
+                p.color = Color::rgb(242, 3, 10);
                 p.uppercase = true;
+                p.stroke = 0.0;
+                p.lines = 1;
+            }
+            TextPreset::BlackCard => {
+                p.font = "Inter";
+                p.size = 0.05;
+                p.weight = 600;
+                p.stroke = 0.0;
+                p.position = Point::new(0.5, 0.5);
+                p.lines = 1;
+            }
+            TextPreset::Mega => {
+                p.size = 0.52;
+                p.weight = 900;
+                p.color = Color::rgb(242, 3, 10);
+                p.uppercase = true;
+                p.stroke = 0.0;
+                p.position = Point::new(0.5, 0.36);
+                p.lines = 1;
             }
         }
         p

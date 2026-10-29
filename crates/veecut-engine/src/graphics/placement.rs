@@ -267,6 +267,8 @@ impl Graphics {
                 safe,
                 w,
                 h,
+                usize::MAX,
+                false,
             ) {
                 boxes.push(layer_box(
                     layer.width,
@@ -309,7 +311,7 @@ impl Graphics {
                     continue;
                 }
                 let defaults = Preset::for_kind(text.preset, safe);
-                let Some(layer) = self.text_layer(item, text, &defaults, safe, w, h) else {
+                let Some(layer) = self.text_layer(item, text, &defaults, safe, w, h, false) else {
                     continue;
                 };
                 let (position, bounds) = text_place(text, &defaults, safe);
@@ -481,7 +483,10 @@ impl Graphics {
     ) -> Option<CaptionPlacement> {
         let safe = safe_area(&project.canvas);
         let (w, h) = (project.canvas.width, project.canvas.height);
-        let (start, end) = page_span(item, words, project.canvas.fps)?;
+        let (start, mut end) = page_span(item, words, project.canvas.fps)?;
+        if project.captions.mode == CaptionMode::Reveal {
+            end = end.min(item.start + words.last()?.end);
+        }
         let choice = self.choose(project, item, words, safe, w, h);
         let style = &project.captions;
         let requested = requested_y(style, safe);
@@ -541,7 +546,11 @@ impl Graphics {
                 continue;
             }
             if let Some((item, words)) = active_caption(&track.items, t, project.canvas.fps) {
-                return self.placement(project, item, words);
+                let placement = self.placement(project, item, words)?;
+                if t >= placement.end {
+                    continue;
+                }
+                return Some(placement);
             }
         }
         None

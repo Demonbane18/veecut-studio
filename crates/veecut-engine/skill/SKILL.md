@@ -1,6 +1,6 @@
 ---
 name: veecut
-description: Edit videos in this VeeCut workspace with the `veecut` command or its MCP tools. Use it for every video request, in English, Tagalog or Taglish, for example "edit this", "edit mo to", "i-edit mo", a new recording in inbox/, notes on a draft ("faster", "bigger captions", "tanggalin mo yung intro"), style or caption changes, music, a vertical or horizontal version, clips from a long video, and approval ("ok na", "approved", "final"). Covers talking heads, tutorials, podcasts, clips, vlogs, explainers, promos and music videos.
+description: Edit videos in this VeeCut workspace with the `veecut` command or its MCP tools. Use it for every video request, in English, Tagalog or Taglish, for example "edit this", "edit mo to", "i-edit mo", a new recording in inbox/, notes on a draft ("faster", "bigger captions", "tanggalin mo yung intro"), style or caption changes, music, a vertical or horizontal version, clips from a long video, a documentary or found footage edit, and approval ("ok na", "approved", "final"). Covers talking heads, tutorials, podcasts, clips, vlogs, explainers, promos, music videos and documentaries.
 ---
 
 # VeeCut
@@ -21,7 +21,8 @@ my-style.toml     the user's style choices (reference/style-setup.md)
 my-rules.md       lasting rules learned from the user's notes (reference/notes-and-rules.md)
 my-sounds/music/  music beds the recipes may use
 my-sounds/sfx/    sound effects the recipes may use
-.env              optional keys (GROQ_API_KEY, GITHUB_TOKEN). Never print it.
+footage/          found footage downloaded by `veecut fetch`, with a .source.json beside each file
+.env              optional keys (GROQ_API_KEY, GITHUB_TOKEN, PEXELS_API_KEY). Never print it.
 ```
 
 ## First time in a workspace
@@ -45,7 +46,7 @@ The editor is already open and previews changes. Use `veecut cut-phrase` for a q
 7. Tell them what changed in 3 to 5 short bullets, then ask for notes. Turn review items into plain questions ("At 0:12 you said the intro twice. Keep the second one?").
 8. For a phrase cut, run `veecut transcript-search "PHRASE" --json`, then `veecut cut-phrase "PHRASE"`. If search finds several matches, ask which one and pass its 1-based `--occurrence N`. The command refuses ambiguity; never guess times or fall back to a fuzzy match. For other notes, use Editor API ops (`reference/editor-api.md`) with `veecut ops`. Bring new files in with `veecut add FILE` and use the printed asset id. Save lasting notes as rules (`reference/notes-and-rules.md`) and confirm in one line.
 9. Outside Studio, run `veecut render` after each round of notes. Drafts count up: `-v2`, `-v3`. Open the new draft and say in one or two lines what you fixed. In Studio, follow "Notes from VeeCut Studio" above.
-10. When the user approves ("ok na", "approved", "final", "goods na", "ship it"), run `veecut render --final`. It writes `outbox/<slug>-final.mp4`. If their style format is `both`, the recipe's first draft already comes in two shapes (for example `<slug>-v1.mp4` and `<slug>-v1-16x9.mp4`). For later drafts and the final, run the render a second time with `--aspect 16:9` for a vertical edit, or `--aspect 9:16` for a horizontal one.
+10. When the user approves ("ok na", "approved", "final", "goods na", "ship it"), run `veecut render --final`. It writes `outbox/<slug>-final.mp4`. If the edit uses a found file whose rights are flagged and not approved, it refuses and lists them: show the user that list (see "Found footage, sound and cut-outs" below). If their style format is `both`, the recipe's first draft already comes in two shapes (for example `<slug>-v1.mp4` and `<slug>-v1-16x9.mp4`). For later drafts and the final, run the render a second time with `--aspect 16:9` for a vertical edit, or `--aspect 9:16` for a horizontal one.
 
 ## Pick the kind
 
@@ -60,6 +61,7 @@ The editor is already open and previews changes. Use `veecut cut-phrase` for a q
 | A narration with images or footage, no face | `explainer` | `workflows/explainer.md` |
 | A product launch or ad with lines of text | `promo` | `workflows/promo.md` |
 | A song with footage, or a lyric video | `music-video` | `workflows/music-video.md` |
+| A talk to camera to cut into a fast documentary with found footage ("documentary", "Editor V1 style", "found footage edit") | `documentary` | `workflows/documentary.md` |
 
 Without `--kind`, `veecut edit` uses `talking-head-short`, or `talking-head-long` when the style format is `horizontal`. If you cannot tell which kind fits, ask one short question with two or three of these choices.
 
@@ -78,6 +80,15 @@ These habits keep small models on track, and they work for big ones too.
 - On Windows, quoting JSON on the command line is fragile. Write the ops to a file and run `veecut ops --file ops.json`.
 - `veecut schema` prints the full JSON schema of every op.
 
+## Found footage, sound and cut-outs
+
+- `veecut find "IDEA"` searches free, licence-tracked pictures and footage (NASA, Wikimedia Commons, Internet Archive, Openverse; Pexels with `PEXELS_API_KEY`) and saves a numbered contact sheet. `veecut fetch N` downloads number N into `footage/` and adds it to the project with its source and licence. Read `reference/sourcing.md` first.
+- `veecut sources` is the rights table; `--credits` gives credit lines for the video description; `--flag ASSET --reason TEXT` flags a file for a rights check.
+- `veecut sfx` lists the built-in synthesized sound kit. Levels and timing are in `reference/sound.md`.
+- `veecut cutout --at T --dur D [--mega WORD] [--world FILE]` cuts the speaker out of their own camera inside one main-track clip, with an optional huge word or picture behind them. The first run downloads a 26 MB model once.
+- `veecut qa FILE --words` transcribes a render again and lists words that a sound, the music or a cut masked. Run it before calling a documentary final.
+- A final render refuses any found file whose rights are flagged and not approved. Only the user approves, after checking the file and its licence: they run `veecut sources --approve ASSET`, use Studio's Sources tab, or tell you they checked that file and want it approved. Drafts are never blocked.
+
 ## Extra skills from the catalog
 
 VeeCut keeps a catalog of community video skills from awesome-claude-video-skills. It refreshes itself when it is older than 24 hours.
@@ -90,7 +101,7 @@ VeeCut keeps a catalog of community video skills from awesome-claude-video-skill
 
 ## MCP tools
 
-When VeeCut is connected as an MCP server (`veecut mcp`, which `veecut init` registers in `opencode.json`), you can call tools instead of the command line: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `transcript_search`, `cut_phrase`, `captions`, `note`, `undo`, `redo`, `skills_search` and `skills_install`. Tool fields follow the matching command's options; `project` accepts the same selectors as `-p`. Search with `transcript_search` using `{"phrase":"PHRASE"}`, then call `cut_phrase` with the same phrase and, if needed, `"occurrence":2`. `frame` and `frames` return the PNG as an image you can look at. Use one way or the other; both change the same project.
+When VeeCut is connected as an MCP server (`veecut mcp`, which `veecut init` registers in `opencode.json`), you can call tools instead of the command line: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `transcript_search`, `cut_phrase`, `cutout`, `captions`, `note`, `undo`, `redo`, `skills_search`, `skills_install`, `verify_words`, `find_footage`, `fetch_footage` and `sources`. Tool fields follow the matching command's options; `project` accepts the same selectors as `-p`. Search with `transcript_search` using `{"phrase":"PHRASE"}`, then call `cut_phrase` with the same phrase and, if needed, `"occurrence":2`. `frame`, `frames` and `find_footage` return the PNG as an image you can look at. `edit` takes `find` for documentary edits; `verify_words` is `veecut qa FILE --words`; `sources` cannot approve. Use one way or the other; both change the same project.
 
 ## Never
 
@@ -99,3 +110,5 @@ When VeeCut is connected as an MCP server (`veecut mcp`, which `veecut init` reg
 - Never use paid services, paid models or paid assets without asking first.
 - Never print, log, paste or copy API keys or the contents of `.env`.
 - Never commit or publish `inbox/`, `outbox/`, `my-style.toml`, `my-rules.md` or `my-sounds/`.
+- Never approve a flagged source on the user's behalf. Show them the file, its page and the reason; only they decide.
+- Never download footage without telling the user where it comes from.

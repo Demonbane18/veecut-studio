@@ -5,7 +5,7 @@ VeeCut Studio is an open-source AI video editor written in Rust. You put a recor
 ## What it does
 
 - Coding agents and a desktop editor work on one timeline. The command line, the MCP server, the editor and the agents all change a project through the same Editor API, so every change can be undone.
-- Built-in recipes for nine kinds of video (table below) make the editing decisions by rule: where to cut, when to punch in, where captions go, how loud the music sits. Most rules come from Herk Edit Kit's editing playbook.
+- Built-in recipes for ten kinds of video (table below) make the editing decisions by rule: where to cut, when to punch in, where captions go, how loud the music sits. Most rules come from Herk Edit Kit's editing playbook; the documentary edit follows NextPhase Editor V1's published measurements.
 - It is built for free models. Because the recipes do the heavy work, a small free model such as GLM 5.3 Flash Free in OpenCode only has to run a command, read the result and pass on your notes.
 - Notes you repeat become rules in `my-rules.md`, so you do not have to say them twice.
 - A skills catalog synced from [awesome-claude-video-skills](https://github.com/zhuyansen/awesome-claude-video-skills) lists community video skills by kind of video. It refreshes itself every 24 hours, and installed skills graded SAFE update with it. `veecut skills sync` and `veecut skills update` do the same by hand.
@@ -145,7 +145,7 @@ plus optional `occurrence` for the cut.
 With a project open:
 
 - The top bar has the canvas preset, Undo, Redo, Export, and a box to ask a coding agent for a change.
-- The left panel has the Media, Text, Captions, Look & Audio, Skills and Agent tabs.
+- The left panel has the Media, Footage, Sources, Text, Captions, Look & Audio, Skills and Agent tabs.
 - The preview sits in the middle, with play, frame steps and an `HH:MM:SS:FF` timecode.
 - The inspector on the right edits the selected item, or the project when nothing is selected.
 - The timeline at the bottom has the magnetic main track, overlay, text, caption and audio tracks, with waveforms and snapping.
@@ -165,6 +165,12 @@ With a project open:
   and asks for a line in review.
 - Auto-edit decisions stay under **Needs review** in the inspector until dismissed. They
   survive reopening and cuts; Dismiss is saved and supports Undo within the current session.
+- With the Documentary kind, New edit adds "Find footage online (free, licence-tracked)" and "Choose B-roll files...".
+- The Footage tab searches the free footage providers with thumbnails. Filter by Any, Videos or Images and tick the providers (Pexels only with `PEXELS_API_KEY`). Each result shows its licence, author, length and why it is flagged, if it is. Add downloads it into the project; Add at playhead also places it on the B-roll track (2 s for a picture, up to 3 s for a video). Downloads run in the background and can be undone.
+- The Sources tab lists every found file with its provider, licence, author and a button to open its page. Approve (I checked the rights) clears a flag; Flag with a reason adds one. Credit lines for the video description sit below with Copy credits.
+- Exporting at final quality lists flagged sources nobody approved and stays disabled until each is approved or no longer used.
+- In the inspector, clips have a Grade section (Look, Halftone, Vignette and Recolor) and the new transitions: Negative, Glitch, Tiles, Focus and Whip. On overlay tracks the transition is how the clip enters; picking a kind fills in its usual length. A cut-out clip shows its Mask with an Outline slider and Remove mask. A selected video clip on the main track offers "Cut out the speaker": a length from the playhead, an outline and an optional mega word.
+- Text has the Keyword, Chapter, Shock, Black card and Mega presets; captions have the Reveal mode and an "Ink on light pictures" switch.
 
 Keyboard shortcuts (Cmd on macOS, Ctrl elsewhere):
 
@@ -188,7 +194,16 @@ Keyboard shortcuts (Cmd on macOS, Ctrl elsewhere):
 
 For development, `cargo run -p veecut-studio --example studio -- <workspace> [project.json]` starts the editor straight from the repository. Set `VEECUT_STUDIO_SHOTS=<empty directory>` and open a project at least 3 seconds long to save four screenshots: `00-paused.png`, `01-playback.png`, `02-playback.png`, and `03-agent.png` with the model and effort pickers. The editor then quits. This hook captures only the editor's own window and needs no GUI automation.
 
-## Nine kinds of video
+These options change what the hook captures. They take effect only with `VEECUT_STUDIO_SHOTS` set:
+
+| Variable | Effect |
+| --- | --- |
+| `VEECUT_STUDIO_TAB=media\|sources\|footage` | Opens that tab, saves only `00-paused.png` and quits |
+| `VEECUT_STUDIO_SELECT=<item id>` | Selects that item first, so the inspector shows it |
+| `VEECUT_STUDIO_AT=<seconds>` | Moves the playhead there before the first screenshot |
+| `VEECUT_STUDIO_QUERY=<words>` | The Footage tab's search, run for real (default `moon`); the screenshot waits for the results and thumbnails |
+
+## Ten kinds of video
 
 | Kind | For | What the recipe does |
 | --- | --- | --- |
@@ -201,6 +216,49 @@ For development, `cargo run -p veecut-studio --example studio -- <workspace> [pr
 | `explainer` | Faceless narration | One visual per sentence, heading cards, ducked music; big centered captions without visuals |
 | `promo` | Launches, ads | Lines of copy slammed on the beat over footage, ending on a call to action |
 | `music-video` | Songs, lyric videos | Footage cut on the beat, lyrics from LRC or transcribed from the song |
+| `documentary` | A talking head as a fast documentary | 16:9, found pictures on most lines, re-coloured, with your face between runs, cut effects, word-by-word captions, a click on every change and a music bed cut under the punchline |
+
+## The documentary edit
+
+`veecut edit --kind documentary` turns a talk to camera into a fast documentary in the style of NextPhase Editor V1. Found pictures cover most lines, each re-coloured (teal, mono, warm, cold or natural) and slowly pushed in, while your own camera stays as it is. Your face comes back between runs of pictures, about 30 percent of the time. Between pictures sit cut effects: a one-frame white box, a negative, a datamosh, a 3x3 tile reveal, a rack focus or a whip. Small captions appear word by word; stressed words, numbers and words like "nothing" get display words. Every picture change gets a click, and the music bed runs under your voice and cuts out under the punchline. The pacing, levels and type sizes are Editor V1's published measurements; VeeCut copies none of its code, text or sounds (see [CREDITS.md](CREDITS.md)).
+
+```sh
+veecut edit inbox/take.mp4 --kind documentary --find --music my-sounds/music/bed.mp3
+veecut edit inbox/take.mp4 --kind documentary --broll inbox/office.mp4 inbox/chart.png
+```
+
+`--broll` brings your own pictures, which go first. `--find` searches free footage for the rest of the lines. Each search pairs a line's own name or concrete word with the video's subject (the things you say more than once), so "the test" becomes "sls test" in a video about the SLS. Results only go in when their title matches the search, and titles about abuse, violence or sex are left out. Found footage is still matched by words, so look at every picture before you publish.
+
+### Found footage and rights
+
+`veecut find "IDEA"` searches the NASA Image and Video Library, Wikimedia Commons, the Internet Archive and Openverse, plus Pexels when `PEXELS_API_KEY` is in `.env`. It numbers the results and saves a contact sheet to `.veecut/find/last.png`. `veecut fetch N` downloads number N into `footage/` (at most 300 MB for a video, 40 MB for a picture), checks that it really is a picture or a video, and adds it to the project with its source, licence and credit line. `--find` does the same for each run of pictures, up to 12 files per edit, and skips anything flagged.
+
+Each file keeps its own licence, recorded in the project. `veecut sources` shows the rights table; `veecut sources --credits` prints credit lines for the video description.
+
+| Licence | VeeCut |
+| --- | --- |
+| Public domain, public domain mark, CC0 | Allowed |
+| CC BY, CC BY-SA | Allowed; the credit line says the work was re-coloured, cropped and cut |
+| Pexels License | Allowed; credited as "Photo by NAME on Pexels" |
+| Non-commercial (NC) | Flagged: no commercial use |
+| No derivatives (ND) | Flagged: VeeCut always re-colours, crops and cuts |
+| GFDL only | Flagged: it needs the whole licence text shipped with the video |
+| Fair use, non-free, unknown or missing | Flagged: a person must decide |
+| NASA files whose credit names someone else or that mention copyright | Flagged: only NASA's own media is public domain |
+
+A final render refuses flagged files you have not approved; drafts still render. Check the file's page and licence, then run `veecut sources --approve ASSET` or press Approve in Studio's Sources tab. The agent skill tells agents never to approve on your behalf, and the MCP `sources` tool has no approve option.
+
+### Cut-out and the mega word
+
+`veecut cutout --at T --dur D --mega WORD` cuts you out of your own camera inside one main-track clip and puts a huge red word behind your head, between the picture and your cut-out. `--world FILE` places a picture behind you; `--outline W` sets the white sticker edge (default 0.006 of the frame height). The cut-out runs MODNet (Apache-2.0) in Rust with tract. The first cut-out downloads the model once, about 26 MB, to `~/.veecut/models`, and checks it against a pinned SHA-256; masks are cached in the project. Once the model is there, the documentary recipe adds mega words by itself. `veecut doctor` says whether it is downloaded.
+
+### The sound kit
+
+VeeCut makes its own sound effects in code: four clicks, a tick, a pane click, a swish, a glitch, a riser, a sub tone, a sub boom, an impact, a hit and an outro, written as WAV files to `.veecut/sfx/v1/`. `veecut sfx` lists them with their lengths and roles. The documentary edit places each hit 8 ms after its picture change at a fixed level under your voice (clicks 4.5 dB under). The other recipes play your files from `my-sounds/sfx/` when text lands, and the kit's tick when that folder is empty.
+
+### The words check
+
+`veecut qa outbox/<slug>-v1.mp4 --words` transcribes the render again and compares it with your transcript. It lists words that went missing or came back different, and says whether a cut sits within 0.25 s or a sound or music clip starts within 0.15 s of each. Run it before a final: a click or the bed can mask a short word. It runs locally unless your config picked Groq.
 
 ## Skills catalog
 
@@ -286,14 +344,15 @@ evidence; missing evidence is a check failure, not proof that captions are safe.
 - Your recordings stay where you put them. VeeCut never modifies `inbox/`; drafts and finals go to `outbox/`.
 - Video, pictures and sound are processed on your computer.
 - Transcription is local unless you set `GROQ_API_KEY`; then audio goes to Groq.
-- The network is used to download whisper models on first use, to sync the skills catalog from GitHub and to install skills you choose.
+- The network is used to download whisper models and the cut-out model on first use, to sync the skills catalog from GitHub and to install skills you choose.
+- Footage search and downloads (`veecut find`, `veecut fetch`, `veecut edit --find` and Studio's Footage tab) send your search words to the providers searched and download the chosen files. Nothing is uploaded.
 - Coding agents send your prompts and what they read (such as transcripts and command output) to their model provider.
-- `veecut init` keeps `.env`, `inbox/`, `outbox/` and `my-sounds/` out of git with a `.gitignore`.
+- `veecut init` keeps `.env`, `inbox/`, `outbox/`, `my-sounds/`, `footage/` and `.veecut/find/` out of git with a `.gitignore`.
 
 ## More
 
 - [docs/architecture.md](docs/architecture.md): crates, the project model, the Editor API and the full command line.
-- [CREDITS.md](CREDITS.md): the projects VeeCut learned from, bundled fonts and libraries.
+- [CREDITS.md](CREDITS.md): the projects VeeCut learned from, bundled fonts, the cut-out model, libraries and the footage providers' terms.
 
 ## License
 

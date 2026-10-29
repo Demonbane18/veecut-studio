@@ -40,16 +40,19 @@ my-videos/
   my-style.toml            the user's style choices
   my-rules.md              lasting rules learned from the user's notes
   my-sounds/music/, my-sounds/sfx/
+  footage/                 found footage from `veecut fetch`, each file with <file>.source.json
+  .veecut/find/            the last search (last.json) and its contact sheet (last.png)
+  .veecut/sfx/v1/          the generated sound kit
   .agents/skills/veecut/   the built-in skill (copied from the binary) + installed catalog skills
   .claude/skills/          the same skills for Claude Code
   AGENTS.md, CLAUDE.md     tell every agent to use the veecut skill
   opencode.json            registers `veecut mcp` with OpenCode
   skills.lock.json         installed catalog skills, pinned to commits
-  .env                     GROQ_API_KEY, GITHUB_TOKEN (optional, never committed)
+  .env                     GROQ_API_KEY, GITHUB_TOKEN, PEXELS_API_KEY (optional, never committed)
 ```
 
 Global state lives in `~/.veecut/` (override with `VEECUT_HOME`): `config.toml`,
-`catalog.json` and `models/` (whisper models).
+`catalog.json` and `models/` (whisper models and the MODNet cut-out model).
 
 ## Project model (`project.rs`, done)
 
@@ -84,6 +87,8 @@ Global state lives in `~/.veecut/` (override with `VEECUT_HOME`): `config.toml`,
     `AssetRole::Mask` marks those videos.
   - `TextPreset` adds `keyword`, `chapter`, `shock`, `black_card`, `mega`. `mega` is drawn
     under the overlay tracks so a cut-out of the speaker stands in front of it.
+    `TextPreset::default_anim()` is what `add_text` uses when no animation is given: `none` for
+    `shock`, `black_card` and `mega` (they cut on hard), `fade` for the rest.
   - `CaptionMode::Reveal` and `CaptionStyle.ink_on_light`.
   - `Project.sources: BTreeMap<asset id, Source>`: provenance and licence of found files
     (`url`, `title`, `author`, `license`, `license_url`, `credit`, `provider`, `flag`,
@@ -331,7 +336,8 @@ pub fn recommended<'a>(catalog: &'a Catalog, kind: VideoKind, n: usize) -> Vec<&
 ```rust
 pub struct EditRequest { pub kind: VideoKind, pub sources: Vec<PathBuf>, pub broll: Vec<PathBuf>, pub music: Option<PathBuf>,
                          pub voice: Option<PathBuf>, pub copy: Option<String>, pub canvas: Option<Canvas>, pub name: Option<String>,
-                         pub transcribe: Option<TranscribeOptions>, /* other recipe options */ }
+                         pub hook: Option<String>, pub language: Option<String>, pub transcribe: Option<TranscribeOptions>,
+                         pub clips: usize, pub render: bool, pub find: bool /* documentary: search footage */ }
 pub fn edit(ws: &Workspace, req: &EditRequest, progress: &mut dyn FnMut(&str)) -> Result<EditReport>;
 pub fn check(path: &Path) -> Result<QaReport>; // qa.rs: duration, size, fps, loudness, true peak, black frames, problems
 ```
@@ -343,16 +349,18 @@ The harness also sets `VEECUT_LOCAL_CPU_ONLY=1` before starting workers. The tra
 entry point honors this process-scoped override in inherited CLI and MCP children, even
 when their global config selects Groq.
 
-### Documentary modules (in progress)
+### Documentary modules (done)
 
-Ideas and measurements come from NextPhase Editor V1 (`/tmp/vc-research/notes/ev1-notes.md`
-during development). Its code, text and sounds are not copied: its licence allows making videos
-but not repackaging, so everything here is written fresh.
+Ideas and published measurements come from NextPhase Editor V1 (see CREDITS.md). Its code, text,
+design tokens and sounds are not copied: its licence allows making videos but not repackaging, so
+everything here is written fresh.
 
 ```rust
 // render: per-clip grades, all transition kinds on main and overlay clips, overlay alpha, masks
-// with outline. Frame order: background → main track → gfx.draw_behind (mega text) → overlay
-// tracks → cut effects (dip/flash/negative/glitch) → project look → gfx.draw (text, captions).
+// with outline. Frame order: background → main track → overlay tracks, with gfx.draw_behind
+// (mega text) drawn just before the first overlay track holding a masked clip (after all
+// overlays when none has one) → cut effects (dip/flash/negative/glitch) → project look →
+// gfx.draw (text, captions). So the world sits under the mega word and the cut-out over it.
 
 // graphics
 impl Graphics {
@@ -362,39 +370,66 @@ impl Graphics {
 }
 
 // footage: free, licence-tracked material
+pub const VIDEO_CAP: u64 = 300 * 1024 * 1024;   // largest video fetch downloads
+pub const IMAGE_CAP: u64 = 40 * 1024 * 1024;    // largest picture
 pub enum Provider { Nasa, Commons, Archive, Openverse, Pexels }   // Pexels only with PEXELS_API_KEY
+impl Provider { pub const ALL: [Provider; 5]; pub fn as_str(self) -> &'static str; pub fn label(self) -> &'static str;
+                pub fn available() -> Vec<Provider>; pub fn parse(name: &str) -> Result<Provider>; }
 pub enum MediaKind { Image, Video }
 pub struct Candidate { pub id: String /* "nasa:ID" */, pub provider: Provider, pub kind: MediaKind, pub title: String,
                        pub page_url: String, pub thumb_url: String, pub width: u32, pub height: u32, pub duration: f64,
                        pub license: String, pub license_url: Option<String>, pub author: Option<String>,
                        pub flag: bool, pub flag_reason: Option<String> }
-pub struct SearchOptions { pub kind: Option<MediaKind>, pub providers: Vec<Provider>, pub per_provider: usize }
+pub struct SearchOptions { pub kind: Option<MediaKind>, pub providers: Vec<Provider>, pub per_provider: usize }   // default: available(), 4
 pub struct SearchResult { pub candidates: Vec<Candidate>, pub warnings: Vec<String> }
+/// Providers in parallel; a failing provider becomes a warning. per_provider is clamped to 1..=20.
 pub fn search(query: &str, opts: &SearchOptions) -> Result<SearchResult>;
 pub fn contact_sheet(candidates: &[Candidate], out: &Path) -> Result<()>;   // numbered thumbnails
 pub struct Fetched { pub path: PathBuf, pub source: Source, pub candidate: Candidate }
-pub fn fetch(ws: &Workspace, id: &str) -> Result<Fetched>;   // into <ws>/footage/, size-capped, probed
+/// Into <ws>/footage/<provider>-<id>.<ext> through a .part file, within the caps, ffprobe-checked as the
+/// expected kind, with <file>.source.json beside it. An earlier download of the same id is reused.
+pub fn fetch(ws: &Workspace, id: &str) -> Result<Fetched>;
 /// Adds a fetched file to a project as an asset and records its source through ops.
 pub fn add_to_project(ws: &Workspace, project: &mut Project, project_dir: &Path, fetched: &Fetched, role: AssetRole) -> Result<String>;
 /// Flagged sources nobody approved that the project's clips use.
 pub fn blocking_sources(project: &Project) -> Vec<(String, Source)>;
+/// Refuses a final render while blocking_sources is not empty (CLI render --final, MCP render, Studio export).
+pub fn check_final(project: &Project) -> Result<()>;
+pub fn source_op(project: &Project, asset: &str, source: &Source) -> Result<Op>;   // the set op that records a source
+pub fn used_assets(project: &Project) -> BTreeSet<&str>;
+// rights (crate-private): public domain, PDM, CC0, CC BY, CC BY-SA and the Pexels License pass; NC, ND,
+// GFDL alone, fair use/non-free and unknown are flagged. NASA items whose credit names someone else or
+// that mention copyright, and Archive items with no licence outside Prelinger, are flagged too.
 
 // sfx: a synthesized sound kit and its placement grammar
 pub enum Sound { Click, Tick, PaneClick, Swish, Glitch, Riser, SubTone, SubBoom, Impact, Hit, Outro }
-pub struct KitSound { pub name: String, pub sound: Sound, pub path: PathBuf, pub transient: f64, pub duration: f64 }
-pub fn kit(ws: &Workspace) -> Result<Vec<KitSound>>;   // deterministic files in <ws>/.veecut/sfx/v1/
+impl Sound { pub fn role(self) -> &'static str; }
+/// `transient` = seconds to the hit (the file's loudest sample); `level` = loudest 50 ms, K-weighted, LUFS scale.
+pub struct KitSound { pub name: String, pub sound: Sound, pub path: PathBuf, pub transient: f64, pub duration: f64, pub level: f32 }
+pub fn kit_dir(ws: &Workspace) -> PathBuf;   // <ws>/.veecut/sfx/v{KIT_VERSION}/
+pub fn kit(ws: &Workspace) -> Result<Vec<KitSound>>;   // 14 deterministic 48 kHz mono WAVs (click-1..4 and one of each other sound); missing files written
+pub fn regenerate(ws: &Workspace) -> Result<Vec<KitSound>>;   // writes every file again
+// KIT_VERSION (folder vN), PEAK_DB = -3 dBFS sample peak, LAG = 0.008 s, DEFAULT_VOICE_LUFS = -20
 pub struct Cue { pub at: f64 /* the picture change it belongs to */, pub sound: Sound }
-/// Places cues on the sound-effects track with each sound's lag, pre-roll and gain against the
-/// voice loudness; rotates click variants. Returns the number placed.
+/// Places cues on the `sfx` audio track (created when missing), one Sfx asset per kit file: each hit
+/// lands LAG after its cue (heads before 0 are trimmed, tails stop at the main track's end), clicks
+/// closer than a frame merge, the four click variants rotate, and each sound's loudest 50 ms sits a
+/// fixed distance under the voice (clicks 4.5 dB, panes 9, swish/glitch/tick 5.5, riser/impact/hit
+/// 1.5, outro 8, sub boom 15, sub tone 18), capped so a sound's peak stays under -1 dBFS.
+/// Returns the number placed.
 pub fn place(ws: &Workspace, project: &mut Project, project_dir: &Path, cues: &[Cue], voice_lufs: Option<f32>) -> Result<usize>;
-pub fn loudness(path: &Path, range: Option<(f64, f64)>) -> Result<f32>;   // integrated LUFS
-pub fn bed_volume(voice_lufs: f32, music_lufs: f32, under_lu: f32) -> f32;
-/// Cuts (-70 dB) or pulls down a music bed over timeline ranges by splitting its clips and
-/// patching the middle pieces, with short fades.
+pub fn loudness(path: &Path, range: Option<(f64, f64)>) -> Result<f32>;   // integrated LUFS (ebur128); under 400 ms reads -70
+pub fn bed_volume(voice_lufs: f32, music_lufs: f32, under_lu: f32) -> f32;   // linear trim, never above 1.0
+/// Cuts (dB <= -60 is silence) or pulls down a music bed over timeline ranges: splits its clips at
+/// the edges, multiplies the middle pieces' volume, 20 ms fades on each side. Atomic through ops.
 pub fn shape_bed(project: &mut Project, track: &str, moves: &[(f64, f64, f32)]) -> Result<()>;
 
 // matte: the speaker cut out of their own camera
 pub fn status() -> String;
+pub fn ready() -> bool;   // the model file is present with the pinned size and SHA-256; no network
+// MODNet ONNX (Xenova/modnet, revision fa2fa546, 25,888,640 bytes, Apache-2.0) downloaded on first cutout to
+// ~/.veecut/models/modnet-fp32-07c308cf.onnx; run by tract at a 512-pixel short edge; masks cached in
+// <project>/.cache/masks/. The cut-out goes on an overlay track named "Cut-out", above B-roll.
 pub struct CutoutReport { pub mask_asset: String, pub overlay_item: String, pub frames: usize, pub seconds_taken: f64 }
 /// Masks the main-track clip at timeline [from, to) and places an overlay copy of it with the mask.
 pub fn cutout(ws: &Workspace, project: &mut Project, project_dir: &Path, from: f64, to: f64, outline: f32,
@@ -403,13 +438,70 @@ pub fn cutout(ws: &Workspace, project: &mut Project, project_dir: &Path, from: f
 // qa: words check
 pub struct WordIssue { pub at: f64, pub expected: String, pub heard: Option<String>, pub missing: bool,
                        pub near_cut: bool, pub near_sound: Option<String> }
-pub struct WordsReport { pub expected: usize, pub matched: usize, pub issues: Vec<WordIssue>, pub provider: String }
+pub struct WordsReport { pub expected: usize, pub matched: usize, pub missing: usize, pub changed: usize,
+                         pub issues: Vec<WordIssue>, pub provider: String, pub verdict: String }
+/// Expected = words of transcript.json and transcript-*.json placed on the timeline (the caption
+/// mapping). Tokens are normalized (case, punctuation, digits spelled out, "every one" = "everyone")
+/// and aligned by edit distance with a time-proximity cost inside a ±10 s band. `near_cut`: a
+/// main-track cut within 0.25 s of the word; `near_sound`: a clip on an audible audio track (not a
+/// transcribed voice) starting within 0.15 s. The CLI and MCP use local whisper unless the
+/// config's provider is `groq`.
 pub fn check_words(project: &Project, project_dir: &Path, render: &Path, opts: &TranscribeOptions,
                    progress: &mut dyn FnMut(&str)) -> Result<WordsReport>;
 ```
 
-Workspace additions: `footage/` (downloaded found material, never edited after download),
-`.veecut/find/` (search results and contact sheets), `.veecut/sfx/v1/` (the generated kit).
+Workspace additions: `footage/` (`Workspace::footage()`, downloaded found material, never edited after
+download), `.veecut/find/` (`last.json` and the contact sheet `last.png` of the last search),
+`.veecut/sfx/v1/` (the generated kit). `veecut init` adds `footage/` and `.veecut/find/` to `.gitignore`
+and a commented `PEXELS_API_KEY=` line to the `.env` template.
+
+#### The documentary recipe (`recipes/documentary.rs`)
+
+Defaults to 16:9. Cuts pauses and mistakes like the talking-head recipes and crops to the face, then
+plans beats on word onsets: runs of about 4 s of pictures (0.6 to 1.5 s each, aim 0.95; past 180 s the
+body after the first 10 s uses 1.2 to 2.0, aim 1.6) between face beats of 1.2 to 2.5 s (aim 1.8). It
+opens on pictures and never places two face beats in a row; without material the face stays on screen.
+`--broll` files come first; `find` searches one query per run (the run's own name or concrete word,
+anchored to `topic_terms`: concrete words said at least twice, names weighted), keeps results whose
+title shares a five-letter stem with the query and has no `UNSAFE_WORDS` stem, skips flagged candidates,
+prefers video, takes at most 2 files per run and 12 per edit, and leaves out a provider after its second
+failure. Video pictures start at `past_opening` (max of 10 % and min(10 s, 25 %)) and `lit_start` steps
+past starts whose middle frame is 95 % under 10 % luma. Each picture is an overlay clip on `broll`, muted, with a
+`grade` chosen from the line's words (warm, mono, cold, teal) or an eight-step rotation (natural 3, teal 2,
+mono 2, warm 1), halftone 0.22 on non-mono stills, vignette 0.35 natural or 0.25, and a Ken Burns push of
+5.5 % per second capped at 1.2x. Transitions: tiles (9 frames) on the first picture and every third run,
+negative (4) into a line after a 1 s pause, focus (9) at other run starts, glitch (4) on words like
+"broke" or "leaked", whip (4) out of a shot of 1.2 s or more at most every 20 s, flash (1) on every third
+cut inside a run. Captions switch to `reveal` (Inter, 0.057 of the height in 16:9, `ink_on_light`) unless
+off. Display words: one `keyword` (1.2 s) per run on a stressed word, `shock` (0.8 s) for numbers and
+money within round(1.5 per minute), `black_card` for "nothing", "nobody", "none", "wala" or "no one" (at
+most 2); never on a face beat, never overlapping, and keywords and shocks only on `display_worthy`
+words (an amount, an acronym or a concrete word of 5+ letters). When `matte::ready()`, `mega` words go
+behind a cut-out on face beats of 1.2 s or more holding such a word where `face_through` finds the face
+at nearly every check, floor(length / 45 s) of them, at least 1;
+otherwise review gives the `veecut cutout` command. Cues: click per picture change and face beat, nine
+pane clicks per tile reveal, glitch, swish on whip, tick per display word, sub tone per black card,
+impact where the bed returns; none with a `voice_only` style. The bed (`--music`, else the first file in
+`my-sounds/music`) runs from 0 at `bed_volume(voice, music, 5.5)` (0.35 when unmeasured), fade in
+0.03 s, out 0.9 s; `shape_bed` silences it from 0.05 s before the punchline (the last sentence of at
+most 12 words starting after 40 % of the length, not a call to action) to 0.02 s before the next line,
+and pulls it 8 dB under black cards.
+
+#### Studio additions
+
+Footage tab (`footage_panel.rs`): one `footage::search` worker and at most 3 thumbnail downloads,
+answers tagged by search generation; Add and Add at playhead fetch on a background thread and merge
+only `assets`, `sources` and `tracks` through the undo path, refusing if those changed meanwhile.
+Sources tab: rights table, Approve and Flag through `set` ops on `/sources/<asset>/...`, credits with
+Copy. Final-quality export lists `blocking_sources` with Approve buttons and calls `check_final`.
+Inspector: Grade (look, halftone, vignette, recolor), Mask (outline, remove), all transition kinds with
+per-kind default lengths (crossfade and dip 0.5 s, flash 1 frame, negative, glitch and whip 4, tiles
+and focus 9, capped at the clip), "Cut out the speaker" on a selected main-track video clip, the
+documentary text presets, the Reveal caption mode and Ink on light. New edit with the Documentary kind
+takes B-roll files and a find switch. Capture hook: `VEECUT_STUDIO_TAB=media|sources|footage` saves
+only `00-paused.png` of that tab and quits; `VEECUT_STUDIO_SELECT` selects an item id,
+`VEECUT_STUDIO_AT` seeks (seconds), `VEECUT_STUDIO_QUERY` is the Footage search (default `moon`) and
+the capture waits for its thumbnails.
 
 ## Command line (`veecut`)
 
@@ -425,10 +517,10 @@ machine-readable output.
 
 ```
 veecut init [DIR]                     set up a workspace (folders, built-in skill, agent config)
-veecut doctor                         check ffmpeg, transcription, agents and the skills catalog
+veecut doctor                         check ffmpeg, transcription, the cut-out model, agents and the skills catalog
 veecut edit [FILE...] [--kind K] [--aspect 9:16|16:9|4:5|1:1] [--broll FILE...] [--music FILE]
             [--voice FILE] [--copy TEXT|FILE] [--name NAME] [--hook TEXT] [--language CODE]
-            [--clips N] [--no-render]
+            [--clips N] [--no-render] [--find]
                                       run the recipe for kind K on the files, or the newest inbox video;
                                       defaults to talking-head-short (talking-head-long for horizontal style);
                                       prints projects, drafts, what it did and what needs review
@@ -448,22 +540,28 @@ veecut frame [--at T] [--width W] [--out FILE]    composited PNG plus caption pl
 veecut frames [--every S] [--out FILE]            contact sheet; default interval max(length/12, 0.5) seconds
                                       check PNGs default to project .cache; inbox/outbox destinations are refused,
                                       including symlink aliases, before rendering
-veecut captions [--rebuild] [--mode word_pop|highlight|pills|subtitle|off]
+veecut captions [--rebuild] [--mode word_pop|highlight|pills|subtitle|off]   (the parser also takes reveal)
 veecut note "NOTE" [--at T] [--rule]             pin a note; --rule also saves it to my-rules.md
 veecut rules [add "RULE" --words "USER WORDS"]   list or add lasting rules
 veecut style [show|set KEY VALUE]
 veecut skills [sync|list|search Q|show REPO|install REPO [--force]|update [REPO]|remove REPO|recommend [--kind K]]
-veecut qa FILE [--words [-p P]]       --words re-transcribes the render and lists masked or clipped words
+veecut qa FILE [--words]              --words re-transcribes the render (local unless the config picked Groq) and
+                                      lists missing or changed words, with a cut within 0.25 s or a sound
+                                      starting within 0.15 s, and a verdict
 veecut find "IDEA" [--images|--videos] [--from nasa,commons,archive,openverse,pexels] [--count N]
-                                      numbered candidates with licence, plus a contact sheet PNG in .veecut/find/
-veecut fetch N|ID [--role broll|image|music] [-p P]
+                                      numbered candidates with licence and flags (N per provider, 1 to 20,
+                                      default 4), saved to .veecut/find/last.json with the contact sheet last.png
+veecut fetch N|ID [--role broll|image|music]
                                       download a candidate (index from the last find, or its id) into footage/
                                       and add it to the project with its source and licence
 veecut sources [--approve ASSET] [--flag ASSET --reason TEXT] [--credits]
-                                      rights table; a final render refuses flagged sources nobody approved
-veecut sfx [--regenerate]             the built-in synthesized sound kit
+                                      rights table; --approve is the user's step after checking the rights;
+                                      a final render refuses flagged sources nobody approved
+veecut sfx [--regenerate]             the built-in synthesized sound kit: each file's name, length, hit
+                                      time and role, and its folder; writes missing files first
 veecut cutout --at T --dur D [--outline W] [--mega WORD] [--world FILE|ASSET]
-                                      cut the speaker out of the main clip there (needs the matte model)
+                                      cut the speaker out of one main-track clip there, with an optional mega
+                                      word and picture behind; downloads MODNet (about 26 MB) on first use
 veecut agent "PROMPT" [--with opencode|claude|codex|gemini] [--model M] [--effort E]
 veecut agent --models [--with AGENT]    built-in model and effort choices; OpenCode also queries its installed CLI
 veecut mcp                            MCP server on stdio (tools below)
@@ -477,8 +575,12 @@ MCP tools: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`
 `project` accepts the same selectors as CLI `-p`; `frame` and `frames`
 also return the PNG as an image. `transcript_search` takes `phrase`; `cut_phrase` adds
 optional 1-based `occurrence`.
-`veecut edit --kind documentary [--find]` builds the documentary edit; `--find` sources footage
-for lines without `--broll` material from the licence-tracked providers.
+`veecut edit --kind documentary [--find]` builds the documentary edit; `--find` (MCP `edit` `find`)
+sources footage for lines without `--broll` material from the licence-tracked providers.
+`find_footage` takes `idea`, `images`, `videos`, `from` and `count` and returns the contact sheet as an
+image; `fetch_footage` takes `item` and `role`; `sources` takes `flag`, `reason` and `credits` and has
+no approve field, because approving is the user's decision; `cutout` takes `at`, `dur`, `outline`,
+`mega` and `world`; `verify_words` takes `file` (a path or a name in `outbox/`) and is `qa --words`.
 CLI and MCP share these defaults; explicit frame-sheet intervals are clamped to at least
 0.1 seconds. MCP rejects unknown fields and reports missing required arguments.
 Redo uses its own tool; `undo` rejects a `redo` argument.
@@ -558,12 +660,14 @@ private checker expectations keep `invalid = true` across rechecks and require l
 
 `crates/veecut-engine/skill/` holds the agent skill copied into every workspace by
 `veecut init`: `SKILL.md` (router), `workflows/<kind>.md` (one per `VideoKind::slug()`) and
-`reference/{editor-api,notes-and-rules,style-setup}.md`. The workspace module embeds these
+`reference/{editor-api,notes-and-rules,style-setup,sourcing,sound}.md`. The workspace module embeds these
 files with `include_str!`. All workflow and reference paths resolve relative to the loaded
 `SKILL.md` directory (`.agents/skills/veecut/` or `.claude/skills/veecut/`), never the workspace root.
 
 ## Credits
 
 See [CREDITS.md](../CREDITS.md). Code ideas come from free247editor and Herk Edit Kit (MIT),
-editor ideas from OpenCut (MIT, name and logo excluded), and workflow ideas from the projects in
-awesome-claude-video-skills (list CC0; each project under its own license).
+editor ideas from OpenCut (MIT, name and logo excluded), workflow ideas from the projects in
+awesome-claude-video-skills (list CC0; each project under its own license), and the documentary
+edit's ideas and measurements from NextPhase Editor V1 (no code, text, tokens or sounds copied).
+The cut-out model is MODNet (Apache-2.0), downloaded on first use.

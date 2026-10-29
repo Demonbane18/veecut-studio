@@ -12,6 +12,8 @@ VeeCut Studio learned from other people's work. This file says from whom and wha
 
 [awesome-claude-video-skills](https://github.com/zhuyansen/awesome-claude-video-skills) by zhuyansen. The list itself is CC0 1.0, and it is the source of VeeCut's skills catalog. Each listed skill keeps its own license. VeeCut installs a skill from its own repository at a pinned commit and records that commit in `skills.lock.json`.
 
+NextPhase Editor V1 by Jad M.H and the NextPhase AI community, a free Claude Code and OpenCode skill that turns a talking head into a fast documentary edit. VeeCut's documentary edit uses its ideas and published measurements: the pace of picture changes and the face share, the per-picture grades and their shares, the cut effects and their frame counts, the display tiers and their sizes, word-by-word captions that turn to ink on light pictures, the sound grammar (a click on every change, its lag after the picture, its level under the voice and the roles of the kit), a music bed about 5.5 LU under the voice that is cut under the punchline instead of ducked, the footage sources and their traps, and re-transcribing the render to catch masked words. Its licence allows making videos with it but not repackaging it, so none of its code, text, design tokens or sound files are included. VeeCut's code and sounds are its own.
+
 ## Rules adapted from catalog skills
 
 Some workflow files in the built-in skill (`crates/veecut-engine/skill/workflows/`) restate rules from these catalog skills in our own words, with a link to the source. Each was read at the commit below.
@@ -38,12 +40,24 @@ The caption and text fonts in `crates/veecut-engine/assets/fonts/` are under the
 | Archivo Black | Regular | The Archivo Black Project Authors |
 | Bebas Neue | Regular | Dharma Type |
 | Inter | SemiBold | The Inter Project Authors |
-| Montserrat | Bold, ExtraBold | The Montserrat.Git Project Authors |
+| Montserrat | Bold, ExtraBold, Black | The Montserrat.Git Project Authors |
+| Playfair Display | Bold Italic | The Playfair Display Project Authors; Reserved Font Name "Playfair Display" |
+| Bodoni Moda | Bold | The Bodoni Moda Project Authors |
 | Poppins | Bold | The Poppins Project Authors |
+
+The documentary fonts come from their upstream projects, not from any kit. Playfair Display Bold Italic is Google's static release at google/fonts commit `d08233f9c581786e8c834a1f0695a4f27869c119`. Bodoni Moda Bold is a static instance (weight 700, optical size 96, made with fontTools 4.68) of `ofl/bodonimoda` at google/fonts commit `634558fcbd9225a88591dec164f9fdb2716d0bf5`. Montserrat Black is the designer's static TTF from JulietaUla/Montserrat at commit `679ead9bcd0d6cef6d3712369dc49fe72e8bd8d7`.
 
 ## Face detection model
 
 `crates/veecut-engine/assets/models/seeta_fd_frontal_v1.0.bin` is the SeetaFace frontal face detection model, the same file that ships with the rustface crate. It is under the BSD 2-Clause license, copyright the Visual Information Processing and Learning (VIPL) group, Institute of Computing Technology, Chinese Academy of Sciences. The license text is in `assets/models/LICENSE-seetaface.txt`.
+
+## Cut-out model
+
+`veecut cutout` uses MODNet by Zhanghan Ke et al. ([github.com/ZHKKKe/MODNet](https://github.com/ZHKKKe/MODNet)), Apache-2.0, through the ONNX export [Xenova/modnet](https://huggingface.co/Xenova/modnet) (Apache-2.0 on its model card). VeeCut pins revision `fa2fa546052fba4c08921230a26cc69a333fca12`, file `onnx/model.onnx`, 25,888,640 bytes, SHA-256 `07c308cf0fc7e6e8b2065a12ed7fc07e1de8febb7dc7839d7b7f15dd66584df9`. The model is not bundled: it is downloaded on first use to `~/.veecut/models/` and checked against that size and hash.
+
+## Sound effects
+
+The sound kit in `.veecut/sfx/` is synthesized by VeeCut's own code. It contains no recorded or third-party samples.
 
 ## Main libraries
 
@@ -58,10 +72,23 @@ Licenses as reported by `cargo metadata --format-version 1`.
 | whisper.cpp (bundled in whisper-rs-sys) | | MIT, The ggml authors | the speech recognition engine |
 | rustface | 0.1.7 | BSD-2-Clause | face detection for framing |
 | fast_image_resize | 6.1.0 | MIT OR Apache-2.0 | scaling video frames |
-| ureq | 3.5.0 | MIT OR Apache-2.0 | downloads: models, the catalog, skills, Groq |
+| ureq | 3.5.0 | MIT OR Apache-2.0 | downloads: models, the catalog, skills, Groq, found footage |
+| tract-onnx | 0.23.9 | MIT OR Apache-2.0 | running the cut-out model in Rust |
 
 `cargo metadata` lists every other dependency with its license.
 
 ## Not bundled
 
 ffmpeg and ffprobe are separate programs that you install yourself. VeeCut runs them and does not ship them; they come under their own license, which depends on how your build was made. Whisper models are downloaded on first use from the whisper.cpp model repository on Hugging Face into `~/.veecut/models`.
+
+## Found footage
+
+VeeCut bundles no footage. `veecut fetch`, `veecut edit --find` and Studio's Footage tab download files from these providers on request, under each provider's terms:
+
+- NASA Image and Video Library: NASA's media usage guidelines (https://www.nasa.gov/nasa-brand-center/images-and-media/). NASA's own media is public domain; files credited to others are flagged.
+- Wikimedia Commons: each file has its own licence.
+- Internet Archive: each item has its own licence; the Prelinger collection is public domain.
+- Openverse: each picture carries its own Creative Commons licence or public domain mark.
+- Pexels: the Pexels License (https://www.pexels.com/license/).
+
+Each downloaded file keeps its own licence. VeeCut records it with the source page, author and credit line in the project's `sources` and in a `.source.json` file beside the download.

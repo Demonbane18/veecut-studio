@@ -36,7 +36,7 @@ The shape follows the style format (vertical by default); pass `--aspect 16:9` o
 - Shows the last line as the end card, held to the end, plus one more bar for it to land.
 - Cuts the footage and images every 4 beats under the text. Footage plays muted; images get a slow pan and zoom.
 - Plays the music at full level and fades it out at the end. The video is as long as the lines need, at most the length of the song.
-- Adds sound effects from `my-sounds/sfx/` when text lands, unless the style is `voice_only`.
+- Adds sound effects from `my-sounds/sfx/` when text lands (the built-in kit's tick when that folder is empty), unless the style is `voice_only`.
 - Renders `outbox/<slug>-v1.mp4` and checks it.
 
 ## Editing rules

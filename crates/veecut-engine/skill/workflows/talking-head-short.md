@@ -33,7 +33,7 @@ Without a file it edits the newest video in `inbox/`.
 - Uses each `--broll` file once, full frame over the speaker, starting at a sentence after the first 3 s and spread evenly through the video. Each cutaway lasts at most 3 s and plays muted; stills get a slow push-in.
 - Adds captions in the style's mode. Face boxes over time guide each page through crops and punch-ins: lower slot, smaller text, then upper slot clear of the hook. Pages that cannot fit are omitted and reported; missing detections need a visual check. Text and captions get a dark or light scrim when the footage behind them would make them hard to read.
 - Adds a music bed from `--music`, or the first file in `my-sounds/music/` when the style sound is `sfx_music`. It sits 11 dB under the voice, ducks under speech and fades in and out over 1.5 s.
-- Adds sound effects from `my-sounds/sfx/` when text lands, unless the style is `voice_only`.
+- Adds sound effects from `my-sounds/sfx/` when text lands (the built-in kit's tick when that folder is empty), unless the style is `voice_only`.
 - Renders `outbox/<slug>-v1.mp4` and checks it.
 
 ## Editing rules

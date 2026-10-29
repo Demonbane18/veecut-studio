@@ -110,7 +110,8 @@ Adds on-screen text. Wrap words in `*asterisks*` to draw them in the accent colo
 ```
 
 - `preset`: `hook` (big text in the first seconds), `title`, `card` (the default, a rounded card with a line or two), `lower_third` (name and role), `callout` (a label pointing at something), `counter` (a big number or step count like "STEP 2/5"), `label` (a small pill), `quote`, `list` (one line per `\n`, revealed one by one), `kinetic` (one or two words slammed full screen) and `cta` (end card).
-- `anim_in` and `anim_out`: `none`, `fade` (default), `pop`, `slide_up`, `slide_down`, `slide_left`, `slide_right`, `typewriter`, `wipe`.
+- Documentary presets, sized from NextPhase Editor V1's measurements: `keyword` (the stressed word, big white sans at 0.14 of the height that blurs in), `chapter` (a chapter name or proper title in italic serif, 0.126), `shock` (one word in red serif capitals, 0.163, once or twice a minute at most), `black_card` (a small word alone on a black frame) and `mega` (a huge red word at 0.52, drawn under the overlay tracks so a cut-out of the speaker stands in front of it; see `veecut cutout`).
+- `anim_in` and `anim_out`: `none`, `fade`, `pop`, `slide_up`, `slide_down`, `slide_left`, `slide_right`, `typewriter`, `wipe`. Without them each preset uses its default: `none` for `shock`, `black_card` and `mega`, which cut on hard, and `fade` for the rest. The keyword's blur-in is part of its look.
 - `position`: the center of the text, like `{"x":0.5,"y":0.3}`. Without it the preset picks a place inside the platform safe zones.
 - `style` overrides the preset: `font`, `size` (fraction of the height), `color`, `accent`, `background`, `stroke` (outline width as a fraction of the font size), `uppercase`, `align` (`left`, `center`, `right`). Colors are `#RRGGBB` or `#RRGGBBAA`.
 - `track`: a text track id. Without it the text goes on the first text track.
@@ -135,7 +136,36 @@ A JSON merge patch on one item: the fields you give replace the old ones, and a 
 {"op":"patch","item":"clip-9","patch":{"fade_out":0.8}}
 ```
 
-Clip fields: `speed` (the clip covers `duration * speed` seconds of source), `volume`, `muted`, `opacity`, `fit` (`cover` fills and crops around `focus`, `contain` shows the whole picture), `focus` (`{"x":..,"y":..}`), `zooms`, `frame`, `radius`, `fade_in`, `fade_out` (seconds), `transition` (`{"kind":"crossfade","duration":0.3}`; kinds `crossfade`, `dip`, `flash`), `ken_burns` (`{"from_scale":1.0,"to_scale":1.1}` plus optional `from_focus` and `to_focus`) and `duck`.
+Clip fields: `asset` and `src_in` (swap the file under a clip), `speed` (the clip covers `duration * speed` seconds of source), `volume`, `muted`, `opacity`, `fit` (`cover` fills and crops around `focus`, `contain` shows the whole picture), `focus` (`{"x":..,"y":..}`), `zooms`, `frame`, `radius`, `fade_in`, `fade_out` (seconds), `transition`, `ken_burns` (`{"from_scale":1.0,"to_scale":1.1}` plus optional `from_focus` and `to_focus`), `duck`, `grade` and `mask`. `null` removes an optional field: `{"grade":null}`, `{"transition":null}`.
+
+`transition` is how a clip comes in: `{"kind":"negative","duration":0.133}`. On the main track it plays from the previous clip; on an overlay track it is how the clip enters over the picture below. Only `crossfade` overlaps two main clips; the other kinds are cut effects and `duration` is the effect's length. Lengths are frames divided by the fps. The cut-effect lengths below are NextPhase Editor V1's measurements at 30 fps:
+
+| Kind | What it does | Usual length |
+| --- | --- | --- |
+| `crossfade` | blends from the previous clip; on an overlay, fades the clip in | 0.5 s in Studio |
+| `dip` | dips through black | 0.5 s in Studio |
+| `flash` | a quick white flash; on an overlay, a white box the size of its frame | 1 frame (0.033) |
+| `negative` | inverted frames on both sides of the cut, for a chapter or a hard turn | 4 frames (0.133), 2 out and 2 in |
+| `glitch` | a datamosh of sliced, colour-split blocks landing on the clip | 4 frames (0.133) |
+| `tiles` | a 3x3 grid whose panes switch to the clip one per frame, each a white box first | 9 frames (0.3) |
+| `focus` | the clip opens out of focus and racks sharp | 9 frames (0.3) |
+| `whip` | the previous picture zooms out faster and faster, then the clip cuts in | 4 frames (0.133) |
+
+Studio fills in these lengths when you pick a kind, capped at the clip's length. In ops, `duration` is required.
+
+`grade` re-colours one clip's own picture before it is composited; the project look still applies on top. The speaker's camera normally has none.
+
+```json
+{"op":"patch","item":"clip-12","patch":{"grade":{"look":"teal","halftone":0.22,"vignette":0.25}}}
+{"op":"patch","item":"clip-12","patch":{"grade":{"look":"natural","recolor":{"from":0,"to":30,"target":120}}}}
+```
+
+- `look`: `natural` (a little contrast and colour push), `teal` (teal shadows, cream highlights; places and buildings), `mono` (hard black and white; documents, prices, archive), `warm` (amber and sepia; fire, money, history), `cold` (steel blue; technology, night, distance) or `invert` (a negative, for flashes).
+- `halftone` (0 to 1): a printed dot screen in the shadows, so stock stills look less like stock.
+- `vignette` (0 to 1): darker toward the edges.
+- `recolor`: turns one band of hues into another, in degrees from 0 to 360 (0 red, 120 green, 240 blue). `from` above `to` wraps through red.
+
+`mask` cuts a clip out along a mask video, for example the speaker cut out of their own camera: `{"asset":"asset-9","offset":12.4,"outline":0.006}`. `veecut cutout` makes it; do not write one by hand. The mask's brightness is the clip's opacity, `offset` is the source time where the mask video starts, and `outline` (0 to 0.05 of the canvas height) draws a white sticker edge. Patch `outline` to change the edge; to remove a cut-out, delete its clip on the `Cut-out` track.
 
 Text fields: `text`, `preset`, `style`, `position`, `anim_in`, `anim_out`.
 
@@ -172,7 +202,7 @@ Captions (`/captions/...`, one style for every caption page):
 
 | Path | Values |
 | --- | --- |
-| `/captions/mode` | `word_pop`, `highlight`, `pills`, `subtitle`, `off` |
+| `/captions/mode` | `word_pop`, `highlight`, `pills`, `subtitle`, `reveal` (small words appear one by one in their final places as they are said; the documentary look), `off` |
 | `/captions/size` | fraction of the height; 0.035 small, 0.045 medium, 0.06 large |
 | `/captions/position` | vertical center as a fraction of the height; 0.25 upper third, 0.5 middle, 0.75 lower third |
 | `/captions/color` | text color, `#RRGGBB` |
@@ -180,6 +210,7 @@ Captions (`/captions/...`, one style for every caption page):
 | `/captions/stroke` | outline width as a fraction of the font size; 0 turns it off (default 0.12) |
 | `/captions/shadow` | `true` or `false` |
 | `/captions/boxed` | `true` puts every caption in one dark box with a thin light edge |
+| `/captions/ink_on_light` | `true` turns white captions into dark ink with a light halo on light pictures, instead of a dark box (documentary) |
 | `/captions/uppercase` | `true` or `false` |
 | `/captions/font` | a family from `veecut fonts` |
 | `/captions/max_words` | most words on screen at once (default 3) |
@@ -212,6 +243,18 @@ Use the id that `veecut add` printed, not `asset-9`.
 
 Never copy, move or convert files in `inbox/` to do this; the project points at them where they are.
 
+Found footage comes in with `veecut fetch` instead, which also records its source and licence. See `reference/sourcing.md`.
+
+## Sources and rights
+
+`/sources` holds the provenance of every found file, keyed by asset id: `url`, `title`, `author`, `license`, `license_url`, `credit`, `provider`, `flag`, `flag_reason`, `approved` and `retrieved`. `veecut fetch` and the documentary recipe fill it in; `veecut sources` lists it. A final render refuses any flagged source the edit uses that is not `approved`.
+
+```json
+{"op":"set","path":"/sources/asset-4/approved","value":true}
+```
+
+Set `approved` only when the user has checked that file's rights and tells you to approve it. Never decide it yourself, and never approve to get a final render through. To flag a file, prefer `veecut sources --flag ASSET --reason TEXT`.
+
 ## Notes and the ops that fix them
 
 Look up ids with `veecut status --json` and times with `veecut transcript --json`. For phrase cuts, use `transcript-search` and `cut-phrase` instead of timestamp arithmetic.
@@ -241,5 +284,12 @@ Look up ids with `veecut status --json` and times with `veecut transcript --json
 | "Vertical version" | `veecut render --aspect 9:16` |
 | "Horizontal version" | `veecut render --aspect 16:9` |
 | "Undo that", "ibalik mo" | `veecut undo` |
+| "Wrong picture here" (documentary) | `veecut find "IDEA"`, look at the contact sheet, `veecut fetch N`, then patch the B-roll clip at that time: `{"op":"patch","item":"clip-12","patch":{"asset":"asset-15","src_in":0}}`. Keep the clip; delete it only when they want their face there. |
+| "Black and white on this picture" | `{"op":"patch","item":"clip-12","patch":{"grade":{"look":"mono"}}}`; `{"grade":null}` for no grade |
+| "Different transition here" | `{"op":"patch","item":"clip-12","patch":{"transition":{"kind":"tiles","duration":0.3}}}`; `{"transition":null}` for a plain cut |
+| "Move that word", "remove that word" | `move` or `delete` the text item, and do the same to its tick on the `sfx` track |
+| "Big red word behind me" | `veecut cutout --at T --dur D --mega WORD` inside one main-track clip |
+| "Keep the music under the punchline", "fewer clicks" | See Common notes in `workflows/documentary.md` |
+| "This file is fine, I checked it" | Only for the asset they named: `veecut sources --approve ASSET`, or the `set` op above |
 
 After ops from Studio, check a frame if needed, answer briefly and stop. Render or open a video only when the note asks for one. Outside Studio, run `veecut render` for the next draft.

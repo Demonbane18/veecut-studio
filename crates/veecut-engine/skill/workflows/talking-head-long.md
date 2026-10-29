@@ -28,7 +28,7 @@ veecut edit inbox/episode-12.mp4 --kind talking-head-long --broll inbox/office.m
 - Adds no automatic hook.
 - Uses each `--broll` file once as a full-frame cutaway of at most 3 s, muted, at a sentence start after the first 3 s, spread evenly through the video; stills get a slow push-in.
 - Adds captions in the style's mode, moved off the face, with a scrim behind them when the footage would make them hard to read.
-- Adds a ducked music bed (11 dB under the voice, 1.5 s fades) from `--music` or `my-sounds/music/` when the style sound is `sfx_music`, and sound effects on text from `my-sounds/sfx/` unless the style is `voice_only`.
+- Adds a ducked music bed (11 dB under the voice, 1.5 s fades) from `--music` or `my-sounds/music/` when the style sound is `sfx_music`, and sound effects on text from `my-sounds/sfx/` (the built-in kit's tick when that folder is empty) unless the style is `voice_only`.
 - Renders `outbox/<slug>-v1.mp4` and checks it.
 
 ## Editing rules

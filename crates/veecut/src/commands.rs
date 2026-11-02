@@ -18,7 +18,7 @@ use veecut_engine::project::{
     AssetKind, AssetRole, Canvas, CaptionMode, ItemBody, PROJECT_FILE, Project, TrackKind,
     VideoKind,
 };
-use veecut_engine::recipes::{self, EditRequest};
+use veecut_engine::recipes::{self, EditRequest, ExplainerMotion};
 use veecut_engine::render::{self, Quality, RenderOptions};
 use veecut_engine::skills;
 use veecut_engine::style::{self, Format, Style};
@@ -74,6 +74,9 @@ pub struct EditArgs {
     /// Narration or a separate microphone recording.
     #[arg(long)]
     pub voice: Option<PathBuf>,
+    /// Explainer visual motion: hold, push or glide. Omit to keep recipe defaults.
+    #[arg(long, value_name = "MOTION")]
+    pub motion: Option<ExplainerMotion>,
     /// Text the edit shows (promo lines, list items, LRC lyrics), or a path to a text file.
     #[arg(long)]
     pub copy: Option<String>,
@@ -475,6 +478,7 @@ impl Ctx {
             .collect::<Result<_>>()?;
         req.music = args.music.as_deref().map(|f| self.input(f)).transpose()?;
         req.voice = args.voice.as_deref().map(|f| self.input(f)).transpose()?;
+        req.motion = args.motion;
         req.copy = match args.copy {
             Some(c) if Path::new(&c).is_file() => Some(std::fs::read_to_string(&c)?),
             // A shell passes "Line one\nLine two" with a literal backslash-n.

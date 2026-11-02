@@ -213,10 +213,27 @@ These options change what the hook captures. They take effect only with `VEECUT_
 | `podcast` | Podcasts, interviews | One camera: gentle punch-ins. Two to four cameras: synced by sound, cuts to whoever speaks |
 | `clips` | Long video to shorts | Finds the strongest 20 to 60 s moments and makes one vertical draft per moment |
 | `vlog` | Trips, days, events | Footage cut to the music's beat, each shot used once, photos panned and zoomed |
-| `explainer` | Faceless narration | One visual per sentence, heading cards, ducked music; big centered captions without visuals |
+| `explainer` | Faceless narration | Ordered images/video per sentence, hold/push/glide motion, heading cards, ducked music; big centered captions without visuals |
 | `promo` | Launches, ads | Lines of copy slammed on the beat over footage, ending on a call to action |
 | `music-video` | Songs, lyric videos | Footage cut on the beat, lyrics from LRC or transcribed from the song |
 | `documentary` | A talking head as a fast documentary | 16:9, found pictures on most lines, re-coloured, with your face between runs, cut effects, word-by-word captions, a click on every change and a music bed cut under the punchline |
+
+## The faceless explainer
+
+Record your own short narration and arrange owned or licensed visuals in story order:
+
+```sh
+veecut edit --kind explainer --voice inbox/narration.m4a --broll inbox/chart.png inbox/demo.mp4 --motion glide --music my-sounds/music/bed.mp3
+veecut edit inbox/narration.mp4 --kind explainer --broll inbox/chart.png inbox/demo.mp4 --motion hold --no-render
+```
+
+Without `--voice`, an audio source supplies narration, or the first video supplies its sound when no audio source is given. `--voice` always takes precedence. Visuals repeat to cover narration; short B-roll repeats within its sentence without shifting later shots. Visual video audio stays muted. Music follows the style's sound setting.
+
+`--motion hold` leaves framing still, `push` adds a smooth 1.0x to 1.12x zoom, and `glide` adds restrained zoom and alternating focus movement. These options apply to images and videos and are valid only for `explainer`. Omission preserves the original recipe motion. In Studio's New edit, choose Explainer, narration audio or video, ordered B-roll/images, optional music and Recipe default, Hold, Push or Glide.
+
+Write an original factual script and plan its visual beats before recording. Inspect each beat with `veecut frames -p SLUG` and `veecut frame -p SLUG --at T`, then render with `veecut render -p SLUG` and watch the whole draft. After approval, use `veecut render -p SLUG --final`. Original media stays unchanged.
+
+This workflow uses VeeCut's shared Rust preview/export compositor; it installs no external renderer or generation model. Own recordings and local transcription need no paid generation API, though transcription setup may download a model and configured Groq uploads audio. Generated characters and depth/parallax remain external: import finished, rights-cleared clips normally. See [CREDITS.md](CREDITS.md#faceless-and-animated-shorts-source-review) for the reviewed packs' licences and limits.
 
 ## The documentary edit
 

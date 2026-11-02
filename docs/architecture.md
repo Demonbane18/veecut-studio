@@ -63,6 +63,11 @@ Global state lives in `~/.veecut/` (override with `VEECUT_HOME`): `config.toml`,
 - Item bodies: `Clip` (asset piece with speed, volume, fit, focus, zooms, frame, fades,
   transition, Ken Burns, duck), `Text` (preset, style overrides, position, animations;
   `*word*` = accent color) and `Caption` (words with times relative to the item start).
+- `KenBurns.smooth: bool` defaults to false for existing projects (linear interpolation).
+  True applies clamped quintic smootherstep to both scale and focus in the shared transform.
+  `KenBurns.phase: [f32; 2]` defaults to `[0, 1]`, with finite ordered values within 0..1.
+  Slicing composes this phase range while retaining original scale/focus endpoints; evaluation
+  interpolates phase before easing, preserving motion across splits, trims and cut-outs.
 - `Project::source_to_timeline(asset, t)` maps a source time through the cuts.
 - `faces` stores timestamped face boxes in source coordinates, keyed by asset id. Recipes set
   it through ops. Caption layout maps the boxes through the same crop and zoom as the picture.
@@ -334,10 +339,12 @@ pub fn recommended<'a>(catalog: &'a Catalog, kind: VideoKind, n: usize) -> Vec<&
 ### `recipes`, `qa`
 
 ```rust
+pub enum ExplainerMotion { Hold, Push, Glide } // serialized as hold/push/glide
 pub struct EditRequest { pub kind: VideoKind, pub sources: Vec<PathBuf>, pub broll: Vec<PathBuf>, pub music: Option<PathBuf>,
                          pub voice: Option<PathBuf>, pub copy: Option<String>, pub canvas: Option<Canvas>, pub name: Option<String>,
                          pub hook: Option<String>, pub language: Option<String>, pub transcribe: Option<TranscribeOptions>,
-                         pub clips: usize, pub render: bool, pub find: bool /* documentary: search footage */ }
+                         pub clips: usize, pub render: bool, pub find: bool /* documentary: search footage */,
+                         pub motion: Option<ExplainerMotion> }
 pub fn edit(ws: &Workspace, req: &EditRequest, progress: &mut dyn FnMut(&str)) -> Result<EditReport>;
 pub fn check(path: &Path) -> Result<QaReport>; // qa.rs: duration, size, fps, loudness, true peak, black frames, problems
 ```
@@ -348,6 +355,29 @@ cannot cause an upload and whisper.cpp does not use GPU acceleration.
 The harness also sets `VEECUT_LOCAL_CPU_ONLY=1` before starting workers. The transcription
 entry point honors this process-scoped override in inherited CLI and MCP children, even
 when their global config selects Groq.
+
+#### Explainer motion and narration
+
+`ExplainerMotion` exposes `ALL`, `label()`, `slug()` and `FromStr`. `EditRequest.motion`
+defaults to `None`, preserving original recipe motion. An explicit value with another kind
+is rejected before project creation. Hold adds no Ken Burns; Push uses smooth centered
+1.0x to 1.12x zoom; Glide uses smooth modest zoom with alternating restrained focus.
+Explicit modes apply to images and muted visual videos.
+
+`--voice` is authoritative. Otherwise an audio source supplies narration, falling back to
+the first video's audio only when no audio source exists. Ordered visuals repeat to cover
+narration; a short video repeats within its sentence without shifting the next shot boundary.
+Zero-length visuals are rejected. Narration and captions retain coherent timeline times.
+All changes use ops, and preview/export share the Rust transform. Character generation,
+external renderers and depth/parallax models are outside this recipe.
+
+Studio's Explainer New edit takes narration audio/video, ordered B-roll/images with
+Up/Down/Remove, optional music with Choose/Remove, and Recipe default/Hold/Push/Glide.
+Music is forwarded only for Explainer; its B-roll is forwarded without the Documentary-only
+find option. For native welcome-screen QA, run
+`VEECUT_STUDIO_SHOTS=<empty-dir> VEECUT_STUDIO_NEW_KIND=explainer veecut --workspace <ws> studio`
+without a project. This captures the explainer controls and exits; project capture remains
+the playback entrypoint.
 
 ### Documentary modules (done)
 
@@ -520,7 +550,7 @@ veecut init [DIR]                     set up a workspace (folders, built-in skil
 veecut doctor                         check ffmpeg, transcription, the cut-out model, agents and the skills catalog
 veecut edit [FILE...] [--kind K] [--aspect 9:16|16:9|4:5|1:1] [--broll FILE...] [--music FILE]
             [--voice FILE] [--copy TEXT|FILE] [--name NAME] [--hook TEXT] [--language CODE]
-            [--clips N] [--no-render] [--find]
+            [--clips N] [--no-render] [--find] [--motion hold|push|glide]
                                       run the recipe for kind K on the files, or the newest inbox video;
                                       defaults to talking-head-short (talking-head-long for horizontal style);
                                       prints projects, drafts, what it did and what needs review
@@ -575,6 +605,8 @@ MCP tools: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`
 `project` accepts the same selectors as CLI `-p`; `frame` and `frames`
 also return the PNG as an image. `transcript_search` takes `phrase`; `cut_phrase` adds
 optional 1-based `occurrence`.
+`edit` takes optional `motion` (`hold`, `push` or `glide`) for `explainer` only,
+matching CLI `--motion`; omission keeps original recipe motion.
 `veecut edit --kind documentary [--find]` builds the documentary edit; `--find` (MCP `edit` `find`)
 sources footage for lines without `--broll` material from the licence-tracked providers.
 `find_footage` takes `idea`, `images`, `videos`, `from` and `count` and returns the contact sheet as an

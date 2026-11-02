@@ -576,17 +576,34 @@ fn slug(name: &str) -> String {
 pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> {
     let mut visuals: Vec<PathBuf> = Vec::new();
     let mut voice = job.req.voice.clone();
+    let mut first_video = None;
     for s in &job.req.sources {
         let info = media::probe(s)?;
         if info.kind == AssetKind::Audio && voice.is_none() {
             voice = Some(s.clone());
         } else if info.kind != AssetKind::Audio {
+            if info.kind == AssetKind::Video && first_video.is_none() {
+                first_video = Some(s.clone());
+            }
             visuals.push(s.clone());
         }
     }
+    if voice.is_none() {
+        voice = first_video;
+        if !job.req.broll.is_empty() {
+            visuals.retain(|path| Some(path) != voice.as_ref());
+        }
+    }
     visuals.extend(job.req.broll.iter().cloned());
-    let voice =
-        voice.context("an explainer needs a narration recording: pass it with --voice FILE")?;
+    let voice = voice.context(
+        "an explainer needs narration: pass --voice FILE, an audio source, or a video with audio",
+    )?;
+    if !media::probe(&voice)?.has_audio {
+        bail!(
+            "narration source {} has no audio; pass --voice FILE or an audio source",
+            voice.display()
+        );
+    }
     let name = job.req.name.clone().unwrap_or_else(|| stem(&voice));
     let canvas = job.canvas(30.0);
     let (dir, mut p) = job.start(&name, canvas)?;
@@ -639,69 +656,10 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
         }
         job.report.review.push("No images or footage were given, so the captions carry the picture. Add visuals with --broll for a richer explainer.".into());
     } else {
-        let mut cursor = vec![0.0f64; visual_ids.len()];
-        let mut ops = Vec::new();
-        for (n, &(s, e)) in shots.iter().enumerate() {
-            let k = n % visual_ids.len();
-            let asset = p.asset(&visual_ids[k]).context("visual vanished")?.clone();
-            let len = e - s;
-            let src_in = if asset.kind == AssetKind::Video {
-                if cursor[k] + len > asset.duration {
-                    // ponytail: few visuals for a long narration reuse footage from the start; more visuals avoid it.
-                    cursor[k] = 0.0;
-                }
-                let at = cursor[k];
-                cursor[k] += len;
-                at
-            } else {
-                0.0
-            };
-            let len = if asset.kind == AssetKind::Video {
-                len.min(asset.duration - src_in)
-            } else {
-                len
-            };
-            ops.push(Op::AddClip {
-                asset: asset.id.clone(),
-                track: Some("main".into()),
-                start: None,
-                index: None,
-                src_in,
-                duration: Some(len),
-                frame: None,
-                volume: None,
-                duck: None,
-            });
-        }
-        ops::apply_all(&mut p, &ops)?;
-        let ids: Vec<String> = p.main().items.iter().map(|i| i.id.clone()).collect();
-        for (n, id) in ids.iter().enumerate() {
-            let is_image = p
-                .item(id)
-                .and_then(|i| i.clip())
-                .and_then(|c| p.asset(&c.asset))
-                .is_some_and(|a| a.kind == AssetKind::Image);
-            let patch = if is_image {
-                let (from, to) = if n % 2 == 0 {
-                    (Point::new(0.42, 0.5), Point::new(0.58, 0.5))
-                } else {
-                    (Point::new(0.58, 0.45), Point::new(0.42, 0.55))
-                };
-                serde_json::json!({ "ken_burns": KenBurns { from_scale: 1.0, to_scale: 1.12, from_focus: Some(from), to_focus: Some(to) } })
-            } else {
-                serde_json::json!({ "muted": true })
-            };
-            ops::apply(
-                &mut p,
-                &Op::Patch {
-                    item: id.clone(),
-                    patch,
-                },
-            )?;
-        }
+        lay_explainer_visuals(&mut p, &visual_ids, &shots, job.req.motion)?;
         job.report.summary.push(format!(
-            "{} shots from {} visuals, one per sentence",
-            ids.len(),
+            "{} sentence shots from {} visuals (short footage repeats to fill each shot)",
+            shots.len(),
             visual_ids.len()
         ));
     }
@@ -742,12 +700,236 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
     job.finish(&dir, &mut p, progress)
 }
 
+/// Fill every sentence interval before appending the next magnetic main-track shot.
+fn lay_explainer_visuals(
+    p: &mut Project,
+    visuals: &[String],
+    shots: &[(f64, f64)],
+    motion: Option<super::ExplainerMotion>,
+) -> Result<()> {
+    use super::ExplainerMotion;
+
+    if visuals.is_empty() {
+        bail!("explainer visuals cannot be empty");
+    }
+    let mut cursor = vec![0.0; visuals.len()];
+    let mut edits = Vec::new();
+    let mut motions = Vec::new();
+    for (n, &(start, end)) in shots.iter().enumerate() {
+        let k = n % visuals.len();
+        let asset = p.asset(&visuals[k]).context("visual vanished")?;
+        let video = asset.kind == AssetKind::Video;
+        if video && (!asset.duration.is_finite() || asset.duration <= 1e-6) {
+            bail!(
+                "visual {} has no usable video duration",
+                asset.path.display()
+            );
+        }
+        let duration = end - start;
+        if !duration.is_finite() || duration <= 1e-6 {
+            bail!("explainer shot must have a positive finite duration");
+        }
+        let camera = match motion {
+            Some(ExplainerMotion::Hold) => None,
+            None if video => None,
+            mode => {
+                let (from, to) = if mode == Some(ExplainerMotion::Push) {
+                    (Point::new(0.5, 0.5), Point::new(0.5, 0.5))
+                } else if n % 2 == 0 {
+                    (Point::new(0.42, 0.5), Point::new(0.58, 0.5))
+                } else {
+                    (Point::new(0.58, 0.45), Point::new(0.42, 0.55))
+                };
+                Some(KenBurns {
+                    from_scale: 1.0,
+                    to_scale: 1.12,
+                    from_focus: Some(from),
+                    to_focus: Some(to),
+                    smooth: mode.is_some(),
+                    phase: [0.0, 1.0],
+                })
+            }
+        };
+        if video && cursor[k] + duration > asset.duration {
+            cursor[k] = 0.0;
+        }
+        // Bound allocation even for corrupt metadata claiming microsecond-long footage.
+        let segments = if video {
+            (duration / asset.duration).ceil()
+        } else {
+            1.0
+        };
+        if segments > 10_000.0 {
+            bail!(
+                "visual {} is too short for this shot; use a longer video or a still",
+                asset.path.display()
+            );
+        }
+        let mut elapsed = 0.0;
+        for segment in 0..segments as usize {
+            // Equal segments avoid an unusably tiny final clip near a whole-loop boundary.
+            let len = if segment + 1 == segments as usize {
+                duration - elapsed
+            } else {
+                duration / segments
+            };
+            if segments > 1.0 {
+                cursor[k] = 0.0;
+            }
+            edits.push(Op::AddClip {
+                asset: asset.id.clone(),
+                track: Some("main".into()),
+                start: None,
+                index: None,
+                src_in: cursor[k],
+                duration: Some(len),
+                frame: None,
+                volume: Some(0.0),
+                duck: None,
+            });
+            let mut segment_camera = camera.clone();
+            if let Some(camera) = segment_camera.as_mut() {
+                camera.phase = [
+                    (elapsed / duration).clamp(0.0, 1.0) as f32,
+                    ((elapsed + len) / duration).clamp(0.0, 1.0) as f32,
+                ];
+            }
+            motions.push(segment_camera);
+            elapsed += len;
+            if video {
+                cursor[k] += len;
+                if cursor[k] >= asset.duration - 1e-6 {
+                    cursor[k] = 0.0;
+                }
+            }
+        }
+    }
+    let added = ops::apply_all(p, &edits)?;
+    for (id, camera) in added.iter().flat_map(|op| &op.items).zip(motions) {
+        ops::apply(
+            p,
+            &Op::Patch {
+                item: id.clone(),
+                patch: serde_json::json!({ "muted": true, "ken_burns": camera }),
+            },
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ops::apply;
     use crate::project::{Asset, Canvas, ItemBody};
     use crate::transcript::TranscriptWord;
+
+    fn explainer_project(video_duration: f64) -> Project {
+        let mut p = Project::new("explainer", VideoKind::Explainer, Canvas::vertical());
+        for (id, kind, duration) in [
+            ("short", AssetKind::Video, video_duration),
+            ("still", AssetKind::Image, 0.0),
+            ("voice", AssetKind::Audio, 10.0),
+        ] {
+            p.assets.push(Asset {
+                id: id.into(),
+                path: format!("{id}.test").into(),
+                kind,
+                role: if id == "voice" {
+                    AssetRole::Voice
+                } else {
+                    AssetRole::Source
+                },
+                duration,
+                width: if kind == AssetKind::Audio { 0 } else { 640 },
+                height: if kind == AssetKind::Audio { 0 } else { 360 },
+                fps: 30.0,
+                has_audio: kind != AssetKind::Image,
+            });
+        }
+        p
+    }
+
+    #[test]
+    fn short_explainer_video_keeps_sentence_boundaries_and_full_voice() {
+        use super::super::ExplainerMotion;
+        for motion in [
+            None,
+            Some(ExplainerMotion::Hold),
+            Some(ExplainerMotion::Push),
+            Some(ExplainerMotion::Glide),
+        ] {
+            let mut p = explainer_project(1.0);
+            lay_voice(&mut p, "voice", &[(0.0, 10.0)]).unwrap();
+            lay_explainer_visuals(
+                &mut p,
+                &["short".into(), "still".into()],
+                &[(0.0, 2.9), (2.9, 6.12), (6.12, 10.0)],
+                motion,
+            )
+            .unwrap();
+            p.validate().unwrap();
+            let main = &p.main().items;
+            let still = main
+                .iter()
+                .find(|i| i.clip().unwrap().asset == "still")
+                .unwrap();
+            assert!((still.start - 2.9).abs() < 1e-9);
+            assert!((still.end() - 6.12).abs() < 1e-9);
+            assert!((main.last().unwrap().end() - 10.0).abs() < 1e-9);
+            let voice = p
+                .tracks
+                .iter()
+                .flat_map(|t| &t.items)
+                .find(|i| i.clip().is_some_and(|c| c.asset == "voice"))
+                .unwrap();
+            assert_eq!(voice.end(), 10.0);
+            for pair in main.windows(2) {
+                assert!((pair[0].end() - pair[1].start).abs() < 1e-9);
+                let (a, b) = (pair[0].clip().unwrap(), pair[1].clip().unwrap());
+                if a.asset == b.asset {
+                    if let (Some(a), Some(b)) = (&a.ken_burns, &b.ken_burns) {
+                        assert_eq!(a.phase[1], b.phase[0], "camera must not reset on repeat");
+                    }
+                }
+            }
+            for item in main {
+                let clip = item.clip().unwrap();
+                assert!(clip.muted);
+                assert_eq!(clip.volume, 0.0);
+                assert_eq!(
+                    clip.ken_burns.is_some(),
+                    match motion {
+                        Some(ExplainerMotion::Hold) => false,
+                        None => clip.asset == "still",
+                        _ => true,
+                    }
+                );
+                if let Some(camera) = &clip.ken_burns {
+                    assert_eq!(camera.smooth, motion.is_some());
+                    if motion == Some(ExplainerMotion::Push) {
+                        assert_eq!(camera.from_focus, Some(Point::new(0.5, 0.5)));
+                        assert_eq!(camera.to_focus, camera.from_focus);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explainer_rejects_unusable_visuals_and_handles_near_whole_repeats() {
+        for duration in [0.0, 1e-7] {
+            let mut p = explainer_project(duration);
+            let error = lay_explainer_visuals(&mut p, &["short".into()], &[(0.0, 3.0)], None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("no usable video duration"), "{error}");
+            assert!(p.main().items.is_empty());
+        }
+        let mut p = explainer_project(1.0);
+        lay_explainer_visuals(&mut p, &["short".into()], &[(0.0, 2.0000001)], None).unwrap();
+        assert!((p.main().items.last().unwrap().end() - 2.0000001).abs() < 1e-9);
+    }
 
     fn transcript(text: &str) -> Transcript {
         let words: Vec<_> = text

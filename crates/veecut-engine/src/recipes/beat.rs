@@ -271,6 +271,8 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
                     to_scale: 1.1,
                     from_focus: Some(a),
                     to_focus: Some(b),
+                    smooth: false,
+                    phase: [0.0, 1.0],
                 })?;
             }
             if kind == VideoKind::Vlog && n > 0 && n % 8 == 0 {

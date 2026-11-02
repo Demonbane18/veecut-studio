@@ -44,9 +44,9 @@ pub(crate) fn view_at(clip: &Clip, local_t: f64, duration: f64) -> (f32, Point) 
     let base = clip.focus.unwrap_or(Point::CENTER);
     let (mut scale, mut focus) = if let Some(kb) = &clip.ken_burns {
         let p = if duration > 1e-9 {
-            (local_t / duration).clamp(0.0, 1.0) as f32
+            kb.progress(local_t / duration)
         } else {
-            0.0
+            kb.progress(0.0)
         };
         let from = kb.from_focus.unwrap_or(base);
         let to = kb.to_focus.unwrap_or(base);
@@ -336,6 +336,85 @@ mod tests {
             scale,
             focus: None,
             ease,
+        }
+    }
+
+    #[test]
+    fn ken_burns_phase_preserves_nested_samples() {
+        let mut clip = Clip::new("still", 0.0);
+        clip.focus = Some(Point::new(0.3, 0.7));
+        for smooth in [false, true] {
+            clip.ken_burns = Some(crate::project::KenBurns {
+                from_scale: 1.0,
+                to_scale: 1.8,
+                from_focus: None,
+                to_focus: Some(Point::new(0.7, 0.3)),
+                smooth,
+                phase: [0.0, 1.0],
+            });
+            let mut cut = clip.clone();
+            cut.ken_burns.as_mut().unwrap().retain_phase(0.2, 0.8);
+            let mut nested = cut.clone();
+            nested
+                .ken_burns
+                .as_mut()
+                .unwrap()
+                .retain_phase(1.0 / 6.0, 4.0 / 6.0);
+            for (part, start, duration) in [(&cut, 2.0, 6.0), (&nested, 3.0, 3.0)] {
+                for fraction in [0.0, 0.1, 0.25, 0.5, 0.9, 1.0] {
+                    let a = view_at(part, fraction * duration, duration);
+                    let b = view_at(&clip, start + fraction * duration, 10.0);
+                    assert!(
+                        [a.0 - b.0, a.1.x - b.1.x, a.1.y - b.1.y]
+                            .iter()
+                            .all(|d| d.abs() < 1e-6)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ken_burns_legacy_smooth_endpoints_and_frame_rates() {
+        let mut clip = Clip::new("still", 0.0);
+        clip.focus = Some(Point::new(0.25, 0.75));
+        clip.ken_burns = Some(
+            serde_json::from_str(
+                r#"{"from_scale":1.0,"to_scale":2.0,"to_focus":{"x":0.75,"y":0.25}}"#,
+            )
+            .unwrap(),
+        );
+        let legacy = clip.ken_burns.as_ref().unwrap();
+        assert!(!legacy.smooth);
+        assert_eq!(legacy.phase, [0.0, 1.0]);
+        assert_eq!(view_at(&clip, 1.0, 4.0), (1.25, Point::new(0.375, 0.625)));
+        clip.ken_burns.as_mut().unwrap().smooth = true;
+        assert_eq!(view_at(&clip, -1.0, 4.0), (1.0, Point::new(0.25, 0.75)));
+        assert_eq!(view_at(&clip, 5.0, 4.0), (2.0, Point::new(0.75, 0.25)));
+        assert_eq!(
+            view_at(&clip, 1.0, 4.0),
+            (1.1035156, Point::new(0.3017578, 0.6982422))
+        );
+        // Frame-step each rate, then seek backwards through common 30 Hz timestamps.
+        // Scale and normalized focus must agree within 1e-6, independent of history.
+        for hz in [30, 60, 120] {
+            for frame in 0..=4 * hz {
+                let t = frame as f64 / hz as f64;
+                let (scale, focus) = view_at(&clip, t, 4.0);
+                assert!((1.0..=2.0).contains(&scale));
+                assert!((0.25..=0.75).contains(&focus.x));
+                assert!((0.25..=0.75).contains(&focus.y));
+            }
+            for frame in (0..=120).rev() {
+                let t = (frame * (hz / 30)) as f64 / hz as f64;
+                let a = view_at(&clip, t, 4.0);
+                let b = view_at(&clip, frame as f64 / 30.0, 4.0);
+                assert!(
+                    [a.0 - b.0, a.1.x - b.1.x, a.1.y - b.1.y]
+                        .iter()
+                        .all(|d| d.abs() < 1e-6)
+                );
+            }
         }
     }
 

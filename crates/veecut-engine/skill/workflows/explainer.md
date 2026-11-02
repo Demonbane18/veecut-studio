@@ -15,20 +15,34 @@ The user has a voice recording (or a video whose sound is the narration) and pic
 ## Command
 
 ```
-veecut edit --kind explainer --voice inbox/narration.m4a --broll inbox/img1.jpg inbox/img2.jpg inbox/city.mp4 --json
-veecut edit inbox/narration.m4a inbox/chart.png --kind explainer --copy headings.txt --json
+veecut edit --kind explainer --voice inbox/narration.m4a --broll inbox/img1.jpg inbox/img2.jpg inbox/city.mp4 --motion glide --music my-sounds/music/bed.mp3 --json
+veecut edit inbox/narration.mp4 --kind explainer --broll inbox/chart.png inbox/demo.mp4 --motion hold --copy headings.txt --no-render --json
 ```
 
-An audio file among the files counts as the narration when `--voice` is not given. `--copy` takes the heading lines, separated by `\n` (`--copy "Why rent keeps rising\nWhat you can do"`), or the path to a text file with one line per heading.
+`--voice` takes precedence. Without it, an audio source supplies narration; if there is no audio source, the first video supplies its sound. Put visuals in `--broll` in story order. `--copy` takes heading lines separated by `\n` (`--copy "Why rent keeps rising\nWhat you can do"`), or a text file with one heading per line.
+
+Other source visuals come first, followed by `--broll` in its supplied order. When the first source video supplies narration, it is excluded from the visuals if B-roll is supplied; without B-roll, its picture remains as a muted visual.
+
+`--motion` is explainer-only: `hold` adds no camera move, `push` smoothly zooms from 1.0x to 1.12x, and `glide` combines a small smooth zoom with alternating focus movement. These choices apply to images and muted video. Omit the flag to keep the recipe's original motion. Studio calls this choice Recipe default.
 
 ## What the recipe does
 
 - Puts the narration on a voice track and cuts its pauses (over 0.55 s with the natural pace, over 0.25 s when tight) and its stutters, false starts and high-confidence retakes.
-- Shows one visual per sentence, in the order given, merging sentences shorter than 1.5 s into the next. Images get a slow pan and zoom; footage plays muted. With fewer visuals than sentences, they repeat, and long footage restarts from its beginning.
+- Shows one visual per sentence, in the order given, merging sentences shorter than 1.5 s into the next. Visuals repeat when needed to cover narration. A short video repeats within its sentence without moving the next shot boundary; footage plays muted. Motion follows `--motion`, or the original recipe when omitted.
 - Without any visuals, the captions become the picture: big and centered.
 - Turns each `--copy` line into a heading card near the top, one per shot from the start, up to 4 s each.
 - Adds a ducked music bed from `--music` or `my-sounds/music/` when the style sound is `sfx_music`, and sound effects on text unless the style is `voice_only`.
-- Renders `outbox/<slug>-v1.mp4` and checks it.
+- Renders `outbox/<slug>-v1.mp4` and checks it, unless `--no-render` is set.
+
+## Produce and review
+
+1. Write a short original script with one factual claim per beat. Check claims against sources; keep uncertain details qualified. Plan each beat's spoken line, visual and heading before recording. Do not reuse a pack's sample story as verified history.
+2. Record your own narration locally, then choose your own or licensed pictures, clips and music. Keep source pages and credit requirements; see `reference/sourcing.md`. Recording and native editing need no paid generation service. Local transcription downloads its model on first use; check transcription settings because configured Groq uploads audio.
+3. Order visuals by narration beat. Use `hold` for diagrams or text that needs reading, `push` for emphasis, or `glide` for a gentle change of framing. Motion is optional; check crops instead of making every shot move.
+4. Read the recipe's review items and inspect `veecut frames -p SLUG`. Use `veecut frame -p SLUG --at T` at each beat's start, middle and end. Check the final visual, caption timing, repeated footage and safe areas. Fix through ops; never overwrite originals.
+5. Outside Studio, render with `veecut render -p SLUG`, watch the whole draft and listen for clear narration over music. After user approval, run `veecut render -p SLUG --final`. In Studio, follow the router's preview-first rule and export only when requested.
+
+VeeCut supplies native image/video editing and camera motion. Generated characters, 3D sets and depth/parallax generation remain external; import their finished, rights-cleared clips as ordinary B-roll. Do not install an unknown root skill or run its scripts to complete this workflow.
 
 ## Editing rules
 
@@ -38,7 +52,7 @@ From Herk Edit Kit (MIT):
 - One line of credibility, then show the list of what is coming early, as an open loop. Each item gets a heading card, a one-line definition and visuals. End with a resolution that calls back to the hook, then the call to action.
 - Text and graphics land within 2 frames of the spoken word, at most 0.15 s early.
 - A graphic shows the example, the relationship, the evidence or the consequence, not a third restatement of the words.
-- Every shot moves: stills get a slow push; no frozen frames.
+- The original playbook asks for movement in every shot. For this workflow, deliberate holds are valid; choose motion to suit the material.
 - The music bed sits about 11 dB under the voice, ducked under speech, quieter in the first 1 to 2 s.
 
 From [vincentsch/explainroo](https://github.com/vincentsch/explainroo/blob/e95232c8d535ed2aa390e7b1caee0d1326dd9e83/AGENTS.md) (MIT), useful when the user asks for help with the script before recording:
@@ -66,3 +80,5 @@ More in `reference/editor-api.md`, relative to the loaded `SKILL.md` directory, 
 ## More skills
 
 `veecut skills recommend --kind explainer` lists catalog skills from the `explainer` and `motion` categories. Many of them draw animated scenes with code and need Node and a browser; read their README first.
+
+The reviewed animated-shorts and Faceless Videos v2 packs informed beat planning, narration-first visual order and restrained motion. Their licences, source identities and limits are disclosed in `reference/sourcing.md`; neither pack is installed or bundled.

@@ -17,7 +17,7 @@ use veecut_engine::{
     media,
     ops::{self, Op},
     project::*,
-    recipes::{self, EditReport, EditRequest},
+    recipes::{self, EditReport, EditRequest, ExplainerMotion},
     render::{self, Quality, RenderOptions},
     workspace::Workspace,
 };
@@ -186,6 +186,8 @@ pub(crate) struct Studio {
     new_source: Option<PathBuf>,
     new_find: bool,
     new_broll: Vec<PathBuf>,
+    new_music: Option<PathBuf>,
+    new_motion: Option<ExplainerMotion>,
     footage: footage_panel::FootagePanel,
     doc_work: Option<documentary::Work>,
     cutout: documentary::Cutout,
@@ -252,6 +254,8 @@ impl Studio {
             new_source: None,
             new_find: false,
             new_broll: Vec::new(),
+            new_music: None,
+            new_motion: None,
             footage: footage_panel::FootagePanel::default(),
             doc_work: None,
             cutout: documentary::Cutout::default(),
@@ -271,6 +275,14 @@ impl Studio {
         studio.capture =
             Capture::from_env(studio.document.as_ref().map(|doc| doc.project.duration()))?;
         if studio.capture.is_some() {
+            if let Ok(kind) = std::env::var("VEECUT_STUDIO_NEW_KIND") {
+                anyhow::ensure!(
+                    studio.document.is_none(),
+                    "VEECUT_STUDIO_NEW_KIND needs Studio without a project"
+                );
+                studio.new_kind = VideoKind::from_slug(&kind)
+                    .context("VEECUT_STUDIO_NEW_KIND must be a video kind such as explainer")?;
+            }
             studio.tab = match std::env::var("VEECUT_STUDIO_TAB").as_deref() {
                 Ok("footage") => Tab::Footage,
                 Ok("sources") => Tab::Sources,
@@ -727,23 +739,51 @@ impl Studio {
                         for kind in VideoKind::ALL { ui.selectable_value(&mut self.new_kind, kind, kind.label()); }
                     });
                     canvas_combo(ui, "new_canvas", &mut self.new_canvas);
-                    if ui.button("Choose source file...").clicked() { self.new_source = rfd::FileDialog::new().add_filter("Video or audio", &["mp4", "mov", "mkv", "webm", "m4v", "mp3", "wav", "m4a", "aiff", "flac"]).pick_file(); }
+                    let source_label = if self.new_kind == VideoKind::Explainer { "Choose narration (audio or video)..." } else { "Choose source file..." };
+                    if ui.button(source_label).clicked() { self.new_source = rfd::FileDialog::new().add_filter("Video or audio", &["mp4", "mov", "mkv", "webm", "m4v", "mp3", "wav", "m4a", "aiff", "flac"]).pick_file(); }
                     if let Some(path) = &self.new_source { ui.label(path.display().to_string()); }
                     if self.new_kind == VideoKind::Documentary {
                         ui.checkbox(&mut self.new_find, "Find footage online (free, licence-tracked)");
+                    }
+                    if matches!(self.new_kind, VideoKind::Documentary | VideoKind::Explainer) {
+                        let ordered = self.new_kind == VideoKind::Explainer;
+                        if ordered { ui.label("Visuals (in playback order)"); }
                         if ui.button("Choose B-roll files...").clicked() {
                             if let Some(paths) = rfd::FileDialog::new().add_filter("Video or pictures", &["mp4", "mov", "mkv", "webm", "png", "jpg", "jpeg", "webp"]).pick_files() {
                                 self.new_broll.extend(paths);
                             }
                         }
                         let mut remove = None;
+                        let mut reorder = None;
                         for (index, path) in self.new_broll.iter().enumerate() {
                             ui.horizontal_wrapped(|ui| {
+                                if ordered { ui.label(format!("{}.", index + 1)); }
                                 ui.label(filename(path));
+                                if ordered {
+                                    if ui.add_enabled(index > 0, egui::Button::new("Up").small()).clicked() { reorder = Some((index, index - 1)); }
+                                    if ui.add_enabled(index + 1 < self.new_broll.len(), egui::Button::new("Down").small()).clicked() { reorder = Some((index, index + 1)); }
+                                }
                                 if ui.small_button("Remove").clicked() { remove = Some(index); }
                             });
                         }
                         if let Some(index) = remove { self.new_broll.remove(index); }
+                        else if let Some((from, to)) = reorder { self.new_broll.swap(from, to); }
+                    }
+                    if self.new_kind == VideoKind::Explainer {
+                        ui.label("Music (optional)");
+                        if ui.button("Choose music...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().add_filter("Audio", &["mp3", "wav", "m4a", "aac", "aiff", "flac"]).pick_file() { self.new_music = Some(path); }
+                        }
+                        if let Some(path) = &self.new_music {
+                            let mut remove = false;
+                            ui.horizontal_wrapped(|ui| { ui.label(filename(path)); remove = ui.small_button("Remove music").clicked(); });
+                            if remove { self.new_music = None; }
+                        }
+                        ui.label("Motion");
+                        egui::ComboBox::from_id_salt("new_motion").selected_text(self.new_motion.map_or("Recipe default", |motion| motion.label())).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.new_motion, None, "Recipe default");
+                            for motion in ExplainerMotion::ALL { ui.selectable_value(&mut self.new_motion, Some(motion), motion.label()); }
+                        });
                     }
                     let ready = self.new_source.is_some() && !self.new_name.trim().is_empty() && self.auto.is_none();
                     ui.horizontal(|ui| {
@@ -793,7 +833,13 @@ impl Studio {
         request.name = Some(self.new_name.trim().to_string());
         if self.new_kind == VideoKind::Documentary {
             request.find = self.new_find;
+        }
+        if matches!(self.new_kind, VideoKind::Documentary | VideoKind::Explainer) {
             request.broll = self.new_broll.clone();
+        }
+        if self.new_kind == VideoKind::Explainer {
+            request.music = self.new_music.clone();
+            request.motion = self.new_motion;
         }
         // The editor previews in place; render from Export when the edit looks right.
         request.render = false;
@@ -1518,12 +1564,13 @@ impl eframe::App for Studio {
         }
         self.export_dialog(&ctx);
         if let Some(capture) = &mut self.capture {
-            let preview_ready = (self.tab != Tab::Footage || self.footage.ready())
-                && self.texture.is_some()
-                && self
-                    .wave_pending
-                    .iter()
-                    .all(|id| self.waveforms.contains_key(id));
+            let preview_ready = self.document.is_none()
+                || ((self.tab != Tab::Footage || self.footage.ready())
+                    && self.texture.is_some()
+                    && self
+                        .wave_pending
+                        .iter()
+                        .all(|id| self.waveforms.contains_key(id)));
             let agent_ready = self.services.agents_ready();
             match capture.advance(&ctx, preview_ready, Some(self.playhead), agent_ready) {
                 Ok(capture::Action::Play) => self.toggle_play(&ctx),

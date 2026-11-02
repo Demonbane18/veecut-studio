@@ -730,6 +730,33 @@ pub struct KenBurns {
     pub from_focus: Option<Point>,
     #[serde(default)]
     pub to_focus: Option<Point>,
+    /// Ease scale and focus with quintic smootherstep; false preserves linear motion.
+    #[serde(default)]
+    pub smooth: bool,
+    /// Retained portion of the original motion after a trim or split.
+    #[serde(default = "full_motion_phase")]
+    pub phase: [f32; 2],
+}
+
+fn full_motion_phase() -> [f32; 2] {
+    [0.0, 1.0]
+}
+
+impl KenBurns {
+    pub(crate) fn progress(&self, t: f64) -> f32 {
+        let t = self.phase[0] as f64 + (self.phase[1] - self.phase[0]) as f64 * t.clamp(0.0, 1.0);
+        if self.smooth {
+            (t * t * t * (t * (t * 6.0 - 15.0) + 10.0)) as f32
+        } else {
+            t as f32
+        }
+    }
+
+    pub(crate) fn retain_phase(&mut self, from: f64, to: f64) {
+        let [start, end] = self.phase;
+        let at = |t: f64| start + (end - start) * t.clamp(0.0, 1.0) as f32;
+        self.phase = [at(from), at(to)];
+    }
 }
 
 /// A piece of an asset placed on the timeline.
@@ -1359,6 +1386,26 @@ impl Project {
                         );
                     }
                 }
+                if let Some(kb) = &c.ken_burns {
+                    if !(0.0..=1.0).contains(&kb.phase[0])
+                        || !(kb.phase[0]..=1.0).contains(&kb.phase[1])
+                    {
+                        bail!("clip {id}: Ken Burns phase must satisfy 0 <= start <= end <= 1");
+                    }
+                    if ![kb.from_scale, kb.to_scale]
+                        .iter()
+                        .all(|s| s.is_finite() && *s > 0.0)
+                    {
+                        bail!("clip {id}: Ken Burns scales must be finite and positive");
+                    }
+                    if ![kb.from_focus, kb.to_focus]
+                        .into_iter()
+                        .flatten()
+                        .all(|p| (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y))
+                    {
+                        bail!("clip {id}: Ken Burns focus coordinates must be between 0 and 1");
+                    }
+                }
                 for z in &c.zooms {
                     // A negative `at` keeps the phase of a zoom that began before this clip,
                     // for example on a cut-out copied from part of a main-track clip.
@@ -1432,6 +1479,52 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ken_burns_validates_and_defaults_legacy_json() {
+        let mut p = Project::new("motion", VideoKind::Explainer, Canvas::landscape());
+        p.assets.push(asset("a", 60.0));
+        p.main_mut().items.push(clip_item("clip", 0.0, 4.0));
+        let legacy: KenBurns =
+            serde_json::from_str(r#"{"from_scale":1.0,"to_scale":1.12}"#).unwrap();
+        assert!(!legacy.smooth);
+        assert_eq!(legacy.phase, [0.0, 1.0]);
+        p.main_mut().items[0].clip_mut().unwrap().ken_burns = Some(legacy.clone());
+        p.validate().unwrap();
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(serde_json::from_str::<Project>(&json).unwrap(), p);
+        for phase in [[-0.1, 1.0], [0.8, 0.2], [0.0, 1.1], [f32::NAN, 1.0]] {
+            let kb = p.main_mut().items[0]
+                .clip_mut()
+                .unwrap()
+                .ken_burns
+                .as_mut()
+                .unwrap();
+            *kb = legacy.clone();
+            kb.phase = phase;
+            assert!(p.validate().is_err());
+        }
+        for scale in [0.0, -1.0, f32::INFINITY, f32::NAN] {
+            let kb = p.main_mut().items[0]
+                .clip_mut()
+                .unwrap()
+                .ken_burns
+                .as_mut()
+                .unwrap();
+            *kb = legacy.clone();
+            kb.to_scale = scale;
+            assert!(p.validate().is_err());
+        }
+        let kb = p.main_mut().items[0]
+            .clip_mut()
+            .unwrap()
+            .ken_burns
+            .as_mut()
+            .unwrap();
+        *kb = legacy;
+        kb.to_focus = Some(Point::new(f32::NAN, 0.5));
+        assert!(p.validate().is_err());
+    }
 
     fn asset(id: &str, duration: f64) -> Asset {
         Asset {

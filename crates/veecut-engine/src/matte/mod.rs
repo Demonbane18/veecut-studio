@@ -4,9 +4,7 @@ mod filter;
 mod model;
 
 use crate::ops::{self, Op};
-use crate::project::{
-    AssetKind, AssetRole, Clip, Item, ItemBody, Mask, Point, Project, Track, TrackKind,
-};
+use crate::project::{AssetKind, AssetRole, Clip, Item, ItemBody, Mask, Project, Track, TrackKind};
 use crate::{media, workspace::Workspace};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
@@ -161,21 +159,7 @@ fn subclip(main: &Item, from: f64, to: f64) -> Result<Clip> {
         zoom.at -= offset;
     }
     if let Some(kb) = &mut clip.ken_burns {
-        let a = (offset / main.duration) as f32;
-        let b = ((to - main.start) / main.duration) as f32;
-        let scale = |p: f32| kb.from_scale + (kb.to_scale - kb.from_scale) * p;
-        let from_scale = scale(a);
-        let to_scale = scale(b);
-        let start = kb.from_focus.unwrap_or(clip.focus.unwrap_or(Point::CENTER));
-        let end = kb.to_focus.unwrap_or(clip.focus.unwrap_or(Point::CENTER));
-        let focus = |p| Point {
-            x: start.x + (end.x - start.x) * p,
-            y: start.y + (end.y - start.y) * p,
-        };
-        kb.from_scale = from_scale;
-        kb.to_scale = to_scale;
-        kb.from_focus = Some(focus(a));
-        kb.to_focus = Some(focus(b));
+        kb.retain_phase(offset / main.duration, (to - main.start) / main.duration);
     }
     Ok(clip)
 }
@@ -388,7 +372,7 @@ fn upsample(src: &[f32], sw: usize, sh: usize, dst: &mut [f32], dw: usize, dh: u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{Canvas, Fit, KenBurns, VideoKind, Zoom};
+    use crate::project::{Canvas, Fit, KenBurns, Point, VideoKind, Zoom};
     #[test]
     fn rejects_cut_crossings_and_preserves_subrange_framing() {
         let mut p = Project::new("test", VideoKind::Documentary, Canvas::landscape());
@@ -408,6 +392,8 @@ mod tests {
             to_scale: 2.0,
             from_focus: None,
             to_focus: Some(Point::CENTER),
+            smooth: false,
+            phase: [0.0, 1.0],
         });
         p.main_mut().items.push(Item {
             id: "one".into(),
@@ -429,38 +415,48 @@ mod tests {
         );
         assert!(covering(&p, 0.0, 8.0).is_ok());
         assert!(covering(&p, f64::NAN, 2.0).is_err());
-        let main = covering(&p, 2.0, 4.0).unwrap();
-        let cut = subclip(main, 2.0, 4.0).unwrap();
-        assert_eq!(cut.asset, "camera");
-        assert_eq!(cut.src_in, 14.0);
-        assert_eq!(cut.speed, 2.0);
-        assert_eq!(cut.fit, Fit::Contain);
-        assert_eq!(cut.focus, main.clip().unwrap().focus);
-        assert_eq!(cut.zooms[0].at, -1.0);
-        assert_eq!(cut.zooms[0].duration, 4.0);
-        assert_eq!(cut.ken_burns.as_ref().unwrap().from_scale, 1.25);
-        assert_eq!(cut.ken_burns.as_ref().unwrap().to_scale, 1.5);
-        for t in [0.0, 0.2, 0.8, 1.9] {
-            let rect = crate::project::Rect {
-                x: 0.2,
-                y: 0.2,
-                w: 0.3,
-                h: 0.3,
-            };
-            let a = crate::render::canvas_rect(&cut, (1280, 720), (1280, 720), t, 2.0, rect);
-            let b = crate::render::canvas_rect(
-                main.clip().unwrap(),
-                (1280, 720),
-                (1280, 720),
-                t + 2.0,
-                8.0,
-                rect,
-            );
-            assert!(
-                [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h]
-                    .iter()
-                    .all(|d| d.abs() < 1e-6)
-            );
+        for smooth in [false, true] {
+            p.main_mut().items[0]
+                .clip_mut()
+                .unwrap()
+                .ken_burns
+                .as_mut()
+                .unwrap()
+                .smooth = smooth;
+            let main = covering(&p, 2.0, 4.0).unwrap();
+            let cut = subclip(main, 2.0, 4.0).unwrap();
+            assert_eq!(cut.asset, "camera");
+            assert_eq!(cut.src_in, 14.0);
+            assert_eq!(cut.speed, 2.0);
+            assert_eq!(cut.fit, Fit::Contain);
+            assert_eq!(cut.focus, main.clip().unwrap().focus);
+            assert_eq!(cut.zooms[0].at, -1.0);
+            assert_eq!(cut.zooms[0].duration, 4.0);
+            assert_eq!(cut.ken_burns.as_ref().unwrap().from_scale, 1.0);
+            assert_eq!(cut.ken_burns.as_ref().unwrap().to_scale, 2.0);
+            assert_eq!(cut.ken_burns.as_ref().unwrap().phase, [0.25, 0.5]);
+            for t in [0.0, 0.2, 0.8, 1.9] {
+                let rect = crate::project::Rect {
+                    x: 0.2,
+                    y: 0.2,
+                    w: 0.3,
+                    h: 0.3,
+                };
+                let a = crate::render::canvas_rect(&cut, (1280, 720), (1280, 720), t, 2.0, rect);
+                let b = crate::render::canvas_rect(
+                    main.clip().unwrap(),
+                    (1280, 720),
+                    (1280, 720),
+                    t + 2.0,
+                    8.0,
+                    rect,
+                );
+                assert!(
+                    [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h]
+                        .iter()
+                        .all(|d| d.abs() < 1e-6)
+                );
+            }
         }
     }
 }

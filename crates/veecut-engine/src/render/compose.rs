@@ -817,6 +817,8 @@ mod tests {
                 to_scale: 1.15,
                 from_focus: None,
                 to_focus: Some(Point::new(0.55, 0.5)),
+                smooth: false,
+                phase: [0.0, 1.0],
             });
             c
         };

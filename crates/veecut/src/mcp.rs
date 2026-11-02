@@ -44,7 +44,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "edit",
-                description: "Edit recordings with the recipe for a kind of video (talking-head-short, talking-head-long, tutorial, podcast, clips, vlog, explainer, promo, music-video, documentary) and render a draft to outbox/. Without files it edits the newest video in inbox/. Documentary edits take B-roll files and find=true to search free, licence-tracked footage. Takes minutes for long recordings.",
+                description: "Edit recordings with the recipe for a kind of video (talking-head-short, talking-head-long, tutorial, podcast, clips, vlog, explainer, promo, music-video, documentary) and render a draft to outbox/. Without files it edits the newest video in inbox/. Explainer accepts audio or video narration, ordered B-roll, optional music and motion hold/push/glide (omit for recipe defaults). Documentary edits take B-roll files and find=true to search free, licence-tracked footage. Takes minutes for long recordings.",
                 schema: input_schema::<EditArgs>(),
             },
             Tool {
@@ -388,6 +388,38 @@ pub fn serve(workspace: Option<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_edit_motion_uses_shared_optional_enum_and_rejects_wrong_kind() {
+        use veecut_engine::recipes::ExplainerMotion;
+        let omitted: EditArgs = serde_json::from_value(json!({"kind": "explainer"})).unwrap();
+        assert_eq!(omitted.motion, None);
+        for motion in ExplainerMotion::ALL {
+            let args: EditArgs =
+                serde_json::from_value(json!({"kind": "explainer", "motion": motion.slug()}))
+                    .unwrap();
+            assert_eq!(args.motion, Some(motion));
+        }
+        assert!(serde_json::from_value::<EditArgs>(json!({"motion": "spin"})).is_err());
+        let schema = input_schema::<EditArgs>();
+        assert!(schema["properties"].get("motion").is_some());
+        let (_temp, ctx, _) = crate::commands::tests::speech_project();
+        let result = handle(
+            &Some(ctx.ws.root.clone()),
+            "tools/call",
+            &json!({
+                "name": "edit", "arguments": {"kind": "documentary", "motion": "hold"}
+            }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], true, "{result}");
+        let error = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            error.contains("motion") && error.contains("explainer"),
+            "{error}"
+        );
+        assert_eq!(ctx.ws.list_projects().unwrap().len(), 1);
+    }
 
     #[test]
     fn rooted_mcp_cannot_mutate_another_workspace() {

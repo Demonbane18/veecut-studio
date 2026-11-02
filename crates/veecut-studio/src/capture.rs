@@ -44,9 +44,10 @@ impl Capture {
         let Some(dir) = std::env::var_os("VEECUT_STUDIO_SHOTS") else {
             return Ok(None);
         };
+        let welcome = std::env::var_os("VEECUT_STUDIO_NEW_KIND").is_some();
         ensure!(
-            duration.is_some_and(|duration| duration >= 3.0),
-            "VEECUT_STUDIO_SHOTS needs a project at least 3 seconds long"
+            welcome || duration.is_some_and(|duration| duration >= 3.0),
+            "VEECUT_STUDIO_SHOTS needs a project at least 3 seconds long, or VEECUT_STUDIO_NEW_KIND for the new-edit form"
         );
         ensure!(
             !dir.is_empty(),
@@ -62,7 +63,7 @@ impl Capture {
             started: Instant::now(),
             tx,
             rx,
-            single: std::env::var_os("VEECUT_STUDIO_TAB").is_some(),
+            single: welcome || std::env::var_os("VEECUT_STUDIO_TAB").is_some(),
         }))
     }
 

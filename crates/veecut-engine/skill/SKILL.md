@@ -58,12 +58,17 @@ The editor is already open and previews changes. Use `veecut cut-phrase` for a q
 | A podcast or interview, one to four cameras | `podcast` | `workflows/podcast.md` |
 | A long video to cut into short vertical clips | `clips` | `workflows/clips.md` |
 | Trip, day or event footage to cut to music | `vlog` | `workflows/vlog.md` |
-| A narration with images or footage, no face | `explainer` | `workflows/explainer.md` |
+| A narration (audio or video) with ordered images or footage, including a faceless short | `explainer` | `workflows/explainer.md` |
 | A product launch or ad with lines of text | `promo` | `workflows/promo.md` |
 | A song with footage, or a lyric video | `music-video` | `workflows/music-video.md` |
 | A talk to camera to cut into a fast documentary with found footage ("documentary", "Editor V1 style", "found footage edit") | `documentary` | `workflows/documentary.md` |
 
 Without `--kind`, `veecut edit` uses `talking-head-short`, or `talking-head-long` when the style format is `horizontal`. If you cannot tell which kind fits, ask one short question with two or three of these choices.
+
+For original faceless production, the explainer workflow covers factual script/beat planning,
+own narration, licensed visuals and `--motion hold|push|glide`. Read `reference/sourcing.md`
+for the reviewed packs' licence and execution limits. Generated characters and depth scenes
+stay external; import finished clips normally. No root skill installation is needed.
 
 ## Keep it simple
 
@@ -102,6 +107,10 @@ VeeCut keeps a catalog of community video skills from awesome-claude-video-skill
 ## MCP tools
 
 When VeeCut is connected as an MCP server (`veecut mcp`, which `veecut init` registers in `opencode.json`), you can call tools instead of the command line: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `transcript_search`, `cut_phrase`, `cutout`, `captions`, `note`, `undo`, `redo`, `skills_search`, `skills_install`, `verify_words`, `find_footage`, `fetch_footage` and `sources`. Tool fields follow the matching command's options; `project` accepts the same selectors as `-p`. Search with `transcript_search` using `{"phrase":"PHRASE"}`, then call `cut_phrase` with the same phrase and, if needed, `"occurrence":2`. `frame`, `frames` and `find_footage` return the PNG as an image you can look at. `edit` takes `find` for documentary edits; `verify_words` is `veecut qa FILE --words`; `sources` cannot approve. Use one way or the other; both change the same project.
+
+Explainer `edit` accepts optional `"motion":"hold"`, `"push"` or `"glide"` alongside
+ordered `broll`, narration supplied through `voice` or `files`, and optional `music`. Other kinds reject
+`motion`; omitting it preserves the recipe default.
 
 ## Never
 

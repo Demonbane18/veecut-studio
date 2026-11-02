@@ -1042,7 +1042,7 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
         let mut patch = serde_json::json!({
             "muted": true,
             "grade": grade,
-            "ken_burns": KenBurns { from_scale: 1.0, to_scale: push, from_focus: Some(from_focus), to_focus: Some(to_focus) },
+            "ken_burns": KenBurns { from_scale: 1.0, to_scale: push, from_focus: Some(from_focus), to_focus: Some(to_focus), smooth: false, phase: [0.0, 1.0] },
         });
         if let Some(t) = &transition {
             patch["transition"] = serde_json::to_value(t)?;

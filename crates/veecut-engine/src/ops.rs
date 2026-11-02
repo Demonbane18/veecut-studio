@@ -535,15 +535,7 @@ fn slice(item: &Item, from: f64, to: f64) -> Item {
                 })
                 .collect();
             if let Some(kb) = &mut c.ken_burns {
-                let lerp = |a: f32, b: f32, t: f64| a + (b - a) * t.clamp(0.0, 1.0) as f32;
-                let (t0, t1) = (off / item.duration, (off + dur) / item.duration);
-                let (s0, s1) = (kb.from_scale, kb.to_scale);
-                kb.from_scale = lerp(s0, s1, t0);
-                kb.to_scale = lerp(s0, s1, t1);
-                if let (Some(f0), Some(f1)) = (kb.from_focus, kb.to_focus) {
-                    kb.from_focus = Some(Point::new(lerp(f0.x, f1.x, t0), lerp(f0.y, f1.y, t0)));
-                    kb.to_focus = Some(Point::new(lerp(f0.x, f1.x, t1), lerp(f0.y, f1.y, t1)));
-                }
+                kb.retain_phase(off / item.duration, (off + dur) / item.duration);
             }
         }
         ItemBody::Caption(cap) => {
@@ -780,6 +772,62 @@ pub fn set_pointer(doc: &mut Value, path: &str, value: Value) -> Result<()> {
 mod tests {
     use super::*;
     use crate::project::{Asset, Canvas, Caption, VideoKind};
+
+    #[test]
+    fn ken_burns_slices_preserve_nested_motion() {
+        for smooth in [false, true] {
+            let mut p = project();
+            let original = &mut p.main_mut().items[0];
+            let clip = original.clip_mut().unwrap();
+            clip.focus = Some(Point::new(0.3, 0.6));
+            clip.ken_burns = Some(crate::project::KenBurns {
+                from_scale: 1.0,
+                to_scale: 1.8,
+                from_focus: None,
+                to_focus: Some(Point::new(0.6, 0.4)),
+                smooth,
+                phase: [0.0, 1.0],
+            });
+            let cut = slice(original, 2.0, 8.0);
+            let nested = slice(&cut, 3.0, 6.0);
+            assert_eq!(
+                nested.clip().unwrap().ken_burns.as_ref().unwrap().phase,
+                [0.3, 0.6]
+            );
+            let rect = Rect {
+                x: 0.4,
+                y: 0.3,
+                w: 0.1,
+                h: 0.2,
+            };
+            for part in [&cut, &nested] {
+                for fraction in [0.0, 0.1, 0.25, 0.5, 0.9, 1.0] {
+                    let t = fraction * part.duration;
+                    let a = crate::render::canvas_rect(
+                        part.clip().unwrap(),
+                        (1920, 1080),
+                        (1080, 1920),
+                        t,
+                        part.duration,
+                        rect,
+                    );
+                    let b = crate::render::canvas_rect(
+                        original.clip().unwrap(),
+                        (1920, 1080),
+                        (1080, 1920),
+                        part.start + t,
+                        original.duration,
+                        rect,
+                    );
+                    assert!(
+                        [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h]
+                            .iter()
+                            .all(|d| d.abs() < 1e-6)
+                    );
+                }
+            }
+        }
+    }
 
     fn project() -> Project {
         let mut p = Project::new("t", VideoKind::TalkingHeadShort, Canvas::vertical());

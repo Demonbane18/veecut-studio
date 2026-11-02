@@ -79,3 +79,37 @@ Every candidate carries its licence. VeeCut allows these without a check: public
 - Openverse runs out of anonymous searches after a while; try again later or use another provider.
 - Commons diagrams and SVG files are skipped; only jpg, png and webp pictures download.
 - A fetched file the project already uses keeps its asset id and any approval the user gave.
+
+## Faceless and animated source packs
+
+For narration-led shorts, use `workflows/explainer.md` with original narration and owner-created
+or licensed visuals/music. Keep each asset's source page and required credit. A public download
+or a code licence does not establish rights to reference art, voices or generated outputs.
+
+### Source disclosure
+
+Reviewed 2026-11-02; static inspection only, not a safety certification or runtime benchmark:
+
+- [claude-animated-shorts](https://github.com/mromidev/claude-animated-shorts/tree/e3b817b6afc6cd413466d43f11ba31209e034bbf),
+  commit `e3b817b6afc6cd413466d43f11ba31209e034bbf` (2026-11-01): MIT code/docs,
+  but reference frames and contact sheets are private style-study material. Do not redistribute,
+  publish or upload them to a model. Templates lack the surrounding app, package manifests,
+  narration/timings and referenced GLBs. Remotion's separate licence has limited free eligibility.
+- [Faceless Videos Skill v2 ZIP](https://drive.google.com/file/d/17_qG49TkOfKQK4_yhYOfaNG2dyb-sdKl/view),
+  SHA-256 `cb411ea9152e429d2a838df7f2ab9780a08374bc8333b9911e17f1836e7c82e8`:
+  `faceless-videos/LICENSES.md` gives informal use/remix/share permission for original work,
+  not a named whole-pack SPDX licence. Example stills/maps/style sheets permit learning and
+  own-video use; supplied music permits own-video use. Unrestricted asset redistribution and
+  a complete rights chain are not established. No publication date or Git revision supplied.
+
+VeeCut adopted generic narration-first beat planning and restrained camera-motion ideas,
+without copying source text/code/media or bundling either pack. Its native pan/zoom does not
+reproduce generated characters, 3D sets, depth/parallax or the Drive pack's five style engines.
+Use separately rendered, rights-cleared clips as normal media if those effects are needed.
+
+Do not install unknown root skills or run their scripts based on this review. Drive setup
+executes a remote installer and downloads unpinned dependencies/models, its self-test deletes
+its working folder, and browser capture workers can survive failures. Neither pack is required
+for VeeCut. Local rendering does not mean network-free setup or free Claude/image-tool access;
+optional ACE-Step has a roughly 15 GB installation and a stated 16 GB Apple Silicon requirement.
+Use own recordings and configured local transcription when uploads are not approved.

@@ -195,6 +195,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cli_explainer_motion_is_optional_and_validated() {
+        use veecut_engine::recipes::ExplainerMotion;
+        let Command::Edit(args) = Cli::try_parse_from(["veecut", "edit", "--kind", "explainer"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected edit")
+        };
+        assert_eq!(args.motion, None);
+        for motion in ExplainerMotion::ALL {
+            let Command::Edit(args) = Cli::try_parse_from([
+                "veecut",
+                "edit",
+                "--kind",
+                "explainer",
+                "--motion",
+                motion.slug(),
+            ])
+            .unwrap()
+            .command
+            else {
+                panic!("expected edit")
+            };
+            assert_eq!(args.motion, Some(motion));
+        }
+        assert!(Cli::try_parse_from(["veecut", "edit", "--motion", "spin"]).is_err());
+        let (_temp, ctx, _) = commands::tests::speech_project();
+        let Command::Edit(args) = Cli::try_parse_from([
+            "veecut",
+            "edit",
+            "--kind",
+            "documentary",
+            "--motion",
+            "hold",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected edit")
+        };
+        let error = ctx.edit(args, &mut |_| {}).err().unwrap().to_string();
+        assert!(
+            error.contains("motion") && error.contains("explainer"),
+            "{error}"
+        );
+        assert_eq!(ctx.ws.list_projects().unwrap().len(), 1);
+    }
+
+    #[test]
     fn project_paths_establish_workspace_but_explicit_workspace_cannot_cross_roots() {
         let (_temp, ctx, dir) = commands::tests::speech_project();
         for selector in [

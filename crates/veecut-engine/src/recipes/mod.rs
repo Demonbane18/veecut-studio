@@ -27,6 +27,50 @@ use crate::transcript::Transcript;
 use crate::workspace::Workspace;
 use crate::{captions, media, qa, sfx};
 
+/// Restrained native camera motion for faceless explainers.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExplainerMotion {
+    Hold,
+    Push,
+    Glide,
+}
+
+impl ExplainerMotion {
+    pub const ALL: [Self; 3] = [Self::Hold, Self::Push, Self::Glide];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hold => "Hold",
+            Self::Push => "Push",
+            Self::Glide => "Glide",
+        }
+    }
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Hold => "hold",
+            Self::Push => "push",
+            Self::Glide => "glide",
+        }
+    }
+}
+
+impl std::str::FromStr for ExplainerMotion {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|motion| motion.slug() == value)
+            .with_context(|| {
+                format!("unknown explainer motion {value:?}; choose hold, push or glide")
+            })
+    }
+}
+
 /// What to edit.
 #[derive(Clone, Debug)]
 pub struct EditRequest {
@@ -55,6 +99,8 @@ pub struct EditRequest {
     pub render: bool,
     /// Documentary edits: search free, licence-tracked footage for lines without B-roll.
     pub find: bool,
+    /// Explainer camera motion; omission preserves the recipe's original motion.
+    pub motion: Option<ExplainerMotion>,
 }
 
 impl EditRequest {
@@ -74,6 +120,7 @@ impl EditRequest {
             clips: 3,
             render: true,
             find: false,
+            motion: None,
         }
     }
 }
@@ -97,6 +144,11 @@ pub fn edit(
     req: &EditRequest,
     progress: &mut dyn FnMut(&str),
 ) -> Result<EditReport> {
+    if req.motion.is_some() && req.kind != VideoKind::Explainer {
+        bail!(
+            "motion is only supported for explainer edits; choose --kind explainer or omit motion"
+        );
+    }
     let style = Style::load(&ws.style_path())?;
     let mut job = Job {
         ws,
@@ -808,7 +860,7 @@ pub(crate) fn place_broll(
             },
         )?;
         let patch = if is_image {
-            serde_json::json!({ "muted": true, "ken_burns": KenBurns { from_scale: 1.0, to_scale: 1.08, from_focus: None, to_focus: None } })
+            serde_json::json!({ "muted": true, "ken_burns": KenBurns { from_scale: 1.0, to_scale: 1.08, from_focus: None, to_focus: None, smooth: false, phase: [0.0, 1.0] } })
         } else {
             serde_json::json!({ "muted": true })
         };
@@ -860,3 +912,32 @@ pub(crate) fn pcm(project: &Project, dir: &Path, asset_id: &str) -> Result<Vec<f
 }
 
 pub(crate) const SAMPLE_RATE: u32 = 16_000;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explainer_motion_api_and_invalid_kind_fail_before_workspace_access() {
+        assert_eq!(EditRequest::new(VideoKind::Explainer).motion, None);
+        for motion in ExplainerMotion::ALL {
+            assert_eq!(motion.slug().parse::<ExplainerMotion>().unwrap(), motion);
+            assert_eq!(serde_json::to_value(motion).unwrap(), motion.slug());
+            assert!(!motion.label().is_empty());
+        }
+        assert!(
+            "orbit"
+                .parse::<ExplainerMotion>()
+                .unwrap_err()
+                .to_string()
+                .contains("hold, push or glide")
+        );
+        let ws = Workspace {
+            root: "/nonexistent/veecut-motion-test".into(),
+        };
+        let mut req = EditRequest::new(VideoKind::Podcast);
+        req.motion = Some(ExplainerMotion::Hold);
+        let error = edit(&ws, &req, &mut |_| {}).unwrap_err().to_string();
+        assert!(error.contains("only supported for explainer"), "{error}");
+    }
+}

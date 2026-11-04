@@ -9,6 +9,7 @@ VeeCut Studio is an open-source AI video editor written in Rust. You put a recor
 - It is built for free models. Because the recipes do the heavy work, a small free model such as GLM 5.3 Flash Free in OpenCode only has to run a command, read the result and pass on your notes.
 - Notes you repeat become rules in `my-rules.md`, so you do not have to say them twice.
 - A skills catalog synced from [awesome-claude-video-skills](https://github.com/zhuyansen/awesome-claude-video-skills) lists community video skills by kind of video. It refreshes itself every 24 hours, and installed skills graded SAFE update with it. `veecut skills sync` and `veecut skills update` do the same by hand.
+- You can add any video skill from a folder, a `.zip` or `.tar.gz`, GitHub, Google Drive or an https link. A skill that carries a `veecut.toml` look pack restyles a project with VeeCut's own renderer, and two looks come built in.
 - Everything runs on your computer. Rust draws the picture (cuts, zooms, reframing, color, text, captions, transitions); ffmpeg only decodes, encodes and filters audio, so any ffmpeg build works, including ones without libass or drawtext.
 - Text and captions stay readable: when the footage behind them would make them hard to read, VeeCut puts a dark or light scrim behind them. Your colors are never changed.
 
@@ -171,8 +172,8 @@ With a project open:
 - The Footage tab searches the free footage providers with thumbnails. Filter by Any, Videos or Images and tick the providers (Pexels only with `PEXELS_API_KEY`). Each result shows its licence, author, length and why it is flagged, if it is. Add downloads it into the project; Add at playhead also places it on the B-roll track (2 s for a picture, up to 3 s for a video). Downloads run in the background and can be undone.
 - The Sources tab lists every found file with its provider, licence, author and a button to open its page. Approve (I checked the rights) clears a flag; Flag with a reason adds one. Credit lines for the video description sit below with Copy credits.
 - Exporting at final quality lists flagged sources nobody approved and stays disabled until each is approved or no longer used.
-- In the inspector, clips have a Grade section (Look, Halftone, Vignette and Recolor) and the new transitions: Negative, Glitch, Tiles, Focus and Whip. On overlay tracks the transition is how the clip enters; picking a kind fills in its usual length. A cut-out clip shows its Mask with an Outline slider and Remove mask. A selected video clip on the main track offers "Cut out the speaker": a length from the playhead, an outline and an optional mega word.
-- Text has the Keyword, Chapter, Shock, Black card and Mega presets; captions have the Reveal mode and an "Ink on light pictures" switch.
+- In the inspector, clips have a Grade section (Look, Pixelate, Halftone, Vignette and Recolor; Soft mono is one of the looks) and the transitions Negative, Glitch, Tiles, Focus, Whip and Pixelate. On overlay tracks the transition is how the clip enters; picking a kind fills in its usual length. A cut-out clip shows its Mask with an Outline slider and Remove mask. A selected video clip on the main track offers "Cut out the speaker": a length from the playhead, an outline and an optional mega word.
+- Text has the Keyword, Chapter, Shock, Black card, Mega, Marker and Meter presets. Marker wipes a highlighter band in behind its words; Meter is a twelve-segment bar that fills over the item's length, so one that spans the video shows story progress. Captions have the Reveal mode and an "Ink on light pictures" switch.
 
 Keyboard shortcuts (Cmd on macOS, Ctrl elsewhere):
 
@@ -273,11 +274,36 @@ A final render refuses flagged files you have not approved; drafts still render.
 
 ### The sound kit
 
-VeeCut makes its own sound effects in code: four clicks, a tick, a pane click, a swish, a glitch, a riser, a sub tone, a sub boom, an impact, a hit and an outro, written as WAV files to `.veecut/sfx/v1/`. `veecut sfx` lists them with their lengths and roles. The documentary edit places each hit 8 ms after its picture change at a fixed level under your voice (clicks 4.5 dB under). The other recipes play your files from `my-sounds/sfx/` when text lands, and the kit's tick when that folder is empty.
+VeeCut makes its own sound effects in code: four clicks, a tick, a pane click, a swish, a glitch, a riser, a sub tone, a sub boom, an impact, a hit, an outro, a coin, a blip and a 27-second chiptune loop for music beds, written as WAV files to `.veecut/sfx/v2/`. `veecut sfx` lists them with their lengths and roles. The documentary edit places each hit 8 ms after its picture change at a fixed level under your voice (clicks 4.5 dB under). The other recipes play your files from `my-sounds/sfx/` when text lands, and the kit's tick when that folder is empty.
 
 ### The words check
 
 `veecut qa outbox/<slug>-v1.mp4 --words` transcribes the render again and compares it with your transcript. It lists words that went missing or came back different, and says whether a cut sits within 0.25 s or a sound or music clip starts within 0.15 s of each. Run it before a final: a click or the bed can mask a short word. It runs locally unless your config picked Groq.
+
+## Skills
+
+A skill is a folder with a `SKILL.md` that tells agents how to edit. If it also holds a `veecut.toml` look pack, VeeCut applies the look itself: captions, text styles, clip grades and motion, transitions, overlays, fonts and sounds, all in one undo step.
+
+```sh
+veecut skills add ~/Downloads/a-skill.zip        # or a folder, .tar.gz, GitHub owner/repo, Google Drive or https link
+veecut skills list --installed                   # every skill here, marked look or agent-only, with licence warnings
+veecut skills check NAME                         # the look parses, its files exist, its fonts load
+veecut skills apply NAME -p SLUG                 # restyle a project; veecut undo takes it back
+veecut edit --skill NAME                         # run the recipe, then apply the look before the draft renders
+veecut skills new my-look --from-project -p SLUG # save this project's look as your own skill
+veecut skills remove NAME
+```
+
+VeeCut copies and inspects an added skill but never runs the scripts inside it. `skills add` and `skills check` list any scripts and licence files they find, and warn "No licence file: personal use only; do not redistribute" when there is none.
+
+In Studio, the Skills tab lists your skills with Apply look, Check, Remove and Open folder. "Add a skill" takes a path or link, or Choose folder and Choose zip. "Make your own" saves the open project's look or starts a blank skill. New edit has a Look menu that applies an installed look to the auto-edit.
+
+`veecut init` installs two looks:
+
+- `veecut-arcade`: pixel blocks on pictures, a pixelate transition on every cut, an HP meter across the whole video, Press Start 2P captions and a chiptune bed, with a coin on each text entrance and a blip on each cut. It also sets the canvas to 9:16.
+- `veecut-editorial`: soft black-and-white pictures on a paper background, Inter reveal captions, a coral `#D97757` accent and marker highlight, a whip on every second cut and a soft sub thump on cuts.
+
+Grades and motion change pictures and B-roll, never your own camera. `veecut init` rewrites the built-in looks, so save changes under a new name. To turn someone else's skill into a look pack, point your agent at [`reference/skills.md`](crates/veecut-engine/skill/reference/skills.md); each workspace has a copy in `.agents/skills/veecut/reference/`.
 
 ## Skills catalog
 
@@ -363,14 +389,14 @@ evidence; missing evidence is a check failure, not proof that captions are safe.
 - Your recordings stay where you put them. VeeCut never modifies `inbox/`; drafts and finals go to `outbox/`.
 - Video, pictures and sound are processed on your computer.
 - Transcription is local unless you set `GROQ_API_KEY`; then audio goes to Groq.
-- The network is used to download whisper models and the cut-out model on first use, to sync the skills catalog from GitHub and to install skills you choose.
+- The network is used to download whisper models and the cut-out model on first use, to sync the skills catalog from GitHub and to download skills you install or add from a link.
 - Footage search and downloads (`veecut find`, `veecut fetch`, `veecut edit --find` and Studio's Footage tab) send your search words to the providers searched and download the chosen files. Nothing is uploaded.
 - Coding agents send your prompts and what they read (such as transcripts and command output) to their model provider.
 - `veecut init` keeps `.env`, `inbox/`, `outbox/`, `my-sounds/`, `footage/` and `.veecut/find/` out of git with a `.gitignore`.
 
 ## More
 
-- [docs/architecture.md](docs/architecture.md): crates, the project model, the Editor API and the full command line.
+- [docs/architecture.md](docs/architecture.md): crates, the project model, the Editor API, skills and look packs, and the full command line.
 - [CREDITS.md](CREDITS.md): the projects VeeCut learned from, bundled fonts, the cut-out model, libraries and the footage providers' terms.
 
 ## License

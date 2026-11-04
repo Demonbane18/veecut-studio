@@ -14,6 +14,8 @@ VeeCut Studio learned from other people's work. This file says from whom and wha
 
 NextPhase Editor V1 by Jad M.H and the NextPhase AI community, a free Claude Code and OpenCode skill that turns a talking head into a fast documentary edit. VeeCut's documentary edit uses its ideas and published measurements: the pace of picture changes and the face share, the per-picture grades and their shares, the cut effects and their frame counts, the display tiers and their sizes, word-by-word captions that turn to ink on light pictures, the sound grammar (a click on every change, its lag after the picture, its level under the voice and the roles of the kit), a music bed about 5.5 LU under the voice that is cut under the punchline instead of ducked, the footage sources and their traps, and re-transcribing the render to catch masked words. Its licence allows making videos with it but not repackaging it, so none of its code, text, design tokens or sound files are included. VeeCut's code and sounds are its own.
 
+Arcade Motion Graphics and Motion Graphics V3 by Jad M.H (NextPhase AI), two free skills reviewed on 2026-11-05. The `veecut-arcade` and `veecut-editorial` looks, the Marker and Meter text presets, the pixelate grade and transition, and the chiptune, coin and blip sounds follow their published timings, sizes and colours. Neither pack carries a licence, so this repository contains none of their code, text, art, fonts, sounds or examples. The implementations and the built-in look files are new MIT work. Reviewed archives: `arcade.zip`, SHA-256 `8f958d78eb1c93d124720ecbdcf848145ff0029dbac0a87412cb08fc1f6c047b`, and the Motion Graphics V3 ZIP, SHA-256 `1b75437bbf599471a69a6187e533be4aa3cf4a170083f8a293711d5eef878e34`.
+
 ## Faceless and animated shorts source review
 
 Reviewed on 2026-11-02. VeeCut adopted narration-first visual ordering, original script/beat planning and restrained hold/push/glide guidance. Camera easing is independently implemented in the shared Rust compositor. No source text, code, reference media, voices or brand styles from these packs are bundled.
@@ -59,8 +61,11 @@ The caption and text fonts in `crates/veecut-engine/assets/fonts/` are under the
 | Playfair Display | Bold Italic | The Playfair Display Project Authors; Reserved Font Name "Playfair Display" |
 | Bodoni Moda | Bold | The Bodoni Moda Project Authors |
 | Poppins | Bold | The Poppins Project Authors |
+| Press Start 2P | Regular | The Press Start 2P Project Authors; Reserved Font Name "Press Start 2P" |
 
 The documentary fonts come from their upstream projects, not from any kit. Playfair Display Bold Italic is Google's static release at google/fonts commit `d08233f9c581786e8c834a1f0695a4f27869c119`. Bodoni Moda Bold is a static instance (weight 700, optical size 96, made with fontTools 4.68) of `ofl/bodonimoda` at google/fonts commit `634558fcbd9225a88591dec164f9fdb2716d0bf5`. Montserrat Black is the designer's static TTF from JulietaUla/Montserrat at commit `679ead9bcd0d6cef6d3712369dc49fe72e8bd8d7`.
+
+Press Start 2P, by CodeMan38, is the upstream file from [google/fonts `ofl/pressstart2p`](https://github.com/google/fonts/tree/main/ofl/pressstart2p), TTF SHA-256 `034c77f1f05ec89421e4a63f0e3a4ca1ecf852cc6d2bf611f126f275728e017d`, with its licence in `assets/fonts/PressStart2P/OFL.txt`. It was not taken from any skill pack.
 
 ## Face detection model
 
@@ -89,6 +94,7 @@ Licenses as reported by `cargo metadata --format-version 1`.
 | fast_image_resize | 6.1.0 | MIT OR Apache-2.0 | scaling video frames |
 | ureq | 3.5.0 | MIT OR Apache-2.0 | downloads: models, the catalog, skills, Groq, found footage |
 | tract-onnx | 0.23.9 | MIT OR Apache-2.0 | running the cut-out model in Rust |
+| zip | 2.6.1 | MIT | reading `.zip` skill archives |
 
 `cargo metadata` lists every other dependency with its license.
 

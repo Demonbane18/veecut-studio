@@ -5,3 +5,19 @@ node_modules/
 graphify-out/
 developer-vault/
 /target
+
+# Media never belongs in this repository: test footage, renders and workspaces stay local.
+/inbox/
+/outbox/
+/footage/
+/exports/
+/proxies/
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.m4v
+*.m4a
+*.wav
+*.mp3
+*.aiff

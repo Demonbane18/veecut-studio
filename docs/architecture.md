@@ -98,7 +98,10 @@ Global state lives in `~/.veecut/` (override with `VEECUT_HOME`): `config.toml`,
   - `Project.sources: BTreeMap<asset id, Source>`: provenance and licence of found files
     (`url`, `title`, `author`, `license`, `license_url`, `credit`, `provider`, `flag`,
     `flag_reason`, `approved`, `retrieved`). `Source::blocks_final()` = flagged and not approved.
-    Set it through ops (`{"op":"set","path":"/sources/asset-4","value":{...}}`).
+    Add new records through ops (`{"op":"set","path":"/sources/asset-4","value":{...}}`). CLI and MCP
+    `ops` refuse approving, changing `flag`/`flag_reason`, deleting or replacing a record, replacing
+    `/sources` or replacing the whole project: approval is the user's step, through Studio's Sources
+    tab or `veecut sources --approve` with an interactive terminal on stdin.
 
 ## Editor API (`ops.rs`, done)
 
@@ -139,6 +142,8 @@ pub struct Progress { pub stage: &'static str, pub done: f64, pub total: f64 }
 pub struct ExportReport { pub path: PathBuf, pub duration: f64, pub width: u32, pub height: u32, pub frames: u64, pub seconds_taken: f64 }
 
 /// Renders the project to an MP4 (H.264 + AAC). Returning false from `progress` cancels.
+/// Refuses an `out` that is any project asset (same canonical path or file identity). Encodes to a
+/// temp sibling and renames onto `out` only after success; failure or cancel removes only the temp.
 pub fn export(project: &Project, project_dir: &Path, out: &Path, opts: &RenderOptions,
               progress: &mut dyn FnMut(&Progress) -> bool) -> Result<ExportReport>;
 /// One fully composited frame (video, color, graphics, captions) at timeline time `t`.
@@ -186,7 +191,9 @@ reported for review. Missing face detections are reported as unchecked, never as
 ```rust
 pub enum Provider { Groq, Local }
 pub struct TranscribeOptions { pub provider: Option<Provider>, pub language: Option<String>, pub model: Option<String>, pub cpu_only: bool }
-/// Auto provider: Groq when GROQ_API_KEY is set, else local whisper.cpp (model downloaded to ~/.veecut/models on first use).
+/// Auto provider: Groq when GROQ_API_KEY is set, else local whisper.cpp. Models download on first
+/// use to ~/.veecut/models from whisper.cpp's Hugging Face repo at a pinned commit, with size and
+/// SHA-256 checked; a `<model>.sha256` marker records the verified file so later runs check size only.
 pub fn transcribe(media: &Path, asset_id: &str, opts: &TranscribeOptions, progress: &mut dyn FnMut(&str)) -> Result<Transcript>;
 pub fn status() -> Vec<String>; // one line per provider: ready or what is missing
 ```
@@ -218,6 +225,9 @@ pub fn emphasis(words: &[TranscriptWord]) -> Vec<bool>;
 
 ```rust
 /// Caption pages for every transcript word kept on the main track, grouped by the project's caption style.
+/// When drawn, a page is split into phrases of at most two lines; the line length is `max_chars`
+/// lowered to what fits the safe width at the caption size (`graphics::caption_line_chars`), so long
+/// words start the next phrase instead of shrinking the page. Placement measures the same phrases.
 pub fn build(project: &Project, transcript: &Transcript) -> Vec<Item>;
 /// Replaces the items on the first captions track with `build`.
 pub fn apply(project: &mut Project, transcript: &Transcript) -> Result<usize>;
@@ -330,6 +340,8 @@ pub fn search<'a>(catalog: &'a Catalog, query: &str, category: Option<&str>) -> 
 pub fn install(ws: &Workspace, repo: &str) -> Result<InstallReport>;
 pub fn update(ws: &Workspace, repo: Option<&str>) -> Result<Vec<UpdateReport>>;
 pub fn remove(ws: &Workspace, repo: &str) -> Result<()>;
+// skills.lock.json is untrusted input: every persisted skill name must be one safe path component
+// and not `veecut`, checked before any remove, update or reinstall touches the filesystem.
 pub fn installed(ws: &Workspace) -> Result<Lock>;
 /// Best catalog entries for a kind of video: SAFE, tested first, then stars. Data-driven, so it
 /// follows the catalog as it updates.
@@ -374,10 +386,49 @@ external renderers and depth/parallax models are outside this recipe.
 Studio's Explainer New edit takes narration audio/video, ordered B-roll/images with
 Up/Down/Remove, optional music with Choose/Remove, and Recipe default/Hold/Push/Glide.
 Music is forwarded only for Explainer; its B-roll is forwarded without the Documentary-only
-find option. For native welcome-screen QA, run
+find option. The welcome screen's Inbox lists videos, audio and pictures in `inbox/` (Refresh
+rereads it): clicking a video or audio file makes it the source or narration; for Explainer and
+Documentary each video/picture row has Add to visuals (or Add as B-roll) plus an add-all button,
+and for Explainer audio rows have Use as music, so a whole edit can be set up without a file
+dialog. For native welcome-screen QA, run
 `VEECUT_STUDIO_SHOTS=<empty-dir> VEECUT_STUDIO_NEW_KIND=explainer veecut --workspace <ws> studio`
 without a project. This captures the explainer controls and exits; project capture remains
 the playback entrypoint.
+
+#### Recipe safeguards (from real-footage QA, 2026-11-04)
+
+- Framing: `Job::finish` aims each main-track clip at the median face centre over its own source
+  range (short clips borrow neighbours within 5 s, so one false detection cannot drag the crop);
+  zooms without a focus get the median over their stretch. Caption placement protects the face from
+  just below the brows to under the chin (`placement::FACE_TOP`, `CHIN_MARGIN`).
+- Hooks: an automatic hook must be a complete sentence that can open the video (ends in `.?!`, no
+  leading conjunction or dangling pronoun, positive highlight score); otherwise none and a review line.
+  A short hook holds 3 s.
+- A failed `edit` removes the project folders it created and did not finish; finished projects stay.
+- Talking heads: punch-in switches prefer cuts and phrase boundaries and fall back to word gaps to
+  meet the shot limit, never inside a word.
+- Tutorial: only transcript-word-free silence is sped up and muted; a silence cut never passes the
+  next word. Speed labels sit bottom centre.
+- Retakes: review and cut cover only the repeated sentence (or one near segment within 12 s), at
+  most 16 s; far repeats are review-only, and review text asks to listen before cutting.
+- Clips: windows skip a leading false start, end on a sentence and are sized by kept time after
+  cuts (20 to 60 s).
+- Beats: tempo prefers the 80 to 160 BPM relative (1x, 2x, 1.5x) of the strongest period and the
+  grid never steps onto an offbeat. Montages start each source past its opening, skip black stretches
+  (`lit_run` checks start, middle and end frames), lengthen crossfaded vlog shots by the overlap and
+  report footage that runs out; promo lines end before the next line starts.
+- Documentary find: an acronym spoken once (SLS) can be the subject; every query keeps one subject
+  anchor and a result title must contain it as a whole word. Providers try medium/smaller renditions
+  first and skip known over-cap files.
+- Rights: `Workspace::add_asset` imports an adjacent `<file>.source.json` into `project.sources`
+  (approval reset: it is project-local), so credits and the final-render gate follow fetched files
+  into any recipe; Studio and `cutout --world` persist those sources with the assets.
+- Explainer: glide starts at 1.06x and keeps focus endpoints inside 80% of the initial pan room, so
+  the cover crop never clamps mid-shot. Crops discarding over 30% of a picture are named in review
+  with a `fit: contain` patch. Headings attach to the shot where the narration says them (in order);
+  unmatched lines go to review. Voice-only edits use one large centered word on a slate background.
+  16:9 explainers default captions to 0.8. A sole narration video keeps picture and voice on the
+  same source cuts. Every visual is probed before the project is created.
 
 ### Documentary modules (done)
 
@@ -400,7 +451,7 @@ impl Graphics {
 }
 
 // footage: free, licence-tracked material
-pub const VIDEO_CAP: u64 = 300 * 1024 * 1024;   // largest video fetch downloads
+pub const VIDEO_CAP: u64 = 150 * 1024 * 1024;   // largest video fetch downloads
 pub const IMAGE_CAP: u64 = 40 * 1024 * 1024;    // largest picture
 pub enum Provider { Nasa, Commons, Archive, Openverse, Pexels }   // Pexels only with PEXELS_API_KEY
 impl Provider { pub const ALL: [Provider; 5]; pub fn as_str(self) -> &'static str; pub fn label(self) -> &'static str;
@@ -542,8 +593,11 @@ current directory or relative to the workspace. CLI `-p` works before or after t
 subcommand. Without `--workspace`, an existing folder or `project.json` path discovers its
 owning workspace, even from outside a workspace. An explicit `--workspace DIR` is
 authoritative; MCP stays rooted in its server workspace. Both reject project paths outside
-the selected workspace, including symlink escapes. Every command accepts `--json` for
-machine-readable output.
+the selected workspace, including symlink escapes. Rooted MCP also confines what it writes
+(`frame`/`frames`/`render` `out`) and text files it reads (`edit` `copy`) to the workspace, and
+never writes into `inbox/`; MCP `ops` takes JSON only. Parse errors give the line number and
+reason without echoing input. CLI `render --out` refuses paths inside `inbox/`. Every command
+accepts `--json` for machine-readable output.
 
 ```
 veecut init [DIR]                     set up a workspace (folders, built-in skill, agent config)
@@ -585,7 +639,8 @@ veecut fetch N|ID [--role broll|image|music]
                                       download a candidate (index from the last find, or its id) into footage/
                                       and add it to the project with its source and licence
 veecut sources [--approve ASSET] [--flag ASSET --reason TEXT] [--credits]
-                                      rights table; --approve is the user's step after checking the rights;
+                                      rights table; --approve is the user's step after checking the rights
+                                      and needs an interactive terminal (agents cannot run it);
                                       a final render refuses flagged sources nobody approved
 veecut sfx [--regenerate]             the built-in synthesized sound kit: each file's name, length, hit
                                       time and role, and its folder; writes missing files first

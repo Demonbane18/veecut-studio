@@ -14,13 +14,15 @@ VeeCut Studio is an open-source AI video editor written in Rust. You put a recor
 
 ## Requirements
 
-- Rust 1.90 or newer
+- Rust 1.95 or newer
 - ffmpeg and ffprobe on your PATH
 - cmake and a C++ compiler, for local transcription with whisper.cpp
 
+VeeCut is developed and tested on macOS (Apple Silicon). Continuous integration builds and tests it on macOS and Linux; Windows builds are not tested yet.
+
 ## Install from source
 
-The repository is private until v0.1 works. From a clone:
+There are no prebuilt binaries yet. From a clone:
 
 ```
 git clone https://github.com/Demonbane18/veecut-studio
@@ -209,7 +211,7 @@ These options change what the hook captures. They take effect only with `VEECUT_
 | --- | --- | --- |
 | `talking-head-short` | Reels, TikTok, Shorts | 9:16, cuts pauses and retakes, face crop, 1.15x punch-ins so no shot runs past 2.8 s, hook text, captions off the face, B-roll from `--broll`, music and sound effects from your style |
 | `talking-head-long` | YouTube, Facebook feed | 16:9, natural cuts, 1.10x punch-ins about every 7 s, captions off the face, B-roll from `--broll` |
-| `tutorial` | Screen recordings | 16:9, natural cuts, silent stretches of 2 s or more played 2 to 8 times faster with a speed label, subtitles low in the frame |
+| `tutorial` | Screen recordings | 16:9, natural cuts, word-free silent stretches of 2 s or more played 2 to 8 times faster with a speed label (narration always at normal speed), subtitles low in the frame |
 | `podcast` | Podcasts, interviews | One camera: gentle punch-ins. Two to four cameras: synced by sound, cuts to whoever speaks |
 | `clips` | Long video to shorts | Finds the strongest 20 to 60 s moments and makes one vertical draft per moment |
 | `vlog` | Trips, days, events | Footage cut to the music's beat, each shot used once, photos panned and zoomed |
@@ -248,7 +250,7 @@ veecut edit inbox/take.mp4 --kind documentary --broll inbox/office.mp4 inbox/cha
 
 ### Found footage and rights
 
-`veecut find "IDEA"` searches the NASA Image and Video Library, Wikimedia Commons, the Internet Archive and Openverse, plus Pexels when `PEXELS_API_KEY` is in `.env`. It numbers the results and saves a contact sheet to `.veecut/find/last.png`. `veecut fetch N` downloads number N into `footage/` (at most 300 MB for a video, 40 MB for a picture), checks that it really is a picture or a video, and adds it to the project with its source, licence and credit line. `--find` does the same for each run of pictures, up to 12 files per edit, and skips anything flagged.
+`veecut find "IDEA"` searches the NASA Image and Video Library, Wikimedia Commons, the Internet Archive and Openverse, plus Pexels when `PEXELS_API_KEY` is in `.env`. It numbers the results and saves a contact sheet to `.veecut/find/last.png`. `veecut fetch N` downloads number N into `footage/` (at most 150 MB for a video, 40 MB for a picture, preferring medium-size renditions), checks that it really is a picture or a video, and adds it to the project with its source, licence and credit line. `--find` does the same for each run of pictures, up to 12 files per edit, and skips anything flagged. A fetched file keeps its licence record (`<file>.source.json`) wherever you use it later, for example as `--broll` in another edit.
 
 Each file keeps its own licence, recorded in the project. `veecut sources` shows the rights table; `veecut sources --credits` prints credit lines for the video description.
 
@@ -263,7 +265,7 @@ Each file keeps its own licence, recorded in the project. `veecut sources` shows
 | Fair use, non-free, unknown or missing | Flagged: a person must decide |
 | NASA files whose credit names someone else or that mention copyright | Flagged: only NASA's own media is public domain |
 
-A final render refuses flagged files you have not approved; drafts still render. Check the file's page and licence, then run `veecut sources --approve ASSET` or press Approve in Studio's Sources tab. The agent skill tells agents never to approve on your behalf, and the MCP `sources` tool has no approve option.
+A final render refuses flagged files you have not approved; drafts still render. Check the file's page and licence, then run `veecut sources --approve ASSET` yourself in a terminal or press Approve in Studio's Sources tab. Approval is yours alone: `--approve` needs an interactive terminal, agent `ops` cannot approve or unflag a source, and the MCP `sources` tool has no approve option.
 
 ### Cut-out and the mega word
 

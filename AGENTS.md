@@ -12,16 +12,21 @@ Open-source AI video editor in Rust: coding agents and a desktop editor share on
 - Credit borrowed rules and ideas in `CREDITS.md` (free247editor, Herk Edit Kit, OpenCut ideas only, catalog skills with their licenses). Never use OpenCut's name or logo, or AI Automation Society brand assets.
 - Test media is synthetic and stays out of git.
 
-## Context and closeout
+## Maintainer notes (only when `developer-vault/` exists)
 
-- `developer-vault/` holds this project's private notes and Graphify map. It is an Obsidian vault with its own private GitHub repository, and this repository ignores it. In a linked worktree, use the main checkout's `developer-vault/`.
+Contributors without these folders and tools skip this section.
+
+- `developer-vault/` holds the maintainer's private notes and Graphify map. It is an Obsidian vault with its own private repository, and this repository ignores it. In a linked worktree, use the main checkout's `developer-vault/`.
 - At the start of a session, read `developer-vault/Home.md` and the newest entries in `developer-vault/Session Log.md`, then only the linked notes the task needs.
-- Before the final summary, add one dated entry to `developer-vault/Session Log.md` with decisions, verified results, blockers and the next step, and update `developer-vault/Home.md` if the current state or next step changed. Then run `bun ~/.omp/agent/bin/project.ts sync` and report what it printed. It refreshes the code graph, exports it into the vault, commits and pushes the vault, and pushes this repository's committed work to its private origin.
-- Never write passwords, API keys, tokens, private keys or customer data into the vault or this repository.
+- Before the final summary, add one dated entry to `developer-vault/Session Log.md` with decisions, verified results, blockers and the next step, and update `developer-vault/Home.md` if the current state or next step changed. Then run `bun ~/.omp/agent/bin/project.ts sync` and report what it printed. It refreshes the code graph, exports it into the vault, commits and pushes the vault, and pushes this repository's committed work.
+
+## Secrets
+
+- Never write passwords, API keys, tokens, private keys or customer data into this repository or the vault.
 
 ## Version control
 
-- `origin` is a private GitHub repository. Commit finished work in focused commits and push it. Never force-push or rewrite pushed history.
+- Commit finished work in focused commits and push it. Never force-push or rewrite pushed history.
 
 ## graphify
 

@@ -1074,7 +1074,7 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
     /// Face boxes over time per asset id (sorted by `t`), found when a recipe ran. Captions use
-    /// them to stay off the mouth and chin. Replace them with `{"op":"set","path":"/faces",...}`.
+    /// them to stay off the eyes, mouth and chin. Replace them with `{"op":"set","path":"/faces",...}`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub faces: BTreeMap<String, Vec<FaceSample>>,
     /// Provenance and licence of found files, by asset id.

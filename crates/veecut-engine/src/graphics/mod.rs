@@ -16,7 +16,7 @@
 //! colours remain intact. Placement and caption reports use the same complete-page bounds.
 //! Run ignored `documentary_proof` for documentary PNGs and a warm draw benchmark.
 //! Run the ignored `visual_proof` test for PNG samples and a warm-frame draw benchmark.
-//! Caption pages keep off the speaker's mouth and chin when the project has face boxes; see
+//! Caption pages keep off the speaker's eyes, mouth and chin when the project has face boxes; see
 //! `placement.rs` for the rule and `Graphics::caption_placements` for what was drawn where.
 
 mod contrast;
@@ -187,6 +187,7 @@ impl Graphics {
                                 t,
                                 project.canvas.fps,
                                 safe,
+                                (project.canvas.width, project.canvas.height),
                                 pixmap,
                             );
                         }
@@ -250,6 +251,7 @@ impl Graphics {
         t: f64,
         fps: f64,
         safe: Rect,
+        canvas: (u32, u32),
         target: &mut PixmapMut<'_>,
     ) {
         if words.is_empty() {
@@ -257,7 +259,10 @@ impl Graphics {
         }
         let mut hash = DefaultHasher::new();
         item.id.hash(&mut hash);
-        style.max_chars.hash(&mut hash);
+        // Paged at canvas size, as placement measures it, so previews and frames at any size
+        // page exactly like the export.
+        let line_limit = caption_line_chars(style, safe, canvas.0, canvas.1);
+        line_limit.hash(&mut hash);
         style.uppercase.hash(&mut hash);
         for w in words {
             w.text.hash(&mut hash);
@@ -270,10 +275,8 @@ impl Graphics {
             if self.pages.len() >= 256 {
                 self.pages.clear();
             }
-            self.pages.insert(
-                page_key,
-                caption_pages(words, usize::from(style.max_chars), style.uppercase),
-            );
+            self.pages
+                .insert(page_key, caption_pages(words, line_limit, style.uppercase));
         }
         let relative = t - item.start;
         let pages = &self.pages[&page_key];
@@ -803,6 +806,21 @@ fn fraction(value: f32, fallback: f32) -> f32 {
     } else {
         fallback
     }
+}
+
+/// Characters per caption line: the style's `max_chars`, lowered to what fits the safe width at
+/// the style's own size, so a long word starts the next page instead of shrinking the whole page.
+/// Draw and placement both page through this, so what placement measures is what draws.
+pub(super) fn caption_line_chars(style: &CaptionStyle, safe: Rect, w: u32, h: u32) -> usize {
+    let subtitle = style.mode == CaptionMode::Subtitle;
+    let size = fraction(style.size, 0.033) * h as f32 * if subtitle { 0.72 } else { 1.0 };
+    // The renderer pads each side by about half the size. Heavy capitals (Montserrat 800)
+    // advance ~0.73 to 0.83 em, lower case ~0.62 em. Overestimating pages sooner instead of
+    // shrinking; a single word wider than the line is still fitted by the renderer.
+    let room = safe.w * w as f32 / 1.08 - size;
+    let em = if style.uppercase { 0.80 } else { 0.62 };
+    let fit = (room / (size * em)).floor().max(1.0) as usize;
+    usize::from(style.max_chars).max(1).min(fit)
 }
 
 /// Normalized safe region. Herk Edit Kit reserves x=90..930, y=200..1600 at 1080×1920.

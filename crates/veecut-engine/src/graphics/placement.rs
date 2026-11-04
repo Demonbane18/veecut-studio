@@ -1,7 +1,7 @@
-//! Keeps caption boxes off the speaker's mouth and chin.
+//! Keeps caption boxes off the speaker's eyes, mouth and chin.
 //!
 //! Faces come from the project (`Project::faces`, boxes in source coordinates over source time).
-//! For each caption page the mouth and chin zone is carried through the main-track clip's crop,
+//! For each caption page the eyes-to-chin zone is carried through the main-track clip's crop,
 //! focus and zooms into canvas space (the same math the compositor draws with) at the page's
 //! start, end, every zoom edge and every face sample inside it. The page's box is then tested
 //! against that zone and against the boxes of any text on screen (the hook): the requested
@@ -12,8 +12,8 @@
 //!
 //! Limits: the detector only sees frontal faces, so a gap in the track means "not checked", never
 //! "clear". Pages are not split, so one-line pages are not a fallback. Overlays (B-roll) are not
-//! considered. The mouth and chin zone (`MOUTH_TOP`, `CHIN_MARGIN`) was checked by eye on the NASA
-//! test clip at 45.9, 89.1 and 94.2 s and has not been tested on other footage.
+//! considered. The zone (`FACE_TOP`, `CHIN_MARGIN`) was checked by eye on the NASA test clips
+//! (talking heads cropped to 9:16) and has not been tested on other footage.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -22,7 +22,7 @@ use std::ops::Range;
 use serde::Serialize;
 
 use super::timing::{active_caption, caption_pages, page_span, pop_peak};
-use super::{Graphics, Preset, layer_box, requested_y, safe_area, text_place};
+use super::{Graphics, Preset, caption_line_chars, layer_box, requested_y, safe_area, text_place};
 use crate::project::{
     Anim, AssetKind, CaptionMode, CaptionStyle, FaceSample, Item, ItemBody, Point, Project, Rect,
     TextPreset, TrackKind, Word,
@@ -31,7 +31,11 @@ use crate::render::canvas_rect;
 
 /// A face detection speaks for this many source seconds on each side of it.
 const HOLD: f64 = 1.0;
-/// The mouth and chin zone starts this far down the detected box (a fraction of its height) ...
+/// Captions first try to keep clear of the face from this far down the detected box (a fraction
+/// of its height), just below the eyebrows, so they may sit on the forehead but not the eyes ...
+const FACE_TOP: f32 = 0.2;
+/// ... and when no slot clears that, at least of the mouth, from this far down. Covering the
+/// eyes beats hiding the words.
 const MOUTH_TOP: f32 = 0.55;
 /// ... and ends this far below the box bottom.
 const CHIN_MARGIN: f32 = 0.12;
@@ -62,7 +66,7 @@ pub enum FaceFit {
     Off,
     /// Face data exists, but no detection is within a second of this page: not checked.
     Unchecked,
-    /// The requested box is clear of the mouth and chin.
+    /// The requested box is clear of the eyes to chin (or, when no slot clears that, the mouth and chin).
     Clear,
     /// Moved to another slot or shrunk to get clear of the face and any text.
     Moved,
@@ -122,9 +126,12 @@ pub(super) struct Choice {
     pub gaps: bool,
 }
 
-/// Mouth and chin zones of one page, united, in canvas space.
+/// Face zones of one page, united, in canvas space.
 #[derive(Default)]
 struct Zone {
+    /// Eyes to chin: the preferred keep-out.
+    face: Option<Rect>,
+    /// Mouth and chin: the keep-out when nothing clears the face.
     rect: Option<Rect>,
     /// Some probe had no detection within `HOLD`.
     gaps: bool,
@@ -158,7 +165,7 @@ fn nearest(faces: &[FaceSample], t: f64) -> Option<&FaceSample> {
         .filter(|s| (s.t - t).abs() <= HOLD)
 }
 
-/// The mouth and chin zone of every face the page can show between timeline seconds `a` and
+/// The eyes-to-chin zone of every face the page can show between timeline seconds `a` and
 /// `b`, on the canvas.
 fn face_zone(project: &Project, a: f64, b: f64) -> Zone {
     let mut zone = Zone::default();
@@ -185,21 +192,28 @@ fn face_zone(project: &Project, a: f64, b: f64) -> Zone {
                 zone.gaps = true;
                 return;
             };
-            let mouth = Rect {
+            let zone_from = |top: f32| Rect {
                 x: s.x,
-                y: s.y + s.h * MOUTH_TOP,
+                y: s.y + s.h * top,
                 w: s.w,
-                h: s.h * (1.0 - MOUTH_TOP + CHIN_MARGIN),
+                h: s.h * (1.0 - top + CHIN_MARGIN),
             };
-            let r = canvas_rect(
-                clip,
-                (asset.width, asset.height),
-                canvas,
-                t - item.start,
-                item.duration,
-                mouth,
+            let on_canvas = |r: Rect| {
+                canvas_rect(
+                    clip,
+                    (asset.width, asset.height),
+                    canvas,
+                    t - item.start,
+                    item.duration,
+                    r,
+                )
+            };
+            let (face, mouth) = (
+                on_canvas(zone_from(FACE_TOP)),
+                on_canvas(zone_from(MOUTH_TOP)),
             );
-            zone.rect = Some(zone.rect.map_or(r, |u| union(u, r)));
+            zone.face = Some(zone.face.map_or(face, |u| union(u, face)));
+            zone.rect = Some(zone.rect.map_or(mouth, |u| union(u, mouth)));
         };
         // The view changes at zoom edges, the face between samples: probe both.
         probe(from);
@@ -222,9 +236,13 @@ fn face_zone(project: &Project, a: f64, b: f64) -> Zone {
 
 /// What `draw` shows of a page: whole pages in word-pop, else each wrapped phrase. Each is
 /// (words shown, where line two starts, the word being spoken).
-fn units(words: &[Word], style: &CaptionStyle) -> Vec<(Range<usize>, usize, usize)> {
+fn units(
+    words: &[Word],
+    style: &CaptionStyle,
+    line_limit: usize,
+) -> Vec<(Range<usize>, usize, usize)> {
     let mut out = Vec::new();
-    for (range, line_break) in caption_pages(words, usize::from(style.max_chars), style.uppercase) {
+    for (range, line_break) in caption_pages(words, line_limit, style.uppercase) {
         if style.mode == CaptionMode::WordPop {
             out.extend(range.map(|i| (i..i + 1, i + 1, i)));
         } else {
@@ -256,7 +274,9 @@ impl Graphics {
         } else {
             1.0
         };
-        for (shown, line_break, spoken) in units(words, style) {
+        for (shown, line_break, spoken) in
+            units(words, style, caption_line_chars(style, safe, w, h))
+        {
             if let Some(layer) = self.caption_layer(
                 words,
                 shown,
@@ -416,9 +436,10 @@ impl Graphics {
         style.uppercase.hash(&mut hash);
         style.max_chars.hash(&mut hash);
         requested.to_bits().hash(&mut hash);
-        zone.rect
-            .map(|r| [r.x, r.y, r.w, r.h].map(f32::to_bits))
-            .hash(&mut hash);
+        for r in [zone.face, zone.rect] {
+            r.map(|r| [r.x, r.y, r.w, r.h].map(f32::to_bits))
+                .hash(&mut hash);
+        }
         (zone.gaps, text_hash.finish(), w, h).hash(&mut hash);
         let key = hash.finish();
         if let Some(choice) = self.placements.get(&key) {
@@ -427,26 +448,27 @@ impl Graphics {
 
         let mut obstacles = Vec::new();
         self.text_boxes(project, a, b, safe, w, h, &mut |r| obstacles.push(r));
-        let tries = std::iter::once((Slot::Requested, requested, 1.0))
+        let tries: Vec<_> = std::iter::once((Slot::Requested, requested, 1.0))
             .chain(SCALES.map(|scale| (Slot::Lower, 1.0, scale)))
-            .chain(SCALES.map(|scale| (Slot::Upper, 0.0, scale)));
-        // The first try clear of the face and of every text box wins; with none, the page is
-        // not drawn.
+            .chain(SCALES.map(|scale| (Slot::Upper, 0.0, scale)))
+            .collect();
+        // The first try clear of the eyes-to-chin zone and every text box wins; failing that, the
+        // first clear of the mouth and chin. With none, the page is not drawn.
         let mut found = None;
-        for (k, (slot, anchor, scale)) in tries.enumerate() {
-            let (boxes, text) = self.measure(style, words, anchor, scale, safe, w, h);
-            if scale < 1.0 && text < MIN_SIZE {
-                continue;
-            }
-            let blocked = zone
-                .rect
-                .is_some_and(|f| boxes.iter().any(|b| touches(*b, f)))
-                || boxes
-                    .iter()
-                    .any(|b| obstacles.iter().any(|o| touches(*b, *o)));
-            if !blocked {
-                found = Some((k, slot, anchor, scale));
-                break;
+        'zones: for keep_out in [zone.face, zone.rect] {
+            for (k, &(slot, anchor, scale)) in tries.iter().enumerate() {
+                let (boxes, text) = self.measure(style, words, anchor, scale, safe, w, h);
+                if scale < 1.0 && text < MIN_SIZE {
+                    continue;
+                }
+                let blocked = keep_out.is_some_and(|f| boxes.iter().any(|b| touches(*b, f)))
+                    || boxes
+                        .iter()
+                        .any(|b| obstacles.iter().any(|o| touches(*b, *o)));
+                if !blocked {
+                    found = Some((k, slot, anchor, scale));
+                    break 'zones;
+                }
             }
         }
         let choice = match found {

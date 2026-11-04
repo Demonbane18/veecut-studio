@@ -507,6 +507,46 @@ fn painted_rows(frame: &Pixmap) -> Option<(u32, u32)> {
 }
 
 #[test]
+fn captions_keep_off_the_eyes_not_only_the_mouth() {
+    // A 16:9 interview cropped to 9:16: the eyes (from 0.26 of the canvas) sit inside the default
+    // upper-third caption box, while the mouth and chin (from 0.365) are well clear of it.
+    let face = (0.40, 0.20, 0.20, 0.30);
+    let mut project = face_project(face, 9.0);
+    project.captions.size = 0.045;
+    project.captions.position = 0.25;
+    project.tracks[3].items.push(page("cap-1", 1.0));
+    let placed = Graphics::new().caption_placement_at(&project, 1.3).unwrap();
+    assert_eq!(placed.face, FaceFit::Moved, "{placed:?}");
+    // Eyes start just below the brows (20% down the box) on this unzoomed crop.
+    let eyes_top = face.1 + face.3 * 0.2;
+    let chin = face.1 + face.3 * 1.12;
+    let b = placed.bounds;
+    assert!(
+        b.y + b.h <= eyes_top || b.y >= chin,
+        "caption {b:?} overlaps the face band {eyes_top}..{chin}"
+    );
+}
+
+#[test]
+fn a_face_filling_the_frame_keeps_captions_off_the_mouth_instead_of_hiding_them() {
+    // Eyes to chin cover nearly the whole safe area, so no slot clears them. The words must
+    // still show, clear of the mouth and chin.
+    let face = (0.25, 0.05, 0.50, 0.70);
+    let mut project = face_project(face, 9.0);
+    project.captions.size = 0.045;
+    project.captions.position = 0.25;
+    project.tracks[3].items.push(page("cap-1", 1.0));
+    let placed = Graphics::new().caption_placement_at(&project, 1.3).unwrap();
+    assert_ne!(placed.face, FaceFit::Hidden, "{placed:?}");
+    let mouth_top = face.1 + face.3 * 0.55;
+    assert!(
+        placed.bounds.y + placed.bounds.h <= mouth_top,
+        "caption {:?} reaches the mouth at {mouth_top}",
+        placed.bounds
+    );
+}
+
+#[test]
 fn large_face_moves_the_caption_off_mouth_and_chin_in_canvas_space() {
     let face = (0.38, 0.22, 0.24, 0.43);
     let (top, bottom) = punched_in_zone(face);
@@ -718,6 +758,36 @@ fn a_position_the_safe_area_overrides_is_reported_with_the_box_actually_drawn() 
     assert!(lower.bounds.y + lower.bounds.h / 2.0 < 0.84 - 0.01);
     assert_eq!(lower.face, FaceFit::Off);
     assert!(!at(0.5).clamped);
+}
+
+#[test]
+fn long_words_page_on_instead_of_shrinking_a_vertical_caption() {
+    // Default style on 9:16: "SHADOWED LUNAR CRATERS." is three words, inside the 20-character
+    // budget, but at the requested size only one or two of them fit on a line.
+    let mut project = Project::new("long", VideoKind::default(), Canvas::vertical());
+    project.tracks[3].items.push(Item {
+        id: "cap-1".into(),
+        start: 0.0,
+        duration: 1.2,
+        body: ItemBody::Caption(Caption {
+            words: ["Shadowed", "lunar", "craters."]
+                .iter()
+                .enumerate()
+                .map(|(i, s)| Word {
+                    text: (*s).into(),
+                    start: i as f64 * 0.4,
+                    end: (i + 1) as f64 * 0.4,
+                    emphasis: false,
+                })
+                .collect(),
+        }),
+    });
+    // `size` is the smallest text drawn across every phrase of the page.
+    let placed = Graphics::new().caption_placement_at(&project, 0.2).unwrap();
+    assert!(
+        placed.size >= project.captions.size * 0.99,
+        "shrunk: {placed:?}"
+    );
 }
 
 #[test]

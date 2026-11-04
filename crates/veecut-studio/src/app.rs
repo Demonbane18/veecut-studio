@@ -797,11 +797,39 @@ impl Studio {
                     if let Some(auto) = &self.auto {
                         ui.horizontal(|ui| { ui.spinner(); ui.label(format!("Auto-editing: {}", auto.last)); });
                     }
-                    ui.separator(); ui.heading("Inbox videos");
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.heading("Inbox");
+                        if ui.small_button("Refresh").clicked() { self.inbox = inbox_files(&self.workspace); }
+                    });
+                    ui.label("Files in the workspace's inbox/ folder. Click a video or audio file to use it as the source.");
+                    let visuals = matches!(self.new_kind, VideoKind::Documentary | VideoKind::Explainer);
+                    let add_label = if self.new_kind == VideoKind::Explainer { "Add to visuals" } else { "Add as B-roll" };
+                    let mut add = None;
+                    let mut music = None;
                     for path in &self.inbox {
-                        let selected = self.new_source.as_ref() == Some(path);
-                        if ui.selectable_label(selected, filename(path)).clicked() { self.new_source = Some(path.clone()); }
+                        let kind = inbox_kind(path);
+                        ui.horizontal_wrapped(|ui| {
+                            if kind == Some(InboxKind::Image) {
+                                ui.label(filename(path));
+                            } else {
+                                let selected = self.new_source.as_ref() == Some(path);
+                                if ui.selectable_label(selected, filename(path)).clicked() { self.new_source = Some(path.clone()); }
+                            }
+                            if visuals && kind != Some(InboxKind::Audio) && ui.add_enabled(!self.new_broll.contains(path), egui::Button::new(add_label).small()).clicked() {
+                                add = Some(path.clone());
+                            }
+                            if self.new_kind == VideoKind::Explainer && kind == Some(InboxKind::Audio) && ui.add_enabled(self.new_music.as_ref() != Some(path), egui::Button::new("Use as music").small()).clicked() {
+                                music = Some(path.clone());
+                            }
+                        });
                     }
+                    if visuals {
+                        let pending: Vec<PathBuf> = self.inbox.iter().filter(|path| inbox_kind(path) != Some(InboxKind::Audio) && self.new_source.as_ref() != Some(*path) && !self.new_broll.contains(path)).cloned().collect();
+                        if ui.add_enabled(!pending.is_empty(), egui::Button::new(format!("{add_label}: all {} remaining", pending.len()))).clicked() { self.new_broll.extend(pending); }
+                    }
+                    if let Some(path) = add { self.new_broll.push(path); }
+                    if music.is_some() { self.new_music = music; }
                 });
             });
         });
@@ -1001,10 +1029,17 @@ impl Studio {
             self.workspace
                 .add_asset(&mut next, doc.dir(), &path, role)?;
         }
-        self.apply(vec![Op::Set {
-            path: "/assets".into(),
-            value: json!(next.assets),
-        }]);
+        // add_asset also imports a fetched file's `.source.json` licence record into sources.
+        self.apply(vec![
+            Op::Set {
+                path: "/assets".into(),
+                value: json!(next.assets),
+            },
+            Op::Set {
+                path: "/sources".into(),
+                value: json!(next.sources),
+            },
+        ]);
         Ok(())
     }
 
@@ -1619,22 +1654,31 @@ fn filename(path: &Path) -> String {
         .to_string_lossy()
         .into_owned()
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InboxKind {
+    Video,
+    Audio,
+    Image,
+}
+
+fn inbox_kind(path: &Path) -> Option<InboxKind> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "mp4" | "mov" | "mkv" | "webm" | "m4v" => Some(InboxKind::Video),
+        "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "aiff" => Some(InboxKind::Audio),
+        "png" | "jpg" | "jpeg" | "webp" => Some(InboxKind::Image),
+        _ => None,
+    }
+}
+
+/// Videos, audio and pictures in inbox/, sorted by name.
 fn inbox_files(workspace: &Workspace) -> Vec<PathBuf> {
     let mut paths: Vec<_> = std::fs::read_dir(workspace.inbox())
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        ["mp4", "mov", "mkv", "webm", "m4v"]
-                            .contains(&extension.to_ascii_lowercase().as_str())
-                    })
-        })
+        .filter(|path| path.is_file() && inbox_kind(path).is_some())
         .collect();
     paths.sort();
     paths

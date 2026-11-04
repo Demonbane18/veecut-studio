@@ -743,19 +743,27 @@ fn explainer_visual_reviews(p: &Project, visuals: &[String], shots: usize) -> Ve
             "{reused} shots reuse earlier visuals in the supplied order, without matching their subject to the narration. Add {reused} more visuals in story order or replace those shots."
         ));
     }
-    for id in visuals {
-        if let Some(asset) = p.asset(id) {
+    // One line for all heavy crops: a vertical edit of landscape pictures crops every one of them.
+    let canvas = p.canvas.width as f64 / p.canvas.height as f64;
+    let cropped: Vec<String> = visuals
+        .iter()
+        .filter_map(|id| p.asset(id))
+        .filter_map(|asset| {
             let source = asset.width.max(1) as f64 / asset.height.max(1) as f64;
-            let canvas = p.canvas.width as f64 / p.canvas.height as f64;
             let kept = (source / canvas).min(canvas / source);
-            if kept < 0.7 {
-                reviews.push(format!(
-                    "{} loses {:.0}% of its picture to the cover crop. Inspect the subject and any baked-in labels; patch its clips with {{\"fit\":\"contain\",\"ken_burns\":null}} to show the whole image with bars.",
-                    asset.path.display(),
-                    (1.0 - kept) * 100.0,
-                ));
-            }
-        }
+            (kept < 0.7).then(|| {
+                let name = asset.path.file_name().unwrap_or(asset.path.as_os_str());
+                format!("{} ({:.0}%)", name.to_string_lossy(), (1.0 - kept) * 100.0)
+            })
+        })
+        .collect();
+    if !cropped.is_empty() {
+        reviews.push(format!(
+            "{} of {} visuals lose over 30% of the picture to the cover crop: {}. Check that subjects and baked-in labels stay in frame; patch a clip with {{\"fit\":\"contain\",\"ken_burns\":null}} to show its whole picture with bars.",
+            cropped.len(),
+            visuals.len(),
+            cropped.join(", ")
+        ));
     }
     reviews
 }

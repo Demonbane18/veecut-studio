@@ -37,6 +37,9 @@ pub fn all(peak_db: f32) -> Vec<Made> {
         impact(),
         hit(),
         outro(),
+        chiptune(),
+        coin(),
+        blip(),
     ]);
     let target = 10f64.powf(peak_db as f64 / 20.0);
     for m in &mut out {
@@ -594,4 +597,205 @@ fn outro() -> Made {
         ),
     ]);
     made("outro", Sound::Outro, T, x, 0.9)
+}
+
+/// Beats per minute of the chiptune bed; a bar is four beats.
+const BPM: f64 = 140.0;
+/// Bars in the chiptune loop.
+const BARS: usize = 16;
+
+/// MIDI note to Hz.
+fn hz(midi: i32) -> f64 {
+    440.0 * 2f64.powf((midi as f64 - 69.0) / 12.0)
+}
+
+/// A square wave at `freq` with the given duty (0.125 = thin and nasal, 0.5 = full).
+fn square(freq: f64, duty: f64) -> impl FnMut() -> f64 {
+    let mut ph = 0.0f64;
+    move || {
+        let v = if ph < duty { 1.0 } else { -1.0 };
+        ph = (ph + freq / SR).fract();
+        v
+    }
+}
+
+/// A triangle wave at `freq`, starting at its low point.
+fn triangle(freq: f64) -> impl FnMut() -> f64 {
+    let mut ph = 0.0f64;
+    move || {
+        let v = 4.0 * (ph - 0.5).abs() - 1.0;
+        ph = (ph + freq / SR).fract();
+        v
+    }
+}
+
+/// Straight ramp up over `attack` seconds and down over `release`, so a note of `len` samples
+/// starts and ends at zero.
+fn gate(i: usize, len: usize, attack: f64, release: f64) -> f64 {
+    (i as f64 / (attack * SR))
+        .min((len - i) as f64 / (release * SR))
+        .min(1.0)
+}
+
+/// Adds `f(0..len)` into `buf` from sample `at`, wrapping past the end so a note that runs over
+/// the loop point lands at the start: the buffer stays a seamless loop.
+fn put(buf: &mut [f64], at: usize, len: usize, mut f: impl FnMut(usize) -> f64) {
+    let n = buf.len();
+    for i in 0..len {
+        buf[(at + i) % n] += f(i);
+    }
+}
+
+/// A chip note: 2 ms attack, a slow droop, a 3 ms release.
+fn chip(i: usize, len: usize) -> f64 {
+    gate(i, len, 0.002, 0.003) * (1.0 - 0.25 * i as f64 / len as f64)
+}
+
+/// 16 bars at 140 BPM (27.43 s) that loop without a seam: a thin square lead arpeggiating over a
+/// triangle bass, noise hats and a snare on beats 2 and 4. Bars 1 to 4 and 9 to 12 stay in A
+/// minor; bars 5 to 8 and 13 to 16 lift into C major with a fuller 25% lead. Every note starts
+/// and ends at zero and anything running past the end wraps to the start. The "hit" is the
+/// downbeat, because a bed has no one loudest moment.
+fn chiptune() -> Made {
+    // (bass root MIDI, minor third, major lift)
+    const CHORDS: [(i32, bool, bool); BARS] = [
+        (45, true, false),
+        (38, true, false),
+        (41, false, false),
+        (40, false, false),
+        (48, false, true),
+        (43, false, true),
+        (45, true, true),
+        (41, false, true),
+        (45, true, false),
+        (38, true, false),
+        (41, false, false),
+        (40, false, false),
+        (48, false, true),
+        (43, false, true),
+        (41, false, true),
+        (43, false, true),
+    ];
+    // Lead per sixteenth: an index into root, third, fifth, octave, octave + third.
+    const MINOR: [Option<usize>; 16] = [
+        Some(0),
+        None,
+        Some(2),
+        Some(1),
+        Some(2),
+        None,
+        Some(3),
+        Some(2),
+        Some(1),
+        None,
+        Some(2),
+        Some(3),
+        Some(4),
+        Some(3),
+        Some(2),
+        None,
+    ];
+    const LIFT: [Option<usize>; 16] = [
+        Some(3),
+        Some(2),
+        Some(3),
+        Some(4),
+        Some(3),
+        None,
+        Some(2),
+        Some(3),
+        Some(4),
+        Some(3),
+        Some(2),
+        Some(3),
+        Some(4),
+        None,
+        Some(3),
+        Some(2),
+    ];
+    const BASS: [i32; 8] = [0, 12, 0, 12, 0, 12, 0, 7];
+    // A whole number of samples; the bar length rounds by under half a sample over the loop.
+    let n = (BARS as f64 * 4.0 * 60.0 / BPM * SR).round() as usize;
+    let step = n as f64 / (BARS * 16) as f64;
+    let at = |s: usize| (s as f64 * step).round() as usize;
+    let mut buf = vec![0.0f64; n];
+    let mut hats = Noise::new(0xC417_0001, Pass::High, 7000.0, 0.7);
+    let mut snare = Noise::new(0xC417_0002, Pass::Band, 1900.0, 0.8);
+    for (bar, &(root, minor, lift)) in CHORDS.iter().enumerate() {
+        let third = if minor { 3 } else { 4 };
+        let tones = [0, third, 7, 12, 12 + third];
+        let duty = if lift { 0.25 } else { 0.125 };
+        let pattern = if lift { &LIFT } else { &MINOR };
+        let lead_len = (step * 0.85) as usize;
+        for (k, tone) in pattern.iter().enumerate() {
+            let Some(t) = tone else { continue };
+            let mut osc = square(hz(root + 24 + tones[*t]), duty);
+            put(&mut buf, at(bar * 16 + k), lead_len, |i| {
+                0.45 * osc() * chip(i, lead_len)
+            });
+        }
+        let bass_len = (step * 1.8) as usize;
+        for (j, off) in BASS.iter().enumerate() {
+            let mut osc = triangle(hz(root + off));
+            put(&mut buf, at(bar * 16 + j * 2), bass_len, |i| {
+                0.6 * osc() * chip(i, bass_len)
+            });
+        }
+        let hat_len = (0.025 * SR) as usize;
+        for k in [2, 6, 10, 14] {
+            put(&mut buf, at(bar * 16 + k), hat_len, |i| {
+                0.2 * hats.next()
+                    * gate(i, hat_len, 0.0003, 0.003)
+                    * (-(i as f64) / SR / 0.006).exp()
+            });
+        }
+        let snare_len = (0.09 * SR) as usize;
+        for k in [4, 12] {
+            let mut tone = triangle(185.0);
+            put(&mut buf, at(bar * 16 + k), snare_len, |i| {
+                let t = i as f64 / SR;
+                gate(i, snare_len, 0.0003, 0.01)
+                    * (0.5 * snare.next() * (-t / 0.03).exp() + 0.3 * tone() * (-t / 0.02).exp())
+            });
+        }
+    }
+    made("chiptune", Sound::Chiptune, 0.0, buf, 0.0)
+}
+
+/// 0.25 s: two square blips, B5 (988 Hz) for 70 ms then E6 (1319 Hz) ringing out. The hit is the
+/// first blip's peak.
+fn coin() -> Made {
+    const T: f64 = 0.001;
+    const SPLIT: f64 = 0.07;
+    const LEN: f64 = 0.25;
+    let mut low = square(988.0, 0.5);
+    let mut high = square(1319.0, 0.5);
+    let n = (LEN * SR).round() as usize;
+    let x = (0..n)
+        .map(|i| {
+            let t = i as f64 / SR;
+            if t < SPLIT {
+                low() * (t / T).min(1.0) * (-(t - T).max(0.0) / 0.15).exp()
+            } else {
+                let u = t - SPLIT;
+                0.85 * high() * (u / T).min(1.0) * (-u / 0.08).exp()
+            }
+        })
+        .collect();
+    made("coin", Sound::Coin, T, x, 0.03)
+}
+
+/// 45 ms: one short 25% square pip at G6 (1568 Hz) for a text pop.
+fn blip() -> Made {
+    const T: f64 = 0.0005;
+    const LEN: f64 = 0.045;
+    let mut osc = square(1568.0, 0.25);
+    let n = (LEN * SR).round() as usize;
+    let x = (0..n)
+        .map(|i| {
+            let t = i as f64 / SR;
+            osc() * (t / T).min(1.0) * (-(t - T).max(0.0) / 0.02).exp()
+        })
+        .collect();
+    made("blip", Sound::Blip, T, x, 0.008)
 }

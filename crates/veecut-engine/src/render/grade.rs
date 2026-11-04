@@ -1,11 +1,11 @@
-//! Per-clip colour treatments for documentary edits: six looks, a halftone dot screen in the
-//! shadows, a vignette and a hue-band recolour. The looks, the 0.75%-of-height dot pitch and
-//! the vignette's 0.59 edge/centre luma ratio follow NextPhase Editor V1's published
-//! measurements; the code is written fresh. No grain, no lifted blacks.
+//! Per-clip colour treatments, a halftone dot screen, vignette, hue-band recolour and pixelation.
+//! Documentary looks, dot pitch and vignette follow NextPhase Editor V1's published measurements.
+//! Timings and sizes follow published measurements in Jad M.H's (NextPhase AI) Arcade Motion
+//! Graphics / Motion Graphics V3 skills; code written fresh. SoftMono alone lifts blacks.
 
 use crate::project::{Recolor, TreatLook, Treatment};
 
-use super::fx::par_rows;
+use super::fx::{par_rows, pixelate};
 
 /// Recolour bands fade in over this many degrees inside each edge.
 const FEATHER: f32 = 12.0;
@@ -18,6 +18,7 @@ pub(crate) struct Treat {
     chroma: i32,
     halftone: f32,
     vignette: f32,
+    pixelate: f32,
     recolor: Option<Band>,
 }
 
@@ -29,12 +30,13 @@ impl Treat {
             chroma,
             halftone: t.halftone.clamp(0.0, 1.0),
             vignette: t.vignette.clamp(0.0, 1.0),
+            pixelate: t.pixelate.clamp(0.0, 1.0),
             recolor: t.recolor.and_then(Band::new),
         }
     }
 
-    /// Grades a straight-alpha RGBA layer in place: recolour, look, halftone, vignette.
-    /// `canvas_h` sets the dot pitch so every layer prints at the same screen.
+    /// Grades a straight-alpha RGBA layer in place, then pixelates the finished colours.
+    /// `canvas_h` sets the dot pitch and pixel block size consistently across layers.
     pub fn apply(&self, px: &mut [u8], w: u32, h: u32, canvas_h: u32) {
         let (w, h) = (w as usize, h as usize);
         if w == 0 || h == 0 {
@@ -47,7 +49,7 @@ impl Treat {
             for (k, row) in band.chunks_exact_mut(w * 4).enumerate() {
                 let y = y0 + k;
                 let ny = (y as f32 + 0.5) * sy - 1.0;
-                for (x, p) in row.chunks_exact_mut(4).enumerate() {
+                for (x, p) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                     if let Some(band) = &self.recolor {
                         let [r, g, b] = band.apply([p[0], p[1], p[2]]);
                         (p[0], p[1], p[2]) = (r, g, b);
@@ -69,6 +71,12 @@ impl Treat {
                 }
             }
         });
+        pixelate(
+            px,
+            w,
+            h,
+            (self.pixelate * canvas_h as f32).round().max(1.0) as usize,
+        );
     }
 
     #[inline]
@@ -120,6 +128,7 @@ fn look_tables(look: TreatLook) -> ([[i16; 256]; 3], i32) {
             let v = smoothstep((y - 0.04) / 0.92);
             [0.5 * (v + smoothstep(v)); 3]
         }),
+        TreatLook::SoftMono => (0.0, &|y: f32| [0.10 + 0.80 * s_curve(y, 0.25); 3]),
         TreatLook::Warm => (0.5, &|y: f32| {
             let (v, m) = (s_curve(y, 0.25), mid(y));
             [v + 0.11 * m, v + 0.03 * m, v - 0.12 * m]
@@ -277,6 +286,43 @@ mod tests {
                     .map(move |b| [r as u8, g as u8, b as u8])
             })
         })
+    }
+
+    #[test]
+    fn pixelate_grade_makes_flat_canvas_sized_blocks() {
+        let (w, h, size) = (19usize, 13usize, 4usize);
+        let mut px = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                px.extend_from_slice(&[(x * 11) as u8, (y * 17) as u8, 90, 255]);
+            }
+        }
+        Treat::new(&Treatment {
+            pixelate: 0.04,
+            ..Treatment::default()
+        })
+        .apply(&mut px, w as u32, h as u32, 100);
+        let at = |x: usize, y: usize| &px[(y * w + x) * 4..(y * w + x + 1) * 4];
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(at(x, y), at(x / size * size, y / size * size));
+            }
+        }
+        assert_ne!(at(0, 0), at(size, 0));
+        assert_ne!(at(0, 0), at(0, size));
+    }
+
+    #[test]
+    fn soft_mono_lifts_blacks_and_softens_white_without_chroma() {
+        let t = treat(TreatLook::SoftMono);
+        for rgb in samples() {
+            let m = graded(&t, rgb);
+            assert_eq!(m[0], m[1]);
+            assert_eq!(m[1], m[2]);
+        }
+        assert!((18..=41).contains(&graded(&t, [0; 3])[0]));
+        assert!((220..=240).contains(&graded(&t, [255; 3])[0]));
+        assert!((126..=130).contains(&graded(&t, [128; 3])[0]));
     }
 
     #[test]

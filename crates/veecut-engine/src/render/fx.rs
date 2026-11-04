@@ -3,6 +3,8 @@
 //! Effect timings come from NextPhase Editor V1's published measurements (at 30 fps: flash 1
 //! frame, negative 2 frames out and 2 in, datamosh 4, a 3x3 tile reveal 9, rack focus 9, a whip
 //! over the last 4 frames at about x1.15, 1.30, 1.45, 1.83). The code is written fresh.
+//! Timings and sizes follow published measurements in Jad M.H's (NextPhase AI) Arcade Motion
+//! Graphics / Motion Graphics V3 skills; code written fresh.
 
 use std::sync::LazyLock;
 
@@ -134,6 +136,38 @@ pub(crate) fn focus_radius(p: f64, canvas_h: u32) -> f32 {
     (0.02 * canvas_h as f64 * (1.0 - p.clamp(0.0, 1.0)).powi(3)) as f32
 }
 
+/// Six held sizes, beginning at 8% of canvas height; the last step is the sharp picture.
+pub(crate) fn pixelate_size(p: f64, canvas_h: u32) -> usize {
+    let step = (p.clamp(0.0, 1.0) * 6.0).floor().min(5.0);
+    (0.08 * canvas_h as f64 * (5.0 - step) / 5.0)
+        .round()
+        .max(1.0) as usize
+}
+
+/// Nearest-colour blocks in place, including partial blocks at the right and bottom edges.
+/// One source pixel per block, with no temporary image or palette allocation.
+pub(crate) fn pixelate(px: &mut [u8], w: usize, h: usize, size: usize) {
+    let size = size.max(1);
+    if size == 1 || w == 0 || h == 0 {
+        return;
+    }
+    for y in (0..h).step_by(size) {
+        for x in (0..w).step_by(size) {
+            let (right, bottom) = ((x + size).min(w), (y + size).min(h));
+            let i = (((y + bottom - 1) / 2) * w + (x + right - 1) / 2) * 4;
+            let color = [px[i], px[i + 1], px[i + 2], px[i + 3]];
+            for row in y..bottom {
+                for p in px[(row * w + x) * 4..(row * w + right) * 4]
+                    .as_chunks_mut::<4>()
+                    .0
+                {
+                    p.copy_from_slice(&color);
+                }
+            }
+        }
+    }
+}
+
 /// The order a tile reveal switches the 3x3 panes (row-major indices), shuffled by `seed`.
 pub(crate) fn tile_order(seed: u64) -> [usize; 9] {
     let mut order = [0, 1, 2, 3, 4, 5, 6, 7, 8];
@@ -168,7 +202,7 @@ pub(crate) fn tiles(layer: &mut [u8], w: usize, h: usize, order: &[usize; 9], st
         let (x0, y0, x1, y1) = pane(p, w, h);
         for y in y0..y1 {
             let line = &mut layer[(y * w + x0) * 4..(y * w + x1) * 4];
-            for px in line.chunks_exact_mut(4) {
+            for px in line.as_chunks_mut::<4>().0 {
                 if n == step {
                     px.copy_from_slice(&[255, 255, 255, 255]);
                 } else {
@@ -182,7 +216,7 @@ pub(crate) fn tiles(layer: &mut [u8], w: usize, h: usize, order: &[usize; 9], st
 /// Inverts the colour channels.
 pub(crate) fn invert(data: &mut [u8], w: usize) {
     par_rows(data, w * 4, |_, band| {
-        for px in band.chunks_exact_mut(4) {
+        for px in band.as_chunks_mut::<4>().0 {
             px[0] = 255 - px[0];
             px[1] = 255 - px[1];
             px[2] = 255 - px[2];
@@ -242,7 +276,12 @@ pub(crate) fn apply_mask(layer: &mut [u8], mask: &[u8], w: usize) {
     let stride = w * 4;
     par_rows(layer, stride, |y0, band| {
         let mask = &mask[y0 * stride..];
-        for (p, m) in band.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
+        for (p, m) in band
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(mask.chunks_exact(4))
+        {
             let luma = (54 * m[0] as u32 + 183 * m[1] as u32 + 19 * m[2] as u32 + 128) >> 8;
             p[3] = mul255(p[3] as u32, mul255(luma, m[3] as u32) as u32);
         }
@@ -384,7 +423,7 @@ impl Work {
                 let gy = (((y0 + k) as f32 + 0.5) * inv - 0.5).clamp(0.0, (gh - 1) as f32);
                 let (y_lo, fy) = (gy as usize, gy.fract());
                 let y_hi = (y_lo + 1).min(gh - 1);
-                for (x, p) in line.chunks_exact_mut(4).enumerate() {
+                for (x, p) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                     if p[3] == 255 {
                         continue;
                     }
@@ -448,7 +487,7 @@ fn edt_rows(band: &mut [f32], n: usize) {
 
 fn premultiply(px: &mut [u8], w: usize) {
     par_rows(px, w * 4, |_, band| {
-        for p in band.chunks_exact_mut(4) {
+        for p in band.as_chunks_mut::<4>().0 {
             let a = p[3] as u32;
             for c in &mut p[..3] {
                 *c = mul255(*c as u32, a);
@@ -459,7 +498,7 @@ fn premultiply(px: &mut [u8], w: usize) {
 
 fn unpremultiply(px: &mut [u8], w: usize) {
     par_rows(px, w * 4, |_, band| {
-        for p in band.chunks_exact_mut(4) {
+        for p in band.as_chunks_mut::<4>().0 {
             let a = p[3] as u32;
             if a == 0 || a == 255 {
                 continue;
@@ -500,7 +539,7 @@ fn box_rows(src: &[u8], dst: &mut [u8], w: usize, r: usize) {
                     sum[c] += p[c];
                 }
             }
-            for (x, o) in out.chunks_exact_mut(4).enumerate() {
+            for (x, o) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let (add, sub) = (px(x + r + 1), px(x.saturating_sub(r)));
                 for c in 0..4 {
                     o[c] = ((sum[c] * inv + (1 << 15)) >> 16) as u8;
@@ -621,8 +660,13 @@ fn shrink(src: &[u8], w: usize, n: usize, dst: &mut [u8], sw: usize, sh: usize) 
         for (k, out) in band.chunks_exact_mut(sw * 4).enumerate() {
             acc.fill(0);
             for row in src[(y0 + k) * n * stride..][..n * stride].chunks_exact(stride) {
-                for (a, block) in acc.chunks_exact_mut(4).zip(row.chunks_exact(n * 4)) {
-                    for p in block.chunks_exact(4) {
+                for (a, block) in acc
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(row.chunks_exact(n * 4))
+                {
+                    for p in block.as_chunks::<4>().0 {
                         for c in 0..4 {
                             a[c] += p[c] as u32;
                         }

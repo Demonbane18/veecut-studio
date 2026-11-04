@@ -101,6 +101,9 @@ pub struct EditRequest {
     pub find: bool,
     /// Explainer camera motion; omission preserves the recipe's original motion.
     pub motion: Option<ExplainerMotion>,
+    /// Installed skill name. After the recipe builds the project and before render, its look
+    /// pack is applied. Missing skill or missing veecut.toml is an error.
+    pub skill: Option<String>,
 }
 
 impl EditRequest {
@@ -121,6 +124,7 @@ impl EditRequest {
             render: true,
             find: false,
             motion: None,
+            skill: None,
         }
     }
 }
@@ -288,10 +292,10 @@ impl Job<'_> {
         progress: &mut dyn FnMut(&str),
     ) -> Result<Transcript> {
         let path = transcript_path(dir, asset_id);
-        if let Ok(t) = Transcript::load(&path) {
-            if t.asset == asset_id {
-                return Ok(t);
-            }
+        if let Ok(t) = Transcript::load(&path)
+            && t.asset == asset_id
+        {
+            return Ok(t);
         }
         let asset = project
             .asset(asset_id)
@@ -333,6 +337,13 @@ impl Job<'_> {
         progress: &mut dyn FnMut(&str),
     ) -> Result<()> {
         aim_clips_at_faces(project);
+        if let Some(name) = self.req.skill.clone() {
+            let skill_dir = skill_look_dir(self.ws, &name)?;
+            let n = crate::look::apply(self.ws, project, dir, &skill_dir)?;
+            self.report
+                .summary
+                .push(format!("Applied look {name} ({n} changes)"));
+        }
         project.normalize();
         project
             .validate()
@@ -414,6 +425,25 @@ impl Job<'_> {
         self.report.drafts.push(out.to_path_buf());
         Ok(())
     }
+}
+
+fn skill_look_dir(ws: &Workspace, name: &str) -> Result<PathBuf> {
+    if name.is_empty()
+        || name.contains(['/', '\\', '\0'])
+        || name == "."
+        || name == ".."
+        || name.contains("..")
+    {
+        bail!("skill {name:?} is not an installed skill name");
+    }
+    let dir = ws.skill_dirs()[0].join(name);
+    if !dir.is_dir() {
+        bail!("skill {name} is not installed");
+    }
+    if !dir.join(crate::look::LOOK_FILE).is_file() {
+        bail!("skill {name} has no veecut.toml");
+    }
+    Ok(dir)
 }
 
 /// Per clip: the speaker's face where this part of the source shows it, so a crop and the
@@ -844,7 +874,7 @@ pub(crate) fn track_face(
 
 /// Adds what the caption placement did to the report: pages moved, hidden or not checked against
 /// the face.
-fn note_caption_placement(job: &mut Job, project: &Project) {
+fn note_caption_placement(job: &mut Job, dir: &Path, project: &Project) {
     let text = project.tracks.iter().any(|t| {
         matches!(t.kind, TrackKind::Text | TrackKind::Overlay)
             && t.items.iter().any(|i| matches!(i.body, ItemBody::Text(_)))
@@ -852,7 +882,9 @@ fn note_caption_placement(job: &mut Job, project: &Project) {
     if project.faces.is_empty() && !text {
         return;
     }
-    let report = graphics::caption_report(&mut Graphics::new(), project, 8);
+    let mut graphics = Graphics::new();
+    graphics.load_project_fonts(project, dir);
+    let report = graphics::caption_report(&mut graphics, project, 8);
     let first = |fit: FaceFit| {
         report
             .examples
@@ -886,6 +918,7 @@ fn note_caption_placement(job: &mut Job, project: &Project) {
 /// Captions from a transcript, unless the style turns them off.
 pub(crate) fn add_captions(
     job: &mut Job,
+    dir: &Path,
     project: &mut Project,
     transcript: &Transcript,
 ) -> Result<()> {
@@ -897,7 +930,7 @@ pub(crate) fn add_captions(
         "{pages} caption pages ({:?})",
         project.captions.mode
     ));
-    note_caption_placement(job, project);
+    note_caption_placement(job, dir, project);
     Ok(())
 }
 

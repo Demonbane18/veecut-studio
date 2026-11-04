@@ -18,6 +18,10 @@
 //! Run the ignored `visual_proof` test for PNG samples and a warm-frame draw benchmark.
 //! Caption pages keep off the speaker's eyes, mouth and chin when the project has face boxes; see
 //! `placement.rs` for the rule and `Graphics::caption_placements` for what was drawn where.
+//!
+//! Timings and sizes follow published measurements in Jad M.H's (NextPhase AI) Arcade Motion
+//! Graphics / Motion Graphics V3 skills; code written fresh. Press Start 2P is the upstream OFL
+//! TTF from https://github.com/google/fonts/tree/main/ofl/pressstart2p.
 
 mod contrast;
 mod placement;
@@ -30,6 +34,7 @@ use std::{
     collections::{BTreeSet, HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     ops::Range,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -59,6 +64,7 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../assets/fonts/Montserrat/Montserrat-Black.ttf"),
     include_bytes!("../../assets/fonts/PlayfairDisplay/PlayfairDisplay-BoldItalic.ttf"),
     include_bytes!("../../assets/fonts/BodoniModa/BodoniModa-Bold.ttf"),
+    include_bytes!("../../assets/fonts/PressStart2P/PressStart2P-Regular.ttf"),
 ];
 
 /// Shaping and raster caches shared across frames. Keep one instance per playback/export.
@@ -66,6 +72,8 @@ pub struct Graphics {
     fonts: FontSystem,
     swash: SwashCache,
     families: Vec<String>,
+    /// Canonical paths already read, so a project font is parsed once.
+    loaded_fonts: BTreeSet<PathBuf>,
     layers: HashMap<u64, Layer>,
     pages: HashMap<u64, Vec<(Range<usize>, usize)>>,
     placements: HashMap<u64, Choice>,
@@ -88,6 +96,7 @@ impl Graphics {
             "Inter",
             "Playfair Display",
             "Bodoni Moda",
+            "Press Start 2P",
         ];
         let replaced: Vec<_> = fonts
             .db()
@@ -106,22 +115,49 @@ impl Graphics {
         for bytes in FONTS {
             db.load_font_source(Source::Binary(Arc::new(*bytes)));
         }
-        let families = fonts
-            .db()
-            .faces()
-            .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let families = family_list(&fonts);
         Self {
             fonts,
             swash: SwashCache::new(),
             families,
+            loaded_fonts: BTreeSet::new(),
             layers: HashMap::new(),
             pages: HashMap::new(),
             placements: HashMap::new(),
             bytes: 0,
             mask: None,
+        }
+    }
+
+    /// Loads each new file in `project.fonts` into the font database. A missing file is skipped.
+    /// Paths are absolute, or relative to `project_dir`, the same way asset paths are.
+    pub fn load_project_fonts(&mut self, project: &Project, project_dir: &Path) {
+        let mut added = false;
+        for font in &project.fonts {
+            let path = Path::new(font);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                project_dir.join(path)
+            };
+            let key = std::fs::canonicalize(&path).unwrap_or(path);
+            if !self.loaded_fonts.insert(key.clone()) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&key) else {
+                self.loaded_fonts.remove(&key);
+                continue;
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            self.fonts
+                .db_mut()
+                .load_font_source(Source::Binary(Arc::new(bytes)));
+            added = true;
+        }
+        if added {
+            self.families = family_list(&self.fonts);
         }
     }
 
@@ -359,6 +395,7 @@ impl Graphics {
                 m,
                 Anim::None,
                 usize::MAX,
+                None,
             );
         }
     }
@@ -528,7 +565,14 @@ impl Graphics {
         let key = hash.finish();
         if !self.layers.contains_key(&key) {
             let color = text.style.color.unwrap_or(defaults.color);
-            let accent = text.style.accent.unwrap_or(ACCENT);
+            let accent = text
+                .style
+                .accent
+                .unwrap_or(if text.preset == TextPreset::Marker {
+                    Color::rgb(217, 119, 87)
+                } else {
+                    ACCENT
+                });
             let upper = text.style.uppercase.unwrap_or(defaults.uppercase);
             let content = match text.preset {
                 TextPreset::Quote => format!("“{}”", text.text),
@@ -581,8 +625,10 @@ impl Graphics {
                 } else {
                     text.style.stroke.unwrap_or(defaults.stroke)
                 },
-                shadow: true,
-                background: if text.preset == TextPreset::BlackCard {
+                shadow: !matches!(text.preset, TextPreset::Marker | TextPreset::Meter),
+                background: if matches!(text.preset, TextPreset::Marker | TextPreset::Meter) {
+                    None
+                } else if text.preset == TextPreset::BlackCard {
                     Some(Color::rgba(0, 0, 0, 0))
                 } else {
                     text.style.background.or(defaults.background)
@@ -620,6 +666,10 @@ impl Graphics {
         safe: Rect,
         target: &mut PixmapMut<'_>,
     ) {
+        if text.preset == TextPreset::Meter {
+            self.meter(item, text, t, safe, target);
+            return;
+        }
         if text.text.trim().is_empty() {
             return;
         }
@@ -762,9 +812,120 @@ impl Graphics {
                 m,
                 anim,
                 visible_lines,
+                (text.preset == TextPreset::Marker).then(|| {
+                    let p = ((t - item.start) / 0.35).clamp(0.0, 1.0) as f32;
+                    let eased = if p < 0.5 {
+                        2.0 * p * p
+                    } else {
+                        1.0 - 2.0 * (1.0 - p).powi(2)
+                    };
+                    (text.style.accent.unwrap_or(Color::rgb(217, 119, 87)), eased)
+                }),
             );
         }
     }
+
+    /// Draws the HUD in shared canvas coordinates; the item's own clock drives whole segments.
+    fn meter(&mut self, item: &Item, text: &Text, t: f64, safe: Rect, target: &mut PixmapMut<'_>) {
+        let (w, h) = (target.width() as f32, target.height() as f32);
+        let bounds = meter_box(text, safe);
+        let mut bar = Rect {
+            x: bounds.x * w,
+            y: bounds.y * h,
+            w: bounds.w * w,
+            h: bounds.h * h,
+        };
+        if !text.text.trim().is_empty() {
+            let defaults = Preset::for_kind(TextPreset::Meter, safe);
+            if let Some(built) = self.text_layer(
+                item,
+                text,
+                &defaults,
+                safe,
+                target.width(),
+                target.height(),
+                false,
+            ) && let Some(label) = self.layers.get(&built.key)
+            {
+                let label_w = bar.w * 0.22;
+                draw_layer(
+                    label,
+                    target,
+                    &mut self.mask,
+                    Point::new((bar.x + label_w / 2.0) / w, (bar.y + bar.h / 2.0) / h),
+                    Rect::FULL,
+                    Motion {
+                        scale: (label_w / built.width as f32).min(bar.h / built.height as f32),
+                        ..motion(Anim::None, 1.0, false)
+                    },
+                    Anim::None,
+                    usize::MAX,
+                    None,
+                );
+                let offset = label_w + w * 0.01;
+                bar.x += offset;
+                bar.w -= offset;
+            }
+        }
+        let fill = |target: &mut PixmapMut<'_>, r: Rect, color: Color| {
+            if let Some(rect) = tiny_skia::Rect::from_xywh(r.x, r.y, r.w, r.h) {
+                target.fill_rect(rect, &raster::paint(color), Transform::identity(), None);
+            }
+        };
+        fill(
+            target,
+            bar,
+            text.style.color.unwrap_or(Color::rgb(233, 227, 245)),
+        );
+        let border = (w * 2.0 / 1080.0).max(1.0).min(bar.h * 0.15);
+        let inset = border * 2.0;
+        fill(
+            target,
+            Rect {
+                x: bar.x + border,
+                y: bar.y + border,
+                w: bar.w - 2.0 * border,
+                h: bar.h - 2.0 * border,
+            },
+            Color::rgb(18, 14, 30),
+        );
+        let gap = (w * 6.0 / 1080.0).min(bar.w / 30.0);
+        let seg_w = (bar.w - inset * 2.0 - gap * 11.0) / 12.0;
+        let lit =
+            (((t - item.start) / item.duration.max(0.001)).clamp(0.0, 1.0) * 12.0).floor() as usize;
+        for i in 0..12 {
+            let p = i as f32 / 11.0;
+            let color = if i < lit {
+                text.style.accent.unwrap_or(Color::rgb(
+                    (255.0 - 13.0 * p).round() as u8,
+                    (90.0 + 71.0 * p).round() as u8,
+                    (60.0 - 16.0 * p).round() as u8,
+                ))
+            } else {
+                text.style.background.unwrap_or(Color::rgb(43, 50, 72))
+            };
+            fill(
+                target,
+                Rect {
+                    x: bar.x + inset + i as f32 * (seg_w + gap),
+                    y: bar.y + inset,
+                    w: seg_w,
+                    h: bar.h - inset * 2.0,
+                },
+                color,
+            );
+        }
+    }
+}
+
+fn family_list(fonts: &FontSystem) -> Vec<String> {
+    fonts
+        .db()
+        .faces()
+        .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 impl Default for Graphics {
@@ -986,6 +1147,20 @@ impl Preset {
                 p.position = Point::new(0.5, 0.36);
                 p.lines = 1;
             }
+            TextPreset::Marker => {
+                p.font = "Inter";
+                p.size = 0.055;
+                p.color = Color::rgb(28, 27, 30);
+                p.stroke = 0.0;
+                p.weight = 600;
+            }
+            TextPreset::Meter => {
+                p.font = "Press Start 2P";
+                p.size = 0.018;
+                p.stroke = 0.0;
+                p.lines = 1;
+                p.weight = 400;
+            }
         }
         p
     }
@@ -1060,6 +1235,28 @@ fn text_place(text: &Text, defaults: &Preset, safe: Rect) -> (Point, Rect) {
     )
 }
 
+/// One footprint shared by HUD drawing and caption avoidance. Explicit positions are centres.
+fn meter_box(text: &Text, safe: Rect) -> Rect {
+    let height = fraction(text.style.size.unwrap_or(0.028), 0.028).min(safe.h);
+    let width = 0.34f32.min(safe.w);
+    let position = text.position.unwrap_or(Point::new(
+        safe.x.max(0.06) + width / 2.0,
+        safe.y.max(0.06) + height / 2.0,
+    ));
+    let bounds = if text.position.is_some() {
+        Rect::FULL
+    } else {
+        safe
+    };
+    Rect {
+        x: (position.x - width / 2.0).clamp(bounds.x, (bounds.x + bounds.w - width).max(bounds.x)),
+        y: (position.y - height / 2.0)
+            .clamp(bounds.y, (bounds.y + bounds.h - height).max(bounds.y)),
+        w: width,
+        h: height,
+    }
+}
+
 /// The point a callout's leader line ends on.
 fn callout_point(text: &Text, safe: Rect) -> Point {
     text.position
@@ -1099,6 +1296,7 @@ fn draw_layer(
     m: Motion,
     anim: Anim,
     visible_lines: usize,
+    marker: Option<(Color, f32)>,
 ) {
     if m.alpha <= 0.0 || m.reveal <= 0.0 {
         return;
@@ -1119,6 +1317,27 @@ fn draw_layer(
         cx - width * scale / 2.0,
         cy - height * scale / 2.0,
     );
+    if let Some((color, progress)) = marker {
+        // Raster padding is 0.38 em; inset 0.13 leaves 0.25 em around the shaped text.
+        let inset = layer.size * 0.13;
+        let rect = Rect {
+            x: inset,
+            y: inset,
+            w: (width - inset * 2.0) * progress,
+            h: height - inset * 2.0,
+        };
+        if progress > 0.0
+            && let Some(path) = raster::rounded_path(rect, 4.0 * target_w / 1080.0 / scale)
+        {
+            target.fill_path(
+                &path,
+                &raster::paint(color.with_alpha((color.a as f32 * 0.62 * m.alpha) as u8)),
+                FillRule::Winding,
+                transform,
+                None,
+            );
+        }
+    }
     let clipped = m.reveal < 1.0 || visible_lines < layer.line_bottoms.len();
     if clipped {
         if mask

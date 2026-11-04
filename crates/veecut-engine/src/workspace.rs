@@ -40,6 +40,33 @@ const SKILL_FILES: &[(&str, &str)] = &[
     skill_file!("reference/style-setup.md"),
     skill_file!("reference/sourcing.md"),
     skill_file!("reference/sound.md"),
+    skill_file!("reference/skills.md"),
+];
+
+const LOOK_SKILLS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "veecut-arcade",
+        &[
+            ("SKILL.md", include_str!("../skill/looks/arcade/SKILL.md")),
+            (
+                "veecut.toml",
+                include_str!("../skill/looks/arcade/veecut.toml"),
+            ),
+        ],
+    ),
+    (
+        "veecut-editorial",
+        &[
+            (
+                "SKILL.md",
+                include_str!("../skill/looks/editorial/SKILL.md"),
+            ),
+            (
+                "veecut.toml",
+                include_str!("../skill/looks/editorial/veecut.toml"),
+            ),
+        ],
+    ),
 ];
 
 const BLOCK_START: &str = "<!-- veecut:start -->";
@@ -157,20 +184,25 @@ impl Workspace {
         ]
     }
 
-    /// Rewrites `<skills dir>/veecut/` from the copy built into VeeCut, removing stale files.
+    /// Refreshes the core skill and both built-in looks from the binary, removing stale files.
     fn refresh_skill(&self) -> Result<()> {
         for base in self.skill_dirs() {
-            let dir = base.join("veecut");
-            match fs::remove_dir_all(&dir) {
-                Err(e) if e.kind() != ErrorKind::NotFound => {
-                    return Err(e).with_context(|| format!("clearing {}", dir.display()));
+            for (name, files) in
+                std::iter::once(("veecut", SKILL_FILES)).chain(LOOK_SKILLS.iter().copied())
+            {
+                let dir = base.join(name);
+                match fs::remove_dir_all(&dir) {
+                    Err(e) if e.kind() != ErrorKind::NotFound => {
+                        return Err(e).with_context(|| format!("clearing {}", dir.display()));
+                    }
+                    _ => {}
                 }
-                _ => {}
-            }
-            for (rel, text) in SKILL_FILES {
-                let path = dir.join(rel);
-                fs::create_dir_all(path.parent().expect("skill files sit in a folder"))?;
-                fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+                for (rel, text) in files {
+                    let path = dir.join(rel);
+                    fs::create_dir_all(path.parent().expect("skill files sit in a folder"))?;
+                    fs::write(&path, text)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                }
             }
         }
         Ok(())

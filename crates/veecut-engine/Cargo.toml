@@ -35,6 +35,7 @@ tempfile = "3"
 tiny-skia = "0.12"
 tract-onnx = "0.23.9"
 ureq = { version = "3", features = ["json"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

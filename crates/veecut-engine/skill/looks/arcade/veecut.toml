@@ -1,0 +1,48 @@
+schema = 1
+kinds = ["explainer", "promo", "talking_head_short"]
+aspect = "9:16"
+background = "#12102A"
+
+[captions]
+mode = "word_pop"
+font = "Press Start 2P"
+uppercase = true
+color = "#FFFFFF"
+highlight = "#F2A12C"
+stroke = 0.15
+size = 0.032
+position = 0.62
+
+[clips]
+motion = "push"
+[clips.grade]
+pixelate = 0.012
+
+[transitions]
+kind = "pixelate"
+duration = 0.4
+every = 1
+
+[text.hook]
+font = "Press Start 2P"
+color = "#F2A12C"
+accent = "#F2A12C"
+uppercase = true
+[text.counter]
+font = "Press Start 2P"
+color = "#F2A12C"
+accent = "#F2A12C"
+
+[[overlays]]
+preset = "meter"
+text = "HP"
+anim_in = "none"
+anim_out = "none"
+[overlays.style]
+font = "Press Start 2P"
+
+[sound]
+text = "kit:coin"
+cut = "kit:blip"
+music = "kit:chiptune"
+music_db = -20.0

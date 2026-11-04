@@ -1,6 +1,6 @@
 //! A synthesized sound-effects kit and the placement grammar for clicks, hits and the music bed.
 //!
-//! Every sound is synthesized here (see `synth.rs`) and written to `<workspace>/.veecut/sfx/v1/`.
+//! Every sound is synthesized here (see `synth.rs`) and written to `<workspace>/.veecut/sfx/v<KIT_VERSION>/`.
 //! The roles, the click lag (4 to 14 ms after the picture change), the click level (2 to 7 dB
 //! under the voice) and the bed rules (a fixed trim under the voice, cut rather than ducked) come
 //! from NextPhase Editor V1's published measurements. None of its sounds or code are used.
@@ -10,6 +10,7 @@ mod synth;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -22,7 +23,7 @@ use crate::qa;
 use crate::workspace::{Workspace, relative};
 
 /// Bump when any sound changes: the kit then regenerates into a new folder.
-pub const KIT_VERSION: u32 = 1;
+pub const KIT_VERSION: u32 = 2;
 /// Sample peak of every kit file, in dBFS.
 pub const PEAK_DB: f32 = -3.0;
 /// How long after its cue a sound's hit lands, in seconds.
@@ -61,6 +62,12 @@ pub enum Sound {
     Hit,
     /// 2.5 s.
     Outro,
+    /// 27.4 s chiptune loop (16 bars at 140 BPM, seamless): a music bed, `kit:chiptune` in a look pack.
+    Chiptune,
+    /// 0.25 s, two square blips stepping up from 988 to 1319 Hz.
+    Coin,
+    /// 45 ms square pip for a text pop.
+    Blip,
 }
 
 impl Sound {
@@ -78,6 +85,9 @@ impl Sound {
             Sound::Impact => "the beat slamming back after a silence",
             Sound::Hit => "one cut that needs weight (rare)",
             Sound::Outro => "under the end card",
+            Sound::Chiptune => "a loopable arcade music bed under the whole video",
+            Sound::Coin => "a reward, a counter step, a text landing in an arcade look",
+            Sound::Blip => "a small text pop or cut in an arcade look",
         }
     }
 
@@ -90,6 +100,9 @@ impl Sound {
             Sound::PaneClick => -9.0,
             Sound::Riser | Sound::Impact | Sound::Hit => -1.5,
             Sound::Outro => -8.0,
+            Sound::Chiptune => -18.0,
+            Sound::Coin => -5.5,
+            Sound::Blip => -6.0,
             Sound::SubBoom => -15.0,
             Sound::SubTone => -18.0,
         }
@@ -139,12 +152,24 @@ pub fn regenerate(ws: &Workspace) -> Result<Vec<KitSound>> {
     write_kit(ws, true)
 }
 
+/// The synthesized kit with each sound's loudness, made once per process: synthesis is
+/// deterministic and the 27 s chiptune loop is not free.
+static SYNTHESIZED: LazyLock<Vec<(synth::Made, f32)>> = LazyLock::new(|| {
+    synth::all(PEAK_DB)
+        .into_iter()
+        .map(|m| {
+            let level = synth::level(&m.samples);
+            (m, level)
+        })
+        .collect()
+});
+
 fn write_kit(ws: &Workspace, force: bool) -> Result<Vec<KitSound>> {
     let dir = kit_dir(ws);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    synth::all(PEAK_DB)
-        .into_iter()
-        .map(|made| {
+    SYNTHESIZED
+        .iter()
+        .map(|(made, level)| {
             let path = dir.join(format!("{}.wav", made.name));
             if force || !path.is_file() {
                 let tmp = dir.join(format!(".{}.wav.tmp", made.name));
@@ -154,9 +179,9 @@ fn write_kit(ws: &Workspace, force: bool) -> Result<Vec<KitSound>> {
                     .with_context(|| format!("writing {}", path.display()))?;
             }
             Ok(KitSound {
-                level: synth::level(&made.samples),
+                level: *level,
                 duration: made.samples.len() as f64 / synth::RATE as f64,
-                name: made.name,
+                name: made.name.clone(),
                 sound: made.sound,
                 path,
                 transient: made.transient,
@@ -459,7 +484,7 @@ mod tests {
         };
         let first = read(&kit(&ws).unwrap());
         let again = read(&regenerate(&ws).unwrap());
-        assert_eq!(first.len(), 14);
+        assert_eq!(first.len(), 17);
         assert!(first == again, "regenerating changed the kit");
         let names: Vec<String> = kit(&ws).unwrap().into_iter().map(|k| k.name).collect();
         assert!(names.contains(&"click-4".to_string()) && names.contains(&"outro".to_string()));
@@ -476,6 +501,13 @@ mod tests {
                     if s.abs() > bv { (i, s.abs()) } else { (bi, bv) }
                 });
             let measured = at as f64 / synth::RATE as f64;
+            // A loop has no single loudest moment: its declared hit is the downbeat.
+            if m.sound == Sound::Chiptune {
+                assert_eq!(m.transient, 0.0);
+                assert!((20.0 * peak.log10() - PEAK_DB).abs() < 0.01);
+                assert!(m.samples[0].abs() < 1e-3 && m.samples.last().unwrap().abs() < 1e-3);
+                continue;
+            }
             assert!(
                 (measured - m.transient).abs() <= 0.002,
                 "{}: loudest sample at {measured:.4}s, declared {:.4}s",
@@ -485,6 +517,80 @@ mod tests {
             assert!((20.0 * peak.log10() - PEAK_DB).abs() < 0.01, "{}", m.name);
             assert!(m.samples[0].abs() < 1e-3 && m.samples.last().unwrap().abs() < 1e-3);
         }
+    }
+
+    fn made(sound: Sound) -> Vec<f32> {
+        synth::all(PEAK_DB)
+            .into_iter()
+            .find(|m| m.sound == sound)
+            .unwrap()
+            .samples
+    }
+
+    /// Frequency of the strongest bin of `x` (DC excluded), in Hz.
+    fn peak_hz(x: &[f32]) -> f64 {
+        let fft = realfft::RealFftPlanner::<f32>::new().plan_fft_forward(x.len());
+        let mut input = x.to_vec();
+        let mut spectrum = fft.make_output_vec();
+        fft.process(&mut input, &mut spectrum).unwrap();
+        let bin = (1..spectrum.len())
+            .max_by(|&a, &b| spectrum[a].norm().total_cmp(&spectrum[b].norm()))
+            .unwrap();
+        bin as f64 * synth::RATE as f64 / x.len() as f64
+    }
+
+    #[test]
+    fn chiptune_is_a_seamless_sixteen_bar_loop_at_140_bpm() {
+        let x = made(Sound::Chiptune);
+        assert!(x == made(Sound::Chiptune), "the loop is not deterministic");
+        let bars = x.len() as f64 / synth::RATE as f64 / (4.0 * 60.0 / 140.0);
+        assert!((bars - 16.0).abs() < 1e-4, "{bars} bars");
+        // Wrapping end to start must not click: both ends sit at zero, and so does the step.
+        let (first, last) = (x[0], *x.last().unwrap());
+        assert!(first.abs() < 1e-3 && last.abs() < 1e-3 && (first - last).abs() < 1e-3);
+        // Every bar has music in it, and the peak is the kit's.
+        let bar = x.len() / 16;
+        for (i, chunk) in x.chunks(bar).take(16).enumerate() {
+            let rms = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
+            assert!(rms > 0.02, "bar {i} is nearly silent ({rms})");
+        }
+        let peak = x.iter().fold(0.0f32, |p, s| p.max(s.abs()));
+        assert!((20.0 * peak.log10() - PEAK_DB).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_second_kit_call_rewrites_nothing() {
+        let (_tmp, ws, _) = workspace();
+        let first = kit(&ws).unwrap();
+        let mtimes = |kit: &[KitSound]| -> Vec<_> {
+            kit.iter()
+                .map(|k| std::fs::metadata(&k.path).unwrap().modified().unwrap())
+                .collect()
+        };
+        let before = mtimes(&first);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let second = kit(&ws).unwrap();
+        assert_eq!(first, second);
+        assert!(
+            before == mtimes(&second),
+            "kit() rewrote a file that existed"
+        );
+    }
+
+    #[test]
+    fn coin_steps_up_in_pitch_and_blip_is_a_short_pip() {
+        let coin = made(Sound::Coin);
+        assert!(coin == made(Sound::Coin) && made(Sound::Blip) == made(Sound::Blip));
+        let rate = synth::RATE as f64;
+        assert!((coin.len() as f64 / rate - 0.25).abs() < 0.01);
+        let at = |s: f64| (s * rate) as usize;
+        let early = peak_hz(&coin[at(0.005)..at(0.065)]);
+        let late = peak_hz(&coin[at(0.10)..at(0.20)]);
+        assert!((early - 988.0).abs() < 40.0, "first blip at {early} Hz");
+        assert!((late - 1319.0).abs() < 40.0, "second blip at {late} Hz");
+        assert!(late > early * 1.25);
+        let blip = made(Sound::Blip);
+        assert!(blip.len() as f64 / rate < 0.08, "{} samples", blip.len());
     }
 
     #[test]

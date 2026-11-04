@@ -98,6 +98,8 @@ These habits keep small models on track, and they work for big ones too.
 
 VeeCut keeps a catalog of community video skills from awesome-claude-video-skills. It refreshes itself when it is older than 24 hours.
 
+For built-in looks, installed skills, or turning a community skill into a native `veecut.toml` look pack, read `reference/skills.md`.
+
 - `veecut skills recommend --kind K` lists the best matches for a kind: SAFE ones, tested first, then by stars.
 - `veecut skills search Q` and `veecut skills show REPO` tell you more about one.
 - `veecut skills install REPO` copies its skills into `.agents/skills/` and `.claude/skills/` at a pinned commit. Install only after the user says yes. Without `--force` it refuses anything not graded SAFE; use `--force` only when the user says they trust that repo.

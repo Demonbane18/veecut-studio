@@ -327,7 +327,14 @@ impl Graphics {
                 let ItemBody::Text(text) = &item.body else {
                     continue;
                 };
-                if item.start >= b || item.end() <= a || text.text.trim().is_empty() {
+                if item.start >= b || item.end() <= a {
+                    continue;
+                }
+                if text.preset == TextPreset::Meter {
+                    f(super::meter_box(text, safe));
+                    continue;
+                }
+                if text.text.trim().is_empty() {
                     continue;
                 }
                 let defaults = Preset::for_kind(text.preset, safe);
@@ -582,18 +589,15 @@ impl Graphics {
 /// Counts over every caption page and the `limit` pages that most need a look.
 pub fn caption_report(graphics: &mut Graphics, project: &Project, limit: usize) -> CaptionReport {
     let placements = graphics.caption_placements(project);
-    let count = |f: &dyn Fn(&CaptionPlacement) -> bool| placements.iter().filter(|p| f(*p)).count();
+    let count = |f: &dyn Fn(&CaptionPlacement) -> bool| placements.iter().filter(|p| f(p)).count();
     let rank = |p: &CaptionPlacement| match p.face {
         FaceFit::Hidden => 5,
         FaceFit::Unchecked | FaceFit::Off => 3,
         _ if p.slot != Slot::Requested => 2,
         _ => u8::from(p.clamped),
     };
-    let mut examples: Vec<CaptionPlacement> = placements
-        .iter()
-        .filter(|p| rank(*p) > 0)
-        .cloned()
-        .collect();
+    let mut examples: Vec<CaptionPlacement> =
+        placements.iter().filter(|p| rank(p) > 0).cloned().collect();
     examples.sort_by_key(|p| std::cmp::Reverse(rank(p)));
     examples.truncate(limit);
     CaptionReport {

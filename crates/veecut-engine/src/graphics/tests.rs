@@ -73,6 +73,7 @@ fn font_fallback_and_cached_draw_are_deterministic() {
         "Poppins",
         "Archivo Black",
         "Inter",
+        "Press Start 2P",
     ] {
         assert!(
             g.font_families().iter().any(|name| name == family),
@@ -92,6 +93,97 @@ fn font_fallback_and_cached_draw_are_deterministic() {
     assert_eq!(a.data(), b.data());
     assert_eq!(g.layers.len(), count);
     assert_ne!(a.data(), gradient(270, 480).data());
+}
+
+#[test]
+fn marker_band_wipes_from_zero_to_padded_text_width_in_035_seconds() {
+    let mut graphics = Graphics::new();
+    let mut project = Project::new("marker", VideoKind::default(), Canvas::vertical());
+    let mut item = sample(TextPreset::Marker, "Paper story");
+    item.start = 2.0;
+    if let ItemBody::Text(text) = &mut item.body {
+        text.anim_in = text.preset.default_anim();
+        text.anim_out = Anim::None;
+        assert_eq!(text.anim_in, Anim::None);
+    }
+    let ItemBody::Text(text) = &item.body else {
+        unreachable!()
+    };
+    let safe = safe_area(&project.canvas);
+    let built = graphics
+        .text_layer(
+            &item,
+            text,
+            &Preset::for_kind(text.preset, safe),
+            safe,
+            540,
+            960,
+            false,
+        )
+        .unwrap();
+    let expected = built.width as f32 - built.size * 0.26;
+    project.tracks[2].items.push(item);
+    let mut widths = Vec::new();
+    for t in [2.0, 2.175, 2.35] {
+        let mut frame = Pixmap::new(540, 960).unwrap();
+        graphics.draw(&project, t, &mut frame.as_mut());
+        // Band pixels are orange; dark type cannot count as painted accent.
+        let columns: Vec<_> = (0..540usize)
+            .filter(|&x| {
+                (0..960usize).any(|y| {
+                    let p = &frame.data()[(y * 540 + x) * 4..][..4];
+                    p[3] > 20 && u16::from(p[0]) * 2 > u16::from(p[1]) * 3
+                })
+            })
+            .collect();
+        widths.push(
+            columns
+                .first()
+                .zip(columns.last())
+                .map_or(0, |(a, b)| b - a + 1),
+        );
+    }
+    assert_eq!(widths[0], 0);
+    assert!(
+        (widths[2] as f32 - expected).abs() <= 2.0,
+        "{widths:?}, expected {expected}"
+    );
+    assert!(
+        (widths[1] as f32 - expected * 0.5).abs() <= 2.0,
+        "{widths:?}"
+    );
+}
+
+#[test]
+fn meter_paints_floor_of_item_progress_times_twelve_segments() {
+    let mut graphics = Graphics::new();
+    for label in ["", "HP"] {
+        let mut project = Project::new("meter", VideoKind::default(), Canvas::vertical());
+        let mut item = sample(TextPreset::Meter, label);
+        item.start = 2.0;
+        if let ItemBody::Text(text) = &mut item.body {
+            text.anim_in = text.preset.default_anim();
+            assert_eq!(text.anim_in, Anim::None);
+        }
+        let ItemBody::Text(text) = &item.body else {
+            unreachable!()
+        };
+        let bounds = meter_box(text, safe_area(&project.canvas));
+        let row = ((bounds.y + bounds.h / 2.0) * 1920.0) as usize;
+        project.tracks[2].items.push(item);
+        for (t, expected) in [(2.0, 0), (3.0, 3), (5.0, 9)] {
+            let mut frame = Pixmap::new(1080, 1920).unwrap();
+            graphics.draw(&project, t, &mut frame.as_mut());
+            let mut runs = 0;
+            let mut previous = false;
+            for p in frame.data()[row * 1080 * 4..(row + 1) * 1080 * 4].chunks_exact(4) {
+                let lit = p[0] >= 230 && (80..=170).contains(&p[1]) && p[2] < 80;
+                runs += usize::from(lit && !previous);
+                previous = lit;
+            }
+            assert_eq!(runs, expected, "label={label:?}, item time={t}");
+        }
+    }
 }
 
 #[test]
@@ -1060,4 +1152,29 @@ fn documentary_proof() {
         "Documentary Reveal warm draw at 1080x1920: {:.3} ms/frame (300 frames, excludes clear/decode)",
         start.elapsed().as_secs_f64() * 1000.0 / 300.0
     );
+}
+
+#[test]
+fn project_font_copy_is_listed_once_and_a_missing_file_is_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fonts = tmp.path().join("fonts");
+    std::fs::create_dir(&fonts).unwrap();
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/fonts/Anton/Anton-Regular.ttf");
+    std::fs::copy(&src, fonts.join("Anton-Regular.ttf")).unwrap();
+    let mut project = Project::new("fonts", VideoKind::Explainer, Canvas::vertical());
+    project.fonts.push("fonts/Anton-Regular.ttf".into());
+    let mut g = Graphics::new();
+    g.load_project_fonts(&project, tmp.path());
+    assert_eq!(g.loaded_fonts.len(), 1);
+    assert!(
+        g.font_families()
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("Anton"))
+    );
+    g.load_project_fonts(&project, tmp.path());
+    assert_eq!(g.loaded_fonts.len(), 1);
+    project.fonts.push("fonts/missing.ttf".into());
+    g.load_project_fonts(&project, tmp.path());
+    assert_eq!(g.loaded_fonts.len(), 1);
 }

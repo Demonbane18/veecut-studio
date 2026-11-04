@@ -25,7 +25,7 @@ use veecut_engine::skills;
 use veecut_engine::style::{self, Format, Style};
 use veecut_engine::transcript::Transcript;
 use veecut_engine::workspace::Workspace;
-use veecut_engine::{captions, media, qa, transcribe};
+use veecut_engine::{captions, look, media, qa, transcribe};
 
 /// A command's result.
 pub struct Out {
@@ -99,6 +99,9 @@ pub struct EditArgs {
     /// Documentary edits: search free, licence-tracked footage for lines without --broll files.
     #[arg(long)]
     pub find: bool,
+    /// Style the edit with an installed skill's look pack (`veecut skills list --installed`).
+    #[arg(long)]
+    pub skill: Option<String>,
 }
 
 #[derive(Args, Deserialize, JsonSchema, Default)]
@@ -273,7 +276,7 @@ pub enum StyleCommand {
 pub enum SkillsCommand {
     /// Download the latest catalog from awesome-claude-video-skills.
     Sync,
-    /// Catalog entries, or the skills installed in this workspace with --installed.
+    /// Catalog entries, or with --installed every skill in this workspace (catalog, added, own, built-in).
     List {
         #[arg(long)]
         category: Option<String>,
@@ -295,9 +298,30 @@ pub enum SkillsCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Add a skill from a folder, .zip, .tar.gz, GitHub repo, Google Drive link or https link. Nothing is run.
+    Add { source: String },
+    /// Start your own skill: SKILL.md plus a veecut.toml look, blank or from a project's look.
+    New {
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        /// Save the project's captions, look, text styles and clip grade into the look.
+        #[arg(long)]
+        from_project: bool,
+        #[command(flatten)]
+        project: ProjectArg,
+    },
+    /// Check a skill's look pack: it parses, its files exist, fonts load; lists scripts and licence notes.
+    Check { name: String },
+    /// Apply a skill's look to a project as one undo step.
+    Apply {
+        name: String,
+        #[command(flatten)]
+        project: ProjectArg,
+    },
     /// Update installed skills whose upstream moved (all, or one repo).
     Update { repo: Option<String> },
-    /// Remove an installed repo's skills.
+    /// Remove an added or own skill, or an installed repo's skills.
     Remove { repo: String },
     /// The best catalog skills for a kind of video.
     Recommend {
@@ -318,6 +342,34 @@ pub struct SkillsInstallArgs {
     pub repo: String,
     #[serde(default)]
     pub force: bool,
+}
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct SkillsCheckArgs {
+    /// Name of an installed skill.
+    pub name: String,
+}
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct SkillsApplyArgs {
+    /// Name of an installed skill that has a veecut.toml look.
+    pub name: String,
+    #[serde(flatten)]
+    pub project: ProjectArg,
+}
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct SkillsNewArgs {
+    /// Letters, digits, dots, underscores and hyphens.
+    pub name: String,
+    /// One line: when to use the skill.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Save the project's current look into the skill.
+    #[serde(default)]
+    pub from_project: bool,
+    #[serde(flatten)]
+    pub project: ProjectArg,
 }
 
 #[derive(Args, Deserialize, JsonSchema, Default)]
@@ -586,6 +638,7 @@ impl Ctx {
         }
         req.render = !args.no_render;
         req.find = args.find;
+        req.skill = args.skill;
         let report = recipes::edit(&self.ws, &req, progress)?;
         let mut text = String::new();
         for line in &report.summary {
@@ -888,7 +941,11 @@ impl Ctx {
             Op::AddMarker { .. } | Op::AddTrack { .. } => false,
             _ => true,
         });
-        let layout = layout_changed.then(|| graphics::caption_report(&mut Graphics::new(), &p, 5));
+        let layout = layout_changed.then(|| {
+            let mut graphics = Graphics::new();
+            graphics.load_project_fonts(&p, &dir);
+            graphics::caption_report(&mut graphics, &p, 5)
+        });
         if let Some(report) = &layout {
             let _ = writeln!(
                 text,
@@ -946,6 +1003,67 @@ impl Ctx {
                 p.duration()
             ),
             json!({ "duration": p.duration() }),
+        ))
+    }
+
+    /// An installed skill by name; the folder always comes from the install list, never from the caller's text.
+    fn installed_skill(&self, name: &str) -> Result<skills::InstalledSkill> {
+        skills::installed_skills(&self.ws)?
+            .into_iter()
+            .find(|s| s.name == name)
+            .with_context(|| {
+                format!("skill {name:?} is not installed; `veecut skills list --installed` shows what is")
+            })
+    }
+
+    /// Applies an installed skill's look to a project: one atomic change, one undo step.
+    pub fn skill_apply(&self, name: &str, project: &ProjectArg) -> Result<Out> {
+        let skill = self.installed_skill(name)?;
+        if !skill.has_look {
+            bail!(
+                "{name} has no {} look pack: it is an agent-only skill. Read its SKILL.md and use `veecut ops`",
+                look::LOOK_FILE
+            );
+        }
+        let (dir, mut p) = self.project(project)?;
+        let before = p.sources.clone();
+        let files = if before.is_empty() {
+            Vec::new()
+        } else {
+            asset_files(&dir, &p)?
+        };
+        let changes = look::apply(&self.ws, &mut p, &dir, &skill.dir)?;
+        check_rights(&dir, &before, &files, &[], &p)?;
+        self.ws.save_project(&dir, &p)?;
+        Ok(Out::new(
+            format!(
+                "Applied look {name} ({changes} changes). `veecut undo` takes it back; `veecut frame` checks a still."
+            ),
+            json!({ "applied": name, "changes": changes }),
+        ))
+    }
+
+    /// Scaffolds an own skill, blank or from the project's current look.
+    pub fn skill_new(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        from_project: bool,
+        project: &ProjectArg,
+    ) -> Result<Out> {
+        let pack = if from_project {
+            Some(look::capture(&self.project(project)?.1))
+        } else {
+            None
+        };
+        let description = description.unwrap_or("My VeeCut look");
+        let dir = skills::new_skill(&self.ws, name, description, pack)?;
+        Ok(Out::new(
+            format!(
+                "Created skill {name} in {}. Edit SKILL.md and veecut.toml, then `veecut skills check {name}` and `veecut skills apply {name} -p <project>`.",
+                rel(&self.ws, &dir)
+            ),
+            json!({ "name": name, "dir": rel(&self.ws, &dir), "from_project": from_project }),
         ))
     }
 
@@ -1037,7 +1155,9 @@ impl Ctx {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&out, &png)?;
-        let placement = Graphics::new().caption_placement_at(&p, args.at);
+        let mut graphics = Graphics::new();
+        graphics.load_project_fonts(&p, &dir);
+        let placement = graphics.caption_placement_at(&p, args.at);
         let mut text = format!(
             "Frame at {} saved to {}",
             time(args.at),
@@ -1473,6 +1593,25 @@ pub fn fonts() -> Result<Out> {
     Ok(Out::new(families.join("\n"), json!({ "fonts": families })))
 }
 
+fn skill_line(s: &skills::InstalledSkill) -> String {
+    let origin = match &s.origin {
+        skills::Origin::BuiltIn => "built-in".to_string(),
+        skills::Origin::Catalog(repo) => format!("catalog {repo}"),
+        skills::Origin::Added(source) => format!("added from {source}"),
+        skills::Origin::Own => "own".to_string(),
+    };
+    let look = if s.has_look { "look" } else { "agent-only" };
+    let licence = if s.notes.iter().any(|n| n.starts_with("No licence file")) {
+        "; no licence, personal use only"
+    } else {
+        ""
+    };
+    format!(
+        "{}  [{look}; {origin}{licence}]\n    {}",
+        s.name, s.description
+    )
+}
+
 fn entry_line(e: &skills::Entry, installed: bool) -> String {
     format!(
         "{}  {} stars  {}{}{}\n    {}",
@@ -1491,9 +1630,30 @@ pub fn skills(
     command: Option<SkillsCommand>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Out> {
-    let ctx = Ctx::open(workspace).ok();
-    let config = Config::load()?;
-    if !matches!(command, Some(SkillsCommand::Sync)) {
+    // Local commands never touch the network, so no catalog refresh runs before them.
+    let local = matches!(
+        &command,
+        Some(
+            SkillsCommand::Add { .. }
+                | SkillsCommand::New { .. }
+                | SkillsCommand::Check { .. }
+                | SkillsCommand::Apply { .. }
+                | SkillsCommand::Remove { .. }
+                | SkillsCommand::List {
+                    installed: true,
+                    ..
+                }
+        )
+    );
+    let selector = match &command {
+        Some(SkillsCommand::New { project, .. } | SkillsCommand::Apply { project, .. }) => {
+            project.project.as_deref()
+        }
+        _ => None,
+    };
+    let ctx = Ctx::open_project(workspace, selector).ok();
+    if !local && !matches!(command, Some(SkillsCommand::Sync)) {
+        let config = Config::load()?;
         let auto = match &ctx {
             Some(c) => skills::auto_sync_and_update(&c.ws, &config)
                 .map(|r| r.map(|(s, u)| (s, u.into_iter().filter(|u| u.updated).count()))),
@@ -1508,11 +1668,11 @@ pub fn skills(
             None => {}
         }
     }
-    let need_ws = || {
+    let need_ctx = || {
         ctx.as_ref()
-            .map(|c| &c.ws)
             .context("run this inside a workspace (`veecut init`)")
     };
+    let need_ws = || need_ctx().map(|c| &c.ws);
     let installed_repos: Vec<String> = ctx
         .as_ref()
         .and_then(|c| skills::installed(&c.ws).ok())
@@ -1539,29 +1699,15 @@ pub fn skills(
             ))
         }
         SkillsCommand::List {
-            category,
-            installed: true,
+            installed: true, ..
         } => {
-            let _ = category;
-            let lock = skills::installed(need_ws()?)?;
-            let text = if lock.repos.is_empty() {
-                "No catalog skills installed in this workspace.".to_string()
+            let found = skills::installed_skills(need_ws()?)?;
+            let text = if found.is_empty() {
+                "No skills installed in this workspace.".to_string()
             } else {
-                lock.repos
-                    .iter()
-                    .map(|r| {
-                        format!(
-                            "{} at {} ({}): {}",
-                            r.repo,
-                            &r.commit[..r.commit.len().min(8)],
-                            r.license.as_deref().unwrap_or("license unknown"),
-                            r.skills.join(", ")
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                found.iter().map(skill_line).collect::<Vec<_>>().join("\n")
             };
-            Ok(Out::new(text, serde_json::to_value(&lock)?))
+            Ok(Out::new(text, json!({ "skills": found })))
         }
         SkillsCommand::List {
             category,
@@ -1638,6 +1784,47 @@ pub fn skills(
                 serde_json::to_value(&r)?,
             ))
         }
+        SkillsCommand::Add { source } => {
+            let r = skills::add(need_ws()?, &source)?;
+            let mut text = format!(
+                "Added {}. Skills land in .agents/skills and .claude/skills; restart your agent to load them.",
+                r.skills.join(", ")
+            );
+            for note in &r.notes {
+                let _ = write!(text, "\n- {note}");
+            }
+            Ok(Out::new(text, serde_json::to_value(&r)?))
+        }
+        SkillsCommand::New {
+            name,
+            description,
+            from_project,
+            project,
+        } => need_ctx()?.skill_new(&name, description.as_deref(), from_project, &project),
+        SkillsCommand::Check { name } => {
+            let r = skills::check(need_ws()?, &name)?;
+            let mut text = format!(
+                "{}: {}",
+                r.name,
+                if r.has_look {
+                    "look pack is valid"
+                } else {
+                    "agent-only skill (no veecut.toml)"
+                }
+            );
+            if !r.kinds.is_empty() {
+                let kinds: Vec<&str> = r.kinds.iter().map(|k| k.label()).collect();
+                let _ = write!(text, "\n  suits: {}", kinds.join(", "));
+            }
+            if !r.fonts.is_empty() {
+                let _ = write!(text, "\n  fonts: {}", r.fonts.join(", "));
+            }
+            for note in &r.notes {
+                let _ = write!(text, "\n- {note}");
+            }
+            Ok(Out::new(text, serde_json::to_value(&r)?))
+        }
+        SkillsCommand::Apply { name, project } => need_ctx()?.skill_apply(&name, &project),
         SkillsCommand::Update { repo } => {
             let reports = skills::update(need_ws()?, repo.as_deref())?;
             let text = if reports.is_empty() {
@@ -2058,5 +2245,71 @@ pub(crate) mod tests {
         let saved = Project::load(&file).unwrap();
         assert_eq!(saved.assets[1].path, Path::new("elsewhere.mp4"));
         assert!(saved.sources["speech"].blocks_final());
+    }
+
+    #[test]
+    fn skills_new_then_apply_changes_the_project_and_undo_restores_it() {
+        let (_temp, ctx, dir) = speech_project();
+        let root = ctx.ws.root.clone();
+        let project = ProjectArg {
+            project: Some("my-edit".into()),
+        };
+        let set_size = |size: f64| {
+            let op = json!({"op": "set", "path": "/captions/size", "value": size});
+            ctx.apply_ops(&op.to_string(), &project).unwrap();
+        };
+        set_size(0.07);
+        let made = skills(
+            Some(root.as_path()),
+            Some(SkillsCommand::New {
+                name: "mine".into(),
+                description: Some("my caption look".into()),
+                from_project: true,
+                project: project.clone(),
+            }),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(made.text.contains("mine"), "{}", made.text);
+        assert!(root.join(".agents/skills/mine/SKILL.md").is_file());
+        set_size(0.03);
+        let file = dir.join(PROJECT_FILE);
+        let before = std::fs::read(&file).unwrap();
+        let applied = skills(
+            Some(root.as_path()),
+            Some(SkillsCommand::Apply {
+                name: "mine".into(),
+                project: project.clone(),
+            }),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(
+            applied.text.contains("Applied look mine"),
+            "{}",
+            applied.text
+        );
+        let after = Project::load(&file).unwrap();
+        assert!(
+            (after.captions.size - 0.07).abs() < 1e-6,
+            "{}",
+            after.captions.size
+        );
+        ctx.undo(project.clone(), false).unwrap();
+        assert_eq!(before, std::fs::read(&file).unwrap());
+        let listed = skills(
+            Some(root.as_path()),
+            Some(SkillsCommand::List {
+                category: None,
+                installed: true,
+            }),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(
+            listed.text.contains("mine") && listed.text.contains("own"),
+            "{}",
+            listed.text
+        );
     }
 }

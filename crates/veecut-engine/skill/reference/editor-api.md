@@ -111,7 +111,8 @@ Adds on-screen text. Wrap words in `*asterisks*` to draw them in the accent colo
 
 - `preset`: `hook` (big text in the first seconds), `title`, `card` (the default, a rounded card with a line or two), `lower_third` (name and role), `callout` (a label pointing at something), `counter` (a big number or step count like "STEP 2/5"), `label` (a small pill), `quote`, `list` (one line per `\n`, revealed one by one), `kinetic` (one or two words slammed full screen) and `cta` (end card).
 - Documentary presets, sized from NextPhase Editor V1's measurements: `keyword` (the stressed word, big white sans at 0.14 of the height that blurs in), `chapter` (a chapter name or proper title in italic serif, 0.126), `shock` (one word in red serif capitals, 0.163, once or twice a minute at most), `black_card` (a small word alone on a black frame) and `mega` (a huge red word at 0.52, drawn under the overlay tracks so a cut-out of the speaker stands in front of it; see `veecut cutout`).
-- `anim_in` and `anim_out`: `none`, `fade`, `pop`, `slide_up`, `slide_down`, `slide_left`, `slide_right`, `typewriter`, `wipe`. Without them each preset uses its default: `none` for `shock`, `black_card` and `mega`, which cut on hard, and `fade` for the rest. The keyword's blur-in is part of its look.
+- `marker` puts a terracotta highlight band behind dark text and wipes the band left to right over 0.35 s. `meter` draws a twelve-segment story-progress bar with an optional label; its fill follows the item's own start/end. It defaults to the top-left safe area.
+- `anim_in` and `anim_out`: `none`, `fade`, `pop`, `slide_up`, `slide_down`, `slide_left`, `slide_right`, `typewriter`, `wipe`. Without them each preset uses its default: `none` for `shock`, `black_card`, `mega`, `marker` and `meter`, and `fade` for the rest. Marker and meter animate within the preset; the keyword's blur-in is also part of its look.
 - `position`: the center of the text, like `{"x":0.5,"y":0.3}`. Without it the preset picks a place inside the platform safe zones.
 - `style` overrides the preset: `font`, `size` (fraction of the height), `color`, `accent`, `background`, `stroke` (outline width as a fraction of the font size), `uppercase`, `align` (`left`, `center`, `right`). Colors are `#RRGGBB` or `#RRGGBBAA`.
 - `track`: a text track id. Without it the text goes on the first text track.
@@ -150,6 +151,7 @@ Clip fields: `asset` and `src_in` (swap the file under a clip), `speed` (the cli
 | `tiles` | a 3x3 grid whose panes switch to the clip one per frame, each a white box first | 9 frames (0.3) |
 | `focus` | the clip opens out of focus and racks sharp | 9 frames (0.3) |
 | `whip` | the previous picture zooms out faster and faster, then the clip cuts in | 4 frames (0.133) |
+| `pixelate` | incoming picture resolves from large blocks to sharp in six steps | 0.4 s |
 
 Studio fills in these lengths when you pick a kind, capped at the clip's length. In ops, `duration` is required.
 
@@ -160,9 +162,10 @@ Studio fills in these lengths when you pick a kind, capped at the clip's length.
 {"op":"patch","item":"clip-12","patch":{"grade":{"look":"natural","recolor":{"from":0,"to":30,"target":120}}}}
 ```
 
-- `look`: `natural` (a little contrast and colour push), `teal` (teal shadows, cream highlights; places and buildings), `mono` (hard black and white; documents, prices, archive), `warm` (amber and sepia; fire, money, history), `cold` (steel blue; technology, night, distance) or `invert` (a negative, for flashes).
+- `look`: `natural` (a little contrast and colour push), `teal` (teal shadows, cream highlights; places and buildings), `mono` (hard black and white; documents, prices, archive), `soft_mono` (lifted blacks and gentle monochrome contrast for editorial footage), `warm` (amber and sepia; fire, money, history), `cold` (steel blue; technology, night, distance) or `invert` (a negative, for flashes).
 - `halftone` (0 to 1): a printed dot screen in the shadows, so stock stills look less like stock.
 - `vignette` (0 to 1): darker toward the edges.
+- `pixelate`: block size as a fraction of the canvas height, 0 off; try `0.012` for an arcade look.
 - `recolor`: turns one band of hues into another, in degrees from 0 to 360 (0 red, 120 green, 240 blue). `from` above `to` wraps through red.
 
 `mask` cuts a clip out along a mask video, for example the speaker cut out of their own camera: `{"asset":"asset-9","offset":12.4,"outline":0.006}`. `veecut cutout` makes it; do not write one by hand. The mask's brightness is the clip's opacity, `offset` is the source time where the mask video starts, and `outline` (0 to 0.05 of the canvas height) draws a white sticker edge. Patch `outline` to change the edge; to remove a cut-out, delete its clip on the `Cut-out` track.

@@ -1,0 +1,39 @@
+schema = 1
+kinds = ["explainer", "documentary", "talking_head_long"]
+background = "#E9E7E1"
+
+[captions]
+mode = "reveal"
+font = "Inter"
+# Light words on the dark B&W pictures; ink_on_light turns them dark only over light pictures.
+color = "#EDEBE6"
+highlight = "#D97757"
+ink_on_light = true
+uppercase = false
+stroke = 0.0
+
+[clips]
+motion = "push"
+[clips.grade]
+look = "soft_mono"
+
+[transitions]
+kind = "whip"
+duration = 0.24
+every = 2
+
+[text.keyword]
+font = "Inter"
+color = "#EDEBE6"
+accent = "#D97757"
+[text.chapter]
+color = "#EDEBE6"
+accent = "#D97757"
+[text.marker]
+font = "Inter"
+color = "#1C1B1E"
+accent = "#D97757"
+stroke = 0.0
+
+[sound]
+cut = "kit:sub_boom"

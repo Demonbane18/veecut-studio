@@ -25,7 +25,7 @@ const FITS: [(Fit, &str); 2] = [
     (Fit::Cover, "Cover (fill and crop)"),
     (Fit::Contain, "Contain (letterbox)"),
 ];
-const TRANSITIONS: [(TransitionKind, &str); 8] = [
+const TRANSITIONS: [(TransitionKind, &str); 9] = [
     (TransitionKind::Crossfade, "Crossfade"),
     (TransitionKind::Dip, "Dip to black"),
     (TransitionKind::Flash, "Flash"),
@@ -34,8 +34,9 @@ const TRANSITIONS: [(TransitionKind, &str); 8] = [
     (TransitionKind::Tiles, "Tiles"),
     (TransitionKind::Focus, "Focus"),
     (TransitionKind::Whip, "Whip"),
+    (TransitionKind::Pixelate, "Pixelate"),
 ];
-const PRESETS: [(TextPreset, &str); 16] = [
+const PRESETS: [(TextPreset, &str); 18] = [
     (TextPreset::Hook, "Hook"),
     (TextPreset::Title, "Title"),
     (TextPreset::Card, "Card"),
@@ -52,6 +53,8 @@ const PRESETS: [(TextPreset, &str); 16] = [
     (TextPreset::Shock, "Shock"),
     (TextPreset::BlackCard, "Black card"),
     (TextPreset::Mega, "Mega"),
+    (TextPreset::Marker, "Marker"),
+    (TextPreset::Meter, "Meter"),
 ];
 const ANIMS: [(Anim, &str); 9] = [
     (Anim::None, "None"),
@@ -77,11 +80,12 @@ const MODES: [(CaptionMode, &str); 6] = [
     (CaptionMode::Reveal, "Reveal"),
     (CaptionMode::Off, "Off"),
 ];
-const GRADES: [(Option<TreatLook>, &str); 7] = [
+const GRADES: [(Option<TreatLook>, &str); 8] = [
     (None, "None"),
     (Some(TreatLook::Natural), "Natural"),
     (Some(TreatLook::Teal), "Teal"),
     (Some(TreatLook::Mono), "Mono"),
+    (Some(TreatLook::SoftMono), "Soft mono"),
     (Some(TreatLook::Warm), "Warm"),
     (Some(TreatLook::Cold), "Cold"),
     (Some(TreatLook::Invert), "Invert"),
@@ -392,6 +396,12 @@ fn clip_fields(ui: &mut Ui, project: &Project, item: &Item, kind: TrackKind, c: 
         if let Some(grade) = &mut c.grade {
             ch |= slider(ui, "Halftone", &mut grade.halftone, 0.0..=1.0);
             ch |= slider(ui, "Vignette", &mut grade.vignette, 0.0..=1.0);
+            ch |= slider(
+                ui,
+                "Pixelate (fraction of height)",
+                &mut grade.pixelate,
+                0.0..=0.08,
+            );
             ch |= optional(
                 ui,
                 "Recolor",
@@ -525,6 +535,7 @@ fn transition_default(kind: TransitionKind, fps: f64, duration: f64) -> f64 {
         TransitionKind::Flash => 1.0 / fps,
         TransitionKind::Negative | TransitionKind::Glitch | TransitionKind::Whip => 4.0 / fps,
         TransitionKind::Tiles | TransitionKind::Focus => 9.0 / fps,
+        TransitionKind::Pixelate => 0.4,
     };
     seconds.min(duration)
 }
@@ -867,6 +878,7 @@ mod tests {
                         4.0 / fps
                     }
                     TransitionKind::Tiles | TransitionKind::Focus => 9.0 / fps,
+                    TransitionKind::Pixelate => 0.4,
                 };
                 assert_eq!(transition_default(kind, fps, 2.0), expected);
                 assert_eq!(transition_default(kind, fps, 0.01), 0.01);

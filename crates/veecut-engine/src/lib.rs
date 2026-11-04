@@ -7,6 +7,7 @@ pub mod captions;
 pub mod config;
 pub mod footage;
 pub mod graphics;
+pub mod look;
 pub mod matte;
 pub mod media;
 pub mod ops;

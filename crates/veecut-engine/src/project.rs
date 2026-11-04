@@ -645,6 +645,8 @@ pub enum TransitionKind {
     /// The previous picture zooms out faster and faster over its last frames, then this clip
     /// cuts in.
     Whip,
+    /// Resolves from large nearest-colour blocks to sharp in six steps (typically 0.4 s).
+    Pixelate,
 }
 
 /// How a clip comes in. On the main track it is a transition from the previous clip; on an
@@ -671,6 +673,8 @@ pub enum TreatLook {
     Teal,
     /// Hard black and white with deep contrast. Documents, prices, archive, a serious beat.
     Mono,
+    /// Gentle black and white with lifted blacks for an editorial paper look.
+    SoftMono,
     /// Amber and sepia. Fire, money, history.
     Warm,
     /// Cold steel blue. Technology, night, distance.
@@ -702,6 +706,9 @@ pub struct Treatment {
     /// Darkening toward the edges, 0 to 1.
     #[serde(default)]
     pub vignette: f32,
+    /// Nearest-colour block size as a fraction of canvas height; 0 disables pixelation.
+    #[serde(default)]
+    pub pixelate: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recolor: Option<Recolor>,
 }
@@ -854,7 +861,9 @@ impl Clip {
 }
 
 /// Built-in looks for text items. The graphics engine owns how each one looks and moves.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TextPreset {
     /// Big text in the first seconds that tells viewers why to keep watching.
@@ -891,14 +900,21 @@ pub enum TextPreset {
     /// A huge red word behind the speaker. It is drawn under the overlay tracks, so a cut-out of
     /// the speaker on an overlay track stands in front of it.
     Mega,
+    /// Dark text over an accent highlighter band that wipes in over 0.35 seconds.
+    Marker,
+    /// Twelve-segment story progress bar, with optional text as its label.
+    Meter,
 }
 
 impl TextPreset {
-    /// The animation `add_text` uses when none is given. Shock words, black cards and the mega
-    /// word cut on hard; the keyword's blur-in belongs to its preset look, not to this.
+    /// Default entrance for `add_text`. Display words and native animated devices cut on hard.
     pub fn default_anim(self) -> Anim {
         match self {
-            TextPreset::Shock | TextPreset::BlackCard | TextPreset::Mega => Anim::None,
+            TextPreset::Shock
+            | TextPreset::BlackCard
+            | TextPreset::Mega
+            | TextPreset::Marker
+            | TextPreset::Meter => Anim::None,
             _ => Anim::Fade,
         }
     }
@@ -1080,6 +1096,9 @@ pub struct Project {
     /// Provenance and licence of found files, by asset id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sources: BTreeMap<String, Source>,
+    /// Font files, absolute or relative to the project folder, same as asset paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fonts: Vec<String>,
 }
 
 impl Project {
@@ -1113,6 +1132,7 @@ impl Project {
             markers: Vec::new(),
             faces: BTreeMap::new(),
             sources: BTreeMap::new(),
+            fonts: Vec::new(),
         }
     }
 
@@ -1417,27 +1437,31 @@ impl Project {
                         );
                     }
                 }
-                if let Some(f) = c.frame {
-                    if f.w <= 0.0 || f.h <= 0.0 {
-                        bail!("clip {id}: frame needs a positive width and height");
-                    }
+                if let Some(f) = c.frame
+                    && (f.w <= 0.0 || f.h <= 0.0)
+                {
+                    bail!("clip {id}: frame needs a positive width and height");
                 }
-                if let Some(tr) = &c.transition {
-                    if !(tr.duration.is_finite() && tr.duration >= 0.0) {
-                        bail!("clip {id}: transition duration must be 0 or more seconds");
-                    }
+                if let Some(tr) = &c.transition
+                    && !(tr.duration.is_finite() && tr.duration >= 0.0)
+                {
+                    bail!("clip {id}: transition duration must be 0 or more seconds");
                 }
                 if let Some(g) = &c.grade {
-                    if !(0.0..=1.0).contains(&g.halftone) || !(0.0..=1.0).contains(&g.vignette) {
-                        bail!("clip {id}: grade halftone and vignette must be between 0 and 1");
+                    if !(0.0..=1.0).contains(&g.halftone)
+                        || !(0.0..=1.0).contains(&g.vignette)
+                        || !(0.0..=1.0).contains(&g.pixelate)
+                    {
+                        bail!(
+                            "clip {id}: grade halftone, vignette and pixelate must be between 0 and 1"
+                        );
                     }
-                    if let Some(r) = g.recolor {
-                        if ![r.from, r.to, r.target]
+                    if let Some(r) = g.recolor
+                        && ![r.from, r.to, r.target]
                             .iter()
                             .all(|d| (0.0..=360.0).contains(d))
-                        {
-                            bail!("clip {id}: recolor hues must be degrees between 0 and 360");
-                        }
+                    {
+                        bail!("clip {id}: recolor hues must be degrees between 0 and 360");
                     }
                 }
                 if let Some(m) = &c.mask {

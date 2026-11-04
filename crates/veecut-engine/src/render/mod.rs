@@ -127,11 +127,11 @@ pub fn export(
         bail!("export cancelled");
     }
 
-    if let Some(parent) = out.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
+    if let Some(parent) = out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
     let tmp = temp_sibling(out)?;
     let mut enc = spawn_encoder(
@@ -201,6 +201,7 @@ pub fn render_frame(
     let mut guard = scrub().lock().unwrap_or_else(|e| e.into_inner());
     let grade = Grade::new(&project.look);
     let ScrubState { pool, scratch, gfx } = &mut *guard;
+    gfx.load_project_fonts(project, project_dir);
     compose::render_at(
         project,
         project_dir,
@@ -262,6 +263,8 @@ impl FrameStream {
         if !(1.0..=120.0).contains(&fps) {
             bail!("canvas fps {fps} must be between 1 and 120");
         }
+        let mut gfx = Graphics::new();
+        gfx.load_project_fonts(project, project_dir);
         Ok(FrameStream {
             project: project.clone(),
             project_dir: project_dir.to_path_buf(),
@@ -272,7 +275,7 @@ impl FrameStream {
             height,
             pool: DecoderPool::new(true),
             scratch: Scratch::new(),
-            gfx: Graphics::new(),
+            gfx,
             grade: Grade::new(&project.look),
         })
     }

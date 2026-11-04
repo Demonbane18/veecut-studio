@@ -81,7 +81,7 @@ Look up ids with `veecut status --json`. Pictures are clips on the `broll` track
 | "Remove that word" | `{"op":"delete","item":"text-4"}`, and delete its tick on the `sfx` track. |
 | "Change that word" | `{"op":"patch","item":"text-4","patch":{"text":"BILLIONS"}}` |
 | "Fewer clicks" | Delete the clicks they mean from the `sfx` track, or quieten them all by patching their `volume`. |
-| "Add a click here" | Find the kit file with `veecut sfx --json`, `veecut add .veecut/sfx/v1/click-2.wav --role sfx`, then `add_clip` it on `sfx` at the picture change plus 0.008 s minus its hit time, with the same volume as the other clicks. |
+| "Add a click here" | Find the kit file path with `veecut sfx --json`, `veecut add PATH --role sfx`, then `add_clip` it on `sfx` at the picture change plus 0.008 s minus its hit time, with the same volume as the other clicks. |
 | "Put a big word behind me" | `veecut cutout --at 21.4 --dur 1.6 --mega "NEVER"` inside one main-track clip. |
 | "Keep the music under the punchline" | The bed is split around the punchline: the middle piece on the `music` track has volume 0, and its neighbours fade out and in over 0.02 s. Patch that piece back to the volume of its neighbours, `{"op":"patch","item":"clip-40","patch":{"volume":0.21}}` with their value, and delete the impact on the `sfx` track where the bed came back. |
 | "Drop the music under this line instead" | Bring the old cut back (row above). Get the line's `timeline_start` and the next line's from `veecut transcript --json`, split the music there, `{"op":"split","at":31.2,"track":"music"}` and `{"op":"split","at":33.9,"track":"music"}`, patch the piece between to `{"volume":0}`, the piece before to `{"fade_out":0.02}` and the piece after to `{"fade_in":0.02}`. |

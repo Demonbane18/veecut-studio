@@ -65,7 +65,7 @@ pub(super) fn paint(color: Color) -> Paint<'static> {
     p
 }
 
-fn rounded_path(rect: Rect, radius: f32) -> Option<Path> {
+pub(super) fn rounded_path(rect: Rect, radius: f32) -> Option<Path> {
     let r = radius.min(rect.w / 2.0).min(rect.h / 2.0).max(0.0);
     let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
     let mut p = PathBuilder::new();
@@ -453,7 +453,13 @@ pub(super) fn render(
     let contrast = if !spec.ink
         && !matches!(
             spec.preset,
-            Some(TextPreset::Shock | TextPreset::Mega | TextPreset::BlackCard)
+            Some(
+                TextPreset::Shock
+                    | TextPreset::Mega
+                    | TextPreset::BlackCard
+                    | TextPreset::Marker
+                    | TextPreset::Meter
+            )
         )
         && spec.background.is_none_or(|color| color.a == 0)
     {

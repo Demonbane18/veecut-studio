@@ -4,7 +4,7 @@ VeeCut has its own sound-effects kit, made in code. The roles, the timing after 
 
 ## The built-in kit
 
-`veecut sfx` writes any missing kit file and lists each one with its length, the time of its hit and its role. The files are 48 kHz mono WAVs with a -3 dBFS peak in `.veecut/sfx/v1/`. They are made the same way every time, so a deleted file comes back unchanged; `veecut sfx --regenerate` writes them all again. `--json` gives each file's path.
+`veecut sfx` writes any missing kit file and lists each one with its length, the time of its hit and its role. The files are 48 kHz mono WAVs with a -3 dBFS peak in `.veecut/sfx/v2/`. They are made the same way every time, so a deleted file comes back unchanged; `veecut sfx --regenerate` writes them all again. `--json` gives each file's path; use that path instead of assuming a kit version.
 
 | File | Length | Role | Placed by the documentary recipe |
 | --- | --- | --- | --- |
@@ -19,6 +19,9 @@ VeeCut has its own sound-effects kit, made in code. The roles, the timing after 
 | `impact` | 0.9 s | the beat slamming back after a silence | where the bed comes back after the punchline |
 | `hit` | 1.6 s | one cut that needs weight (rare) | not placed |
 | `outro` | 2.5 s | under the end card | not placed |
+| `chiptune` | about 27.43 s, sixteen bars at 140 BPM | seamless square-lead and triangle-bass music bed with noise percussion | not placed; used by the arcade look |
+| `coin` | 0.25 s | two rising square blips for a pickup or text entrance | not placed; used by the arcade look |
+| `blip` | 45 ms | short square pip for a small cut or pop | not placed; used by the arcade look |
 
 A `voice_only` style places none of them.
 
@@ -34,7 +37,7 @@ Every recipe except the documentary puts a sound where text lands. It cycles thr
 
 The documentary recipe always uses the kit, because its sounds are tied to the picture effects.
 
-To add a kit sound by hand, find its path and hit time with `veecut sfx --json`, bring it in with `veecut add .veecut/sfx/v1/riser.wav --role sfx`, then `add_clip` it on the `sfx` track starting at the picture change plus 0.008 s minus its hit time.
+To add a kit sound by hand, find its path and hit time with `veecut sfx --json`, bring that WAV in with `veecut add PATH --role sfx`, then `add_clip` it on the `sfx` track starting at the picture change plus 0.008 s minus its hit time.
 
 ## Rules
 
@@ -56,3 +59,5 @@ Two kinds of bed:
 Editor V1's bed rules behind this: about 5.5 LU under the voice from frame 0 with a fixed trim (no loudness normalising of the bed), not ducked; cut out completely under the punchline so it plays dry, slammed back on the next line; about 8 dB down under a black word card and about 4 dB under a rebuilt UI card; a fade-in of at most 0.05 s and a ring-out of about 0.9 s; line the song's drop up with the line after the punchline.
 
 Only use music the user has the rights to. Changing the bed after the edit (keeping it under the punchline, cutting it under another line) is in `workflows/documentary.md` under Common notes.
+
+Native look packs can set `sound.text`, `sound.cut` and `sound.music` to `kit:<slug>` or a file inside the skill folder. Slugs use underscores (`kit:sub_boom`), even when the WAV filename has hyphens. The arcade look loops `kit:chiptune` at -20 dB gain, with 1.5 s entrance/exit fades and no speech ducking. Reapplying replaces the previous look's sound clips while leaving manually placed audio alone. See `reference/skills.md`.

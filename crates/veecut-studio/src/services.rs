@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc,
     thread,
     time::Instant,
@@ -10,7 +10,8 @@ use eframe::egui;
 use veecut_engine::{
     agent::{self, AgentKind, AgentStatus, ModelChoice, Selection, Usage},
     config::Config,
-    project::VideoKind,
+    look::{self, LookPack},
+    project::{Project, VideoKind},
     skills,
     workspace::Workspace,
 };
@@ -23,7 +24,9 @@ pub(crate) enum Event {
     Picks(Picks),
     AgentDone(Result<(), String>),
     AgentStopped,
-    SkillsDone(Result<(), String>),
+    SkillsDone(Result<String, String>),
+    Installed(Vec<skills::InstalledSkill>),
+    Checked(String, String),
 }
 
 #[derive(Default)]
@@ -119,6 +122,13 @@ pub(crate) struct Services {
     query: String,
     category: Option<String>,
     skills_busy: bool,
+    /// Every skill folder in the workspace, for the Skills tab and the New edit Look combo.
+    my_skills: Vec<skills::InstalledSkill>,
+    add_source: String,
+    own_name: String,
+    own_description: String,
+    /// The last check report per skill name.
+    checks: HashMap<String, String>,
     pub notice: Option<String>,
     tx: mpsc::Sender<Event>,
     rx: mpsc::Receiver<Event>,
@@ -141,7 +151,9 @@ impl Services {
             let _ = worker.send(Event::Agents(agent::detect(), Some(agent)));
             send_catalog(&worker, &Workspace { root: root.clone() });
             let result = match config {
-                Ok(config) => skills::auto_sync_if_stale(&config).transpose().map(|_| ()),
+                Ok(config) => skills::auto_sync_if_stale(&config)
+                    .transpose()
+                    .map(|_| "Skills ready.".to_string()),
                 Err(error) => Err(error.context("loading config")),
             }
             .map_err(|error| format!("{error:#}"));
@@ -173,6 +185,11 @@ impl Services {
             query: String::new(),
             category: None,
             skills_busy: true,
+            my_skills: Vec::new(),
+            add_source: String::new(),
+            own_name: String::new(),
+            own_description: String::new(),
+            checks: HashMap::new(),
             notice: None,
             tx,
             rx,
@@ -226,10 +243,11 @@ impl Services {
                 }
                 Event::SkillsDone(result) => {
                     self.skills_busy = false;
-                    self.notice = Some(match result {
-                        Ok(()) => "Skills ready.".into(),
-                        Err(error) => error,
-                    });
+                    self.notice = Some(result.unwrap_or_else(|error| error));
+                }
+                Event::Installed(list) => self.my_skills = list,
+                Event::Checked(name, text) => {
+                    self.checks.insert(name, text);
                 }
             }
         }
@@ -542,17 +560,173 @@ impl Services {
         run
     }
 
-    pub fn skills_ui(&mut self, ui: &mut egui::Ui, ws: &Workspace, kind: VideoKind) {
-        ui.heading("Video skills");
-        ui.label("Community skills run code. Install only sources you trust.");
+    /// Installed skills that carry a veecut.toml look, for the New edit Look combo.
+    pub fn look_skills(&self) -> impl Iterator<Item = &skills::InstalledSkill> {
+        self.my_skills.iter().filter(|skill| skill.has_look)
+    }
+
+    /// The Skills tab: your skills, add a skill, make your own, then the catalog. Returns the
+    /// skill whose look the user asked to apply to the open project (the editor applies it as
+    /// ops, so Undo works).
+    pub fn skills_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ws: &Workspace,
+        project: Option<&Project>,
+    ) -> Option<(String, PathBuf)> {
+        let mut apply = None;
+        let mut job = None;
+        let mut open_error = None;
+        ui.horizontal(|ui| {
+            ui.heading("Your skills");
+            if self.skills_busy {
+                ui.spinner();
+            }
+        });
+        if self.my_skills.is_empty() {
+            ui.label("No skills installed yet.");
+        }
+        for skill in &self.my_skills {
+            ui.group(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(&skill.name);
+                    ui.small(if skill.has_look { "look" } else { "agent-only" });
+                    ui.small(match &skill.origin {
+                        skills::Origin::BuiltIn => "built-in".to_string(),
+                        skills::Origin::Catalog(repo) => format!("catalog {repo}"),
+                        skills::Origin::Added(source) => format!("added from {source}"),
+                        skills::Origin::Own => "yours".to_string(),
+                    });
+                });
+                if !skill.description.is_empty() {
+                    ui.label(&skill.description);
+                }
+                for note in &skill.notes {
+                    let text = egui::RichText::new(note).small();
+                    if note.starts_with("No licence file") {
+                        ui.label(text.color(egui::Color32::from_rgb(240, 202, 125)));
+                    } else {
+                        ui.label(text);
+                    }
+                }
+                ui.add_enabled_ui(!self.skills_busy, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(
+                                project.is_some() && skill.has_look,
+                                egui::Button::new("Apply look"),
+                            )
+                            .on_hover_text(if skill.has_look {
+                                "Restyle the open project. Undo (Cmd+Z) takes it back."
+                            } else {
+                                "Agent-only skill: it has no veecut.toml look. Your coding agent follows its SKILL.md."
+                            })
+                            .clicked()
+                        {
+                            apply = Some((skill.name.clone(), skill.dir.clone()));
+                        }
+                        if ui.button("Check").clicked() {
+                            job = Some(SkillJob::Check(skill.name.clone()));
+                        }
+                        if matches!(
+                            skill.origin,
+                            skills::Origin::Added(_) | skills::Origin::Own
+                        ) && ui.button("Remove").clicked()
+                        {
+                            job = Some(SkillJob::Remove(skill.name.clone()));
+                        }
+                        if ui.button("Open folder").clicked() {
+                            if let Err(error) = open::that(&skill.dir) {
+                                open_error = Some(format!("opening {}: {error}", skill.dir.display()));
+                            }
+                        }
+                    });
+                });
+                if let Some(report) = self.checks.get(&skill.name) {
+                    ui.small(report);
+                }
+            });
+        }
+        ui.separator();
+        ui.heading("Add a skill");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.add_source)
+                .hint_text("Folder, .zip, GitHub owner/repo, Google Drive or https link")
+                .desired_width(f32::INFINITY),
+        );
+        ui.horizontal_wrapped(|ui| {
+            let ready = !self.skills_busy && !self.add_source.trim().is_empty();
+            if ui.add_enabled(ready, egui::Button::new("Add")).clicked() {
+                job = Some(SkillJob::Add(self.add_source.trim().to_string()));
+                self.add_source.clear();
+            }
+            if ui.button("Choose folder...").clicked() {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    self.add_source = folder.display().to_string();
+                }
+            }
+            if ui.button("Choose zip...").clicked() {
+                if let Some(file) = rfd::FileDialog::new()
+                    .add_filter("Skill archive", &["zip", "tgz", "gz"])
+                    .pick_file()
+                {
+                    self.add_source = file.display().to_string();
+                }
+            }
+        });
+        ui.small("Skills are copied here and inspected, never run. Scripts inside stay inert.");
+        ui.separator();
+        ui.heading("Make your own");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.own_name)
+                .hint_text("Name, for example my-look")
+                .desired_width(f32::INFINITY),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut self.own_description)
+                .hint_text("When to use it")
+                .desired_width(f32::INFINITY),
+        );
+        let named = !self.skills_busy && !self.own_name.trim().is_empty();
+        ui.horizontal_wrapped(|ui| {
+            let description = if self.own_description.trim().is_empty() {
+                "My VeeCut look".to_string()
+            } else {
+                self.own_description.trim().to_string()
+            };
+            let mut make = |look: Option<LookPack>| {
+                job = Some(SkillJob::New {
+                    name: self.own_name.trim().to_string(),
+                    description: description.clone(),
+                    look,
+                });
+                self.own_name.clear();
+                self.own_description.clear();
+            };
+            if ui
+                .add_enabled(
+                    named && project.is_some(),
+                    egui::Button::new("Save this project's look as a skill"),
+                )
+                .clicked()
+            {
+                make(project.map(look::capture));
+            }
+            if ui
+                .add_enabled(named, egui::Button::new("Start blank"))
+                .clicked()
+            {
+                make(None);
+            }
+        });
+        ui.separator();
+        ui.heading("Video skills catalog");
+        ui.label("VeeCut never runs a skill's scripts, but your coding agent may. Install only sources you trust.");
         if ui
             .add_enabled(!self.skills_busy, egui::Button::new("Sync now"))
             .clicked()
         {
-            self.skill_job(ws, None, "sync");
-        }
-        if self.skills_busy {
-            ui.spinner();
+            job = Some(SkillJob::Sync);
         }
         if let Some(catalog) = &self.catalog {
             ui.small(format!(
@@ -561,7 +735,6 @@ impl Services {
             ));
         }
         ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search skills"));
-        let mut action = None;
         if let Some(catalog) = &self.catalog {
             egui::ComboBox::from_id_salt("skill_category")
                 .selected_text(self.category.as_deref().unwrap_or("All categories"))
@@ -577,54 +750,88 @@ impl Services {
                 });
             ui.separator();
             ui.strong("Recommended for this video");
+            let kind = project.map_or_else(VideoKind::default, |project| project.kind);
             for entry in skills::recommended(catalog, kind, 3) {
-                if let Some(job) = skill_entry(
+                if let Some(next) = skill_entry(
                     ui,
                     entry,
                     self.installed.contains(&entry.repo),
                     self.skills_busy,
                 ) {
-                    action = Some(job);
+                    job = Some(next);
                 }
             }
             ui.separator();
             ui.strong("Catalog");
             for entry in skills::search(catalog, &self.query, self.category.as_deref()) {
-                if let Some(job) = skill_entry(
+                if let Some(next) = skill_entry(
                     ui,
                     entry,
                     self.installed.contains(&entry.repo),
                     self.skills_busy,
                 ) {
-                    action = Some(job);
+                    job = Some(next);
                 }
             }
         } else {
             ui.label("No catalog yet. Sync to load available skills.");
         }
-        if let Some((repo, action)) = action {
-            self.skill_job(ws, Some(repo), action);
+        if open_error.is_some() {
+            self.notice = open_error;
         }
+        if let Some(job) = job {
+            self.skill_job(ws, job);
+        }
+        apply
     }
 
-    fn skill_job(&mut self, ws: &Workspace, repo: Option<String>, action: &'static str) {
+    fn skill_job(&mut self, ws: &Workspace, job: SkillJob) {
         self.skills_busy = true;
         let root = ws.root.clone();
         let tx = self.tx.clone();
         thread::spawn(move || {
             let ws = Workspace { root };
-            let result = match (action, repo.as_deref()) {
-                ("install", Some(repo)) => skills::install(&ws, repo, false).map(|_| ()),
-                ("update", Some(repo)) => skills::update(&ws, Some(repo)).and_then(|reports| {
-                    for report in reports {
-                        if let Some(error) = report.error {
-                            anyhow::bail!("{}: {error}", report.repo);
+            let result = match job {
+                SkillJob::Install(repo) => skills::install(&ws, &repo, false)
+                    .map(|report| format!("Installed {}.", report.skills.join(", "))),
+                SkillJob::Update(repo) => {
+                    skills::update(&ws, Some(repo.as_str())).and_then(|reports| {
+                        for report in reports {
+                            if let Some(error) = report.error {
+                                anyhow::bail!("{}: {error}", report.repo);
+                            }
                         }
-                    }
-                    Ok(())
+                        Ok(format!("Updated {repo}."))
+                    })
+                }
+                SkillJob::Remove(name) => {
+                    skills::remove(&ws, &name).map(|()| format!("Removed {name}."))
+                }
+                SkillJob::Add(source) => skills::add(&ws, &source).map(|report| {
+                    format!(
+                        "Added {}. Its scripts are never run.",
+                        report.skills.join(", ")
+                    )
                 }),
-                ("remove", Some(repo)) => skills::remove(&ws, repo),
-                _ => skills::sync().map(|_| ()),
+                SkillJob::Check(name) => {
+                    let report = skills::check(&ws, &name);
+                    let text = match &report {
+                        Ok(report) => check_text(report),
+                        Err(error) => format!("Problem: {error:#}"),
+                    };
+                    let _ = tx.send(Event::Checked(name.clone(), text));
+                    report.map(|_| format!("Checked {name}."))
+                }
+                SkillJob::New {
+                    name,
+                    description,
+                    look,
+                } => skills::new_skill(&ws, &name, &description, look).map(|_| {
+                    format!(
+                        "Created skill {name}. Edit its SKILL.md and veecut.toml in Open folder."
+                    )
+                }),
+                SkillJob::Sync => skills::sync().map(|_| "Skills ready.".to_string()),
             }
             .map_err(|error| format!("{error:#}"));
             send_catalog(&tx, &ws);
@@ -633,7 +840,49 @@ impl Services {
     }
 }
 
+/// Everything the Skills tab can ask a worker thread to do.
+enum SkillJob {
+    Sync,
+    Install(String),
+    Update(String),
+    Remove(String),
+    Add(String),
+    Check(String),
+    New {
+        name: String,
+        description: String,
+        look: Option<LookPack>,
+    },
+}
+
+fn check_text(report: &skills::CheckReport) -> String {
+    let mut lines = vec![if report.has_look {
+        "Look pack is valid.".to_string()
+    } else {
+        "Agent-only: no veecut.toml look.".to_string()
+    }];
+    if !report.kinds.is_empty() {
+        let kinds: Vec<&str> = report.kinds.iter().map(|kind| kind.label()).collect();
+        lines.push(format!("Suits: {}", kinds.join(", ")));
+    }
+    if !report.fonts.is_empty() {
+        lines.push(format!("Fonts: {}", report.fonts.join(", ")));
+    }
+    lines.extend(report.notes.iter().cloned());
+    lines.join("\n")
+}
+
 fn send_catalog(tx: &mpsc::Sender<Event>, ws: &Workspace) {
+    match skills::installed_skills(ws) {
+        Ok(list) => {
+            let _ = tx.send(Event::Installed(list));
+        }
+        Err(error) => {
+            let _ = tx.send(Event::SkillsDone(Err(format!(
+                "reading installed skills: {error:#}"
+            ))));
+        }
+    }
     let installed = match skills::installed(ws) {
         Ok(lock) => lock.repos.into_iter().map(|entry| entry.repo).collect(),
         Err(error) => {
@@ -683,8 +932,8 @@ fn skill_entry(
     entry: &skills::Entry,
     installed: bool,
     busy: bool,
-) -> Option<(String, &'static str)> {
-    let mut action = None;
+) -> Option<SkillJob> {
+    let mut job = None;
     ui.group(|ui| {
         ui.hyperlink_to(&entry.repo, &entry.url);
         ui.small(format!(
@@ -698,18 +947,18 @@ fn skill_entry(
             ui.horizontal(|ui| {
                 if installed {
                     if ui.button("Update").clicked() {
-                        action = Some((entry.repo.clone(), "update"));
+                        job = Some(SkillJob::Update(entry.repo.clone()));
                     }
                     if ui.button("Remove").clicked() {
-                        action = Some((entry.repo.clone(), "remove"));
+                        job = Some(SkillJob::Remove(entry.repo.clone()));
                     }
                 } else if ui.button("Install").clicked() {
-                    action = Some((entry.repo.clone(), "install"));
+                    job = Some(SkillJob::Install(entry.repo.clone()));
                 }
             });
         });
     });
-    action
+    job
 }
 
 impl Drop for Services {

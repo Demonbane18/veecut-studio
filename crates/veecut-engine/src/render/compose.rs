@@ -415,6 +415,9 @@ fn layer_transition(
     };
     match kind {
         TransitionKind::Focus => work.blur(px, w, h, fx::focus_radius(p, f.h), *alpha),
+        TransitionKind::Pixelate => {
+            fx::pixelate(px, w as usize, h as usize, fx::pixelate_size(p, f.h));
+        }
         TransitionKind::Tiles => {
             let order = fx::tile_order(fx::seed(&item.id));
             fx::tiles(px, w as usize, h as usize, &order, fx::tile_step(p));
@@ -424,7 +427,7 @@ fn layer_transition(
         TransitionKind::Dip if overlay => {
             let k = (p * 256.0) as u32;
             par_rows(px, w as usize * 4, |_, band| {
-                for c in band.chunks_exact_mut(4) {
+                for c in band.as_chunks_mut::<4>().0 {
                     for v in &mut c[..3] {
                         *v = ((*v as u32 * k) >> 8) as u8;
                     }
@@ -542,13 +545,18 @@ fn replace_weighted(dst: &mut [u8], src: &[u8], gain: f32) {
     if gain >= 0.999 && src.len() >= dst.len() {
         let n = dst.len() / 4 * 4;
         dst[..n].copy_from_slice(&src[..n]);
-        for px in dst[..n].chunks_exact_mut(4) {
+        for px in dst[..n].as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
         return;
     }
     let w = (gain * 256.0).round() as u16;
-    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+    for (d, s) in dst
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src.chunks_exact(4))
+    {
         d[0] = ((s[0] as u16 * w) >> 8) as u8;
         d[1] = ((s[1] as u16 * w) >> 8) as u8;
         d[2] = ((s[2] as u16 * w) >> 8) as u8;
@@ -560,7 +568,9 @@ fn mix2(dst: &mut [u8], a: &[u8], wa: f32, b: &[u8], wb: f32) {
     let wa = (wa.clamp(0.0, 1.0) * 256.0).round() as u16;
     let wb = (wb.clamp(0.0, 1.0) * 256.0).round() as u16;
     for ((d, pa), pb) in dst
-        .chunks_exact_mut(4)
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
         .zip(a.chunks_exact(4))
         .zip(b.chunks_exact(4))
     {
@@ -668,7 +678,7 @@ fn apply_dip_flash(data: &mut [u8], black: f32, white: f32) {
     let keep = (1.0 - black).clamp(0.0, 1.0) * (1.0 - white).clamp(0.0, 1.0);
     let add = (white.clamp(0.0, 1.0) * 255.0).round() as u16;
     let k = (keep * 256.0).round() as u16;
-    for px in data.chunks_exact_mut(4) {
+    for px in data.as_chunks_mut::<4>().0 {
         px[0] = (((px[0] as u16 * k) >> 8) + add).min(255) as u8;
         px[1] = (((px[1] as u16 * k) >> 8) + add).min(255) as u8;
         px[2] = (((px[2] as u16 * k) >> 8) + add).min(255) as u8;
@@ -680,15 +690,15 @@ fn apply_grade(data: &mut [u8], width: u32, height: u32, grade: &Grade) {
     if grade.skip {
         return;
     }
-    if let Some(curves) = grade.curves {
-        if grade.vignette <= 0.001 {
-            for px in data.chunks_exact_mut(4) {
-                px[0] = curves[0][px[0] as usize];
-                px[1] = curves[1][px[1] as usize];
-                px[2] = curves[2][px[2] as usize];
-            }
-            return;
+    if let Some(curves) = grade.curves
+        && grade.vignette <= 0.001
+    {
+        for px in data.as_chunks_mut::<4>().0 {
+            px[0] = curves[0][px[0] as usize];
+            px[1] = curves[1][px[1] as usize];
+            px[2] = curves[2][px[2] as usize];
         }
+        return;
     }
     let cx = width as f32 * 0.5;
     let cy = height as f32 * 0.5;
@@ -730,6 +740,60 @@ mod tests {
     use crate::media;
     use crate::project::{AssetKind, AssetRole, Canvas, ItemBody, KenBurns, VideoKind, Zoom};
 
+    #[test]
+    fn pixelate_transition_holds_steps_and_finishes_on_original_clip() {
+        let dir = tempfile::tempdir().unwrap();
+        let (w, h) = (120u32, 180u32);
+        let path = dir.path().join("gradient.png");
+        image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 2) as u8, y as u8, 90, 255]))
+            .save(&path)
+            .unwrap();
+        let mut project = Project::new("pixels", VideoKind::default(), Canvas::new(w, h));
+        project.assets.push(Asset {
+            id: "gradient".into(),
+            path,
+            kind: AssetKind::Image,
+            role: AssetRole::Broll,
+            duration: 0.0,
+            width: w,
+            height: h,
+            fps: 0.0,
+            has_audio: false,
+        });
+        let mut clip = Clip::new("gradient", 0.0);
+        clip.transition = Some(crate::project::Transition {
+            kind: TransitionKind::Pixelate,
+            duration: 0.4,
+        });
+        project.main_mut().items.push(Item {
+            id: "pixels".into(),
+            start: 0.0,
+            duration: 1.0,
+            body: ItemBody::Clip(clip),
+        });
+        let render = |p: &Project, t| super::super::render_frame(p, dir.path(), t, w, h).unwrap();
+        let early = render(&project, 0.1);
+        let held = render(&project, 0.11);
+        let late = render(&project, 0.3);
+        assert_eq!(
+            early.data(),
+            held.data(),
+            "size must hold between step boundaries"
+        );
+        let run = |frame: &Pixmap| {
+            let first = &frame.data()[..4];
+            frame.data()[..w as usize * 4]
+                .chunks_exact(4)
+                .take_while(|p| *p == first)
+                .count()
+        };
+        assert_eq!(run(&early), fx::pixelate_size(0.25, h));
+        assert_eq!(run(&late), fx::pixelate_size(0.75, h));
+        assert!(run(&early) > run(&late));
+        let end = render(&project, 0.4);
+        project.main_mut().items[0].clip_mut().unwrap().transition = None;
+        assert_eq!(end.data(), render(&project, 0.4).data());
+    }
     /// A white box moving right, drawn by ffmpeg at `w` x `h` (geometry scales with the size).
     fn box_video(path: &Path, w: u32, h: u32, gray: bool) -> Asset {
         let k = w as f64 / 160.0;

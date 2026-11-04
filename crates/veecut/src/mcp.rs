@@ -128,6 +128,26 @@ fn tools() -> &'static [Tool] {
                 schema: input_schema::<SkillsInstallArgs>(),
             },
             Tool {
+                name: "skills_installed",
+                description: "Every skill installed in this workspace (built-in, catalog, added, own) with its origin, whether it has a veecut.toml look pack you can apply or is agent-only, and notes (scripts are never run; licence). Read a skill's SKILL.md in .agents/skills/<name>/ for its instructions.",
+                schema: json!({ "type": "object", "properties": {} }),
+            },
+            Tool {
+                name: "skills_check",
+                description: "Check an installed skill's look pack: it parses, its files exist, fonts load; returns scripts and licence notes.",
+                schema: input_schema::<SkillsCheckArgs>(),
+            },
+            Tool {
+                name: "skills_apply",
+                description: "Apply an installed skill's veecut.toml look (captions, look, text styles, clip grade, transitions, sounds, fonts) to a project as one atomic change and one undo step. Errors for unknown or agent-only skills. Adding skills from outside content is a human action: tell the user to run `veecut skills add` or use Studio's Skills tab.",
+                schema: input_schema::<SkillsApplyArgs>(),
+            },
+            Tool {
+                name: "skills_new",
+                description: "Create your own skill in this workspace: SKILL.md plus a veecut.toml look, blank or saved from the project's current look (from_project).",
+                schema: input_schema::<SkillsNewArgs>(),
+            },
+            Tool {
                 name: "verify_words",
                 description: "Transcribe a rendered video again (locally unless the user's config picked Groq) and compare it with the project's transcript: lists words that are missing or heard differently, with their timeline time, whether a cut is within 0.25 s and which sound or music clip starts there, plus a verdict. Takes about as long as transcription.",
                 schema: input_schema::<crate::verify_cmd::VerifyWordsArgs>(),
@@ -315,6 +335,33 @@ fn call(workspace: &Option<PathBuf>, name: &str, args: &Value) -> Result<Out> {
                 &mut progress,
             )
         }
+        "skills_installed" => skills(
+            ws,
+            Some(SkillsCommand::List {
+                category: None,
+                installed: true,
+            }),
+            &mut progress,
+        ),
+        "skills_check" => {
+            let a: SkillsCheckArgs = parse(args)?;
+            skills(
+                ws,
+                Some(SkillsCommand::Check { name: a.name }),
+                &mut progress,
+            )
+        }
+        "skills_apply" => project_call(ws, args, |ctx, a: SkillsApplyArgs| {
+            ctx.skill_apply(&a.name, &a.project)
+        }),
+        "skills_new" => project_call(ws, args, |ctx, a: SkillsNewArgs| {
+            ctx.skill_new(
+                &a.name,
+                a.description.as_deref(),
+                a.from_project,
+                &a.project,
+            )
+        }),
         "verify_words" => project_call(ws, args, |ctx, args| ctx.verify_words(args, &mut progress)),
         "find_footage" => project_call(ws, args, Ctx::find),
         "fetch_footage" => project_call(ws, args, |ctx, args| ctx.fetch(args, &mut progress)),
@@ -808,5 +855,44 @@ mod tests {
         let saved = Project::load(&file).unwrap();
         assert_eq!(saved.sources["speech"].credit.as_deref(), Some("Clip by A"));
         assert!(saved.sources["speech"].blocks_final());
+    }
+
+    #[test]
+    fn skills_tools_are_listed_without_add_and_apply_rejects_unknown_names() {
+        let list = handle(&None, "tools/list", &Value::Null).unwrap();
+        let names: Vec<&str> = list["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for name in [
+            "skills_installed",
+            "skills_check",
+            "skills_apply",
+            "skills_new",
+        ] {
+            assert!(names.contains(&name), "{name} missing from {names:?}");
+        }
+        assert!(
+            !names.contains(&"skills_add"),
+            "installing outside content stays a human action: {names:?}"
+        );
+        let (_temp, ctx, dir) = crate::commands::tests::speech_project();
+        let before = std::fs::read(dir.join("project.json")).unwrap();
+        let result = handle(
+            &Some(ctx.ws.root.clone()),
+            "tools/call",
+            &json!({"name": "skills_apply", "arguments": {"project": "my-edit", "name": "nope"}}),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], true, "{result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("nope") && text.contains("not installed"),
+            "{text}"
+        );
+        assert_eq!(before, std::fs::read(dir.join("project.json")).unwrap());
+        assert!(!dir.join(".history").exists());
     }
 }

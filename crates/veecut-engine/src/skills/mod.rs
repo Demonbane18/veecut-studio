@@ -1,9 +1,10 @@
-//! Skills catalog synced from awesome-claude-video-skills, with install, update and auto-update.
+//! Installed agent skills and native looks, plus the synced community catalog.
 //!
-//! Installing never runs anything from a skill repo: VeeCut downloads the tarball at a pinned
-//! commit, copies the folders that hold a `SKILL.md` and records the commit in `skills.lock.json`.
-//! Lock-file skill names must be safe direct children of the skill roots, excluding built-in
-//! `veecut`; the entire lock is checked before removal or replacement can delete any directory.
+//! Imports copy folders containing `SKILL.md` into both workspace skill roots; scripts are never
+//! run. GitHub installs pin a commit; folder/archive imports record their source, SHA-256 and
+//! script/licence notes in `skills.lock.json`. Updates re-fetch the recorded source.
+//! Lock-file names must be safe direct children other than built-in skills; the entire lock
+//! is checked before removal or replacement can delete any directory.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -20,11 +21,22 @@ use crate::config::{self, Config};
 use crate::project::VideoKind;
 use crate::workspace::Workspace;
 
+mod add;
+pub use add::{CheckReport, InstalledSkill, Origin, add, check, installed_skills, new_skill};
+
 /// The awesome list the catalog comes from.
 pub const LIST_REPO: &str = "zhuyansen/awesome-claude-video-skills";
 pub const LOCK_FILE: &str = "skills.lock.json";
 const MAX_ARCHIVE: u64 = 200 * 1024 * 1024;
 const MAX_FILE: u64 = 25 * 1024 * 1024;
+
+pub(crate) const BUILT_IN_SKILLS: &[&str] = &["veecut", "veecut-arcade", "veecut-editorial"];
+
+fn built_in(name: &str) -> bool {
+    BUILT_IN_SKILLS
+        .iter()
+        .any(|builtin| name.eq_ignore_ascii_case(builtin))
+}
 
 /// The synced catalog, saved as `~/.veecut/catalog.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -93,6 +105,13 @@ pub struct LockedRepo {
     pub license: Option<String>,
     pub security: String,
     pub installed_at: DateTime<Utc>,
+    /// None for GitHub, otherwise `path:/absolute/path` or `url:https://...`.
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 impl Lock {
@@ -104,7 +123,7 @@ impl Lock {
                 for repo in &lock.repos {
                     for name in &repo.skills {
                         let mut components = Path::new(name).components();
-                        if name.eq_ignore_ascii_case("veecut")
+                        if built_in(name)
                             || safe_name(name).as_deref() != Some(name.as_str())
                             || !matches!(
                                 (components.next(), components.next()),
@@ -112,7 +131,7 @@ impl Lock {
                             )
                         {
                             bail!(
-                                "{} has unsafe skill name {name:?} in {}: expected one safe directory name other than built-in veecut",
+                                "{} has unsafe skill name {name:?} in {}: expected one safe directory name other than a built-in skill",
                                 path.display(),
                                 repo.repo
                             );
@@ -147,6 +166,8 @@ pub struct InstallReport {
     pub license: Option<String>,
     /// Files left out because they are over 25 MB.
     pub skipped: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -268,7 +289,7 @@ pub fn search<'a>(catalog: &'a Catalog, query: &str, category: Option<&str>) -> 
 
 /// Best catalog entries for a kind of video: SAFE, tested first, then stars. Data-driven, so it
 /// follows the catalog as it updates.
-pub fn recommended<'a>(catalog: &'a Catalog, kind: VideoKind, n: usize) -> Vec<&'a Entry> {
+pub fn recommended(catalog: &Catalog, kind: VideoKind, n: usize) -> Vec<&Entry> {
     let wanted: &[&str] = match kind {
         VideoKind::TalkingHeadShort
         | VideoKind::TalkingHeadLong
@@ -342,7 +363,14 @@ fn update_where(ws: &Workspace, repo: Option<&str>, safe_only: bool) -> Result<V
     let lock = installed(ws)?;
     let wanted: Vec<LockedRepo> = match repo {
         Some(r) => {
-            let r = normalize_repo(r)?;
+            let r = match lock.repos.iter().find(|entry| {
+                entry.repo.eq_ignore_ascii_case(r)
+                    || entry.source.as_deref() == Some(r)
+                    || entry.skills.iter().any(|name| name == r)
+            }) {
+                Some(entry) => entry.repo.clone(),
+                None => normalize_repo(r)?,
+            };
             vec![
                 lock.get(&r)
                     .cloned()
@@ -373,6 +401,16 @@ fn update_where(ws: &Workspace, repo: Option<&str>, safe_only: bool) -> Result<V
             error: None,
         };
         let result = (|| -> Result<()> {
+            if let Some(source) = &locked.source {
+                let source = source
+                    .strip_prefix("path:")
+                    .or_else(|| source.strip_prefix("url:"))
+                    .ok_or_else(|| anyhow!("unknown skill source {source:?}"))?;
+                let added = add(ws, source)?;
+                report.to = added.commit;
+                report.updated = report.to != locked.commit;
+                return Ok(());
+            }
             let info = repo_info(&locked.repo)?;
             report.to = head_commit(&locked.repo, &info.default_branch)?;
             if report.to != locked.commit {
@@ -398,20 +436,36 @@ fn update_where(ws: &Workspace, repo: Option<&str>, safe_only: bool) -> Result<V
     Ok(reports)
 }
 
-/// Deletes the repo's skill folders and its lock entry.
-pub fn remove(ws: &Workspace, repo: &str) -> Result<()> {
-    let repo = normalize_repo(repo)?;
+/// Removes a catalog repo, an added source, or one installed skill by name.
+pub fn remove(ws: &Workspace, target: &str) -> Result<()> {
     let path = ws.root.join(LOCK_FILE);
     let mut lock = Lock::load(&path)?;
-    let Some(i) = lock
-        .repos
-        .iter()
-        .position(|r| r.repo.eq_ignore_ascii_case(&repo))
-    else {
-        bail!("{repo} is not installed in this workspace");
-    };
-    let locked = lock.repos.remove(i);
-    remove_skill_dirs(ws, &locked.skills)?;
+    add::validate_roots(ws)?;
+    let normalized = normalize_repo(target).ok();
+    if let Some(i) = lock.repos.iter().position(|r| {
+        r.repo.eq_ignore_ascii_case(target)
+            || r.source.as_deref() == Some(target)
+            || normalized
+                .as_ref()
+                .is_some_and(|name| r.repo.eq_ignore_ascii_case(name))
+    }) {
+        let locked = lock.repos.remove(i);
+        remove_skill_dirs(ws, &locked.skills)?;
+    } else {
+        add::validate_name(target)?;
+        if !ws
+            .skill_dirs()
+            .iter()
+            .any(|base| base.join(target).join("SKILL.md").is_file())
+        {
+            bail!("{target} is not installed in this workspace");
+        }
+        remove_skill_dirs(ws, &[target.to_string()])?;
+        for entry in &mut lock.repos {
+            entry.skills.retain(|name| name != target);
+        }
+        lock.repos.retain(|entry| !entry.skills.is_empty());
+    }
     lock.save(&path)
 }
 
@@ -453,7 +507,9 @@ fn install_at(
     // Pass 1: find every folder holding a SKILL.md.
     archive.rewind()?;
     let mut skills: Vec<(PathBuf, String)> = Vec::new();
+    let mut source_files = Vec::new();
     for_each_file(&archive, |rel, size, reader| {
+        source_files.push(rel.to_path_buf());
         if rel.file_name().is_some_and(|n| n == "SKILL.md") && size <= MAX_FILE {
             let mut text = String::new();
             reader.read_to_string(&mut text).ok();
@@ -474,7 +530,10 @@ fn install_at(
         .get(repo)
         .map(|r| r.skills.iter().cloned().collect())
         .unwrap_or_default();
-    let mut taken: HashSet<String> = HashSet::from(["veecut".to_string()]);
+    let mut taken: HashSet<String> = BUILT_IN_SKILLS
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
     for base in ws.skill_dirs() {
         if let Ok(entries) = fs::read_dir(&base) {
             taken.extend(entries.filter_map(|e| e.ok()?.file_name().into_string().ok()));
@@ -500,7 +559,7 @@ fn install_at(
             .or_else(|| safe_name(repo_name))
             .unwrap_or_else(|| "skill".into());
         let mut name = base.clone();
-        if name.eq_ignore_ascii_case("veecut") || taken.contains(&name) {
+        if built_in(&name) || taken.contains(&name) {
             name = format!("{}-{base}", safe_name(owner).unwrap_or_default());
         }
         let mut n = 2;
@@ -541,6 +600,9 @@ fn install_at(
         }
         Ok(())
     })?;
+    let mut notes = add::notes_for_files(source_files);
+    add::license_note(&mut notes, license.as_deref());
+    add::validate_roots(ws)?;
     remove_skill_dirs(ws, &mine.into_iter().collect::<Vec<_>>())?;
     for base in ws.skill_dirs() {
         for name in &names {
@@ -556,6 +618,9 @@ fn install_at(
         license: license.clone(),
         security,
         installed_at: Utc::now(),
+        source: None,
+        sha256: None,
+        notes: notes.clone(),
     });
     lock.save(&lock_path)?;
     Ok(InstallReport {
@@ -564,6 +629,7 @@ fn install_at(
         skills: names,
         license,
         skipped,
+        notes,
     })
 }
 
@@ -586,6 +652,9 @@ fn for_each_file(
             .path()
             .context("reading a path in the archive")?
             .into_owned();
+        if !add::safe_rel(&path)? {
+            continue;
+        }
         // The first component is the `<repo>-<commit>/` folder GitHub wraps everything in.
         let rel: PathBuf = path.components().skip(1).collect();
         let safe = rel
@@ -601,10 +670,21 @@ fn for_each_file(
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    if fs::symlink_metadata(from)?.file_type().is_symlink()
+        || fs::symlink_metadata(to).is_ok_and(|m| m.file_type().is_symlink())
+    {
+        bail!("skill folders must not be links");
+    }
     fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
     for entry in fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
         let entry = entry?;
+        if entry.file_type()?.is_symlink() {
+            bail!("skill files must not be links: {}", entry.path().display());
+        }
         let target = to.join(entry.file_name());
+        if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+            bail!("skill files must not be links: {}", target.display());
+        }
         if entry.file_type()?.is_dir() {
             copy_dir(&entry.path(), &target)?;
         } else {
@@ -617,14 +697,41 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
 
 /// `name:` from a SKILL.md's YAML frontmatter, made safe as a folder name.
 fn frontmatter_name(text: &str) -> Option<String> {
+    frontmatter_value(text, "name").and_then(|value| safe_name(&value))
+}
+
+/// Reads scalar metadata without interpreting the rest of the community skill's YAML.
+/// Folded and literal descriptions are both joined for the one-line installed skill summary.
+fn frontmatter_value(text: &str, key: &str) -> Option<String> {
     let mut lines = text.trim_start_matches('\u{feff}').lines();
     if lines.next()?.trim() != "---" {
         return None;
     }
-    lines
-        .take_while(|l| l.trim() != "---")
-        .find_map(|l| l.strip_prefix("name:"))
-        .and_then(|v| safe_name(v.trim().trim_matches(['"', '\''])))
+    let prefix = format!("{key}:");
+    while let Some(line) = lines.next() {
+        if line.trim() == "---" {
+            break;
+        }
+        let Some(value) = line.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        let value = value.trim();
+        if value.starts_with(['>', '|']) {
+            return Some(
+                lines
+                    .take_while(|line| line.is_empty() || line.starts_with([' ', '\t']))
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        return Some(
+            serde_json::from_str::<String>(value)
+                .unwrap_or_else(|_| value.trim_matches(['\'', '"']).to_string()),
+        );
+    }
+    None
 }
 
 /// Letters, digits, `.`, `_` and `-` only, without leading dots or dashes.
@@ -683,13 +790,12 @@ static HTTP: LazyLock<ureq::Agent> = LazyLock::new(|| {
 /// GET with readable errors. Sends `GITHUB_TOKEN` to api.github.com when it is set.
 fn fetch(url: &str, accept: &str) -> Result<ureq::http::Response<ureq::Body>> {
     let mut req = HTTP.get(url).header("Accept", accept);
-    if url.starts_with("https://api.github.com/") {
-        if let Some(token) = std::env::var("GITHUB_TOKEN")
+    if url.starts_with("https://api.github.com/")
+        && let Some(token) = std::env::var("GITHUB_TOKEN")
             .ok()
             .filter(|t| !t.trim().is_empty())
-        {
-            req = req.header("Authorization", format!("Bearer {}", token.trim()));
-        }
+    {
+        req = req.header("Authorization", format!("Bearer {}", token.trim()));
     }
     req.call().map_err(|e| match e {
         ureq::Error::StatusCode(403 | 429) => anyhow!(
@@ -1038,6 +1144,9 @@ mod tests {
                 license: Some("MIT".into()),
                 security: "SAFE".into(),
                 installed_at: Utc::now(),
+                source: None,
+                sha256: None,
+                notes: Vec::new(),
             }],
         };
         lock.save(&path).unwrap();
@@ -1069,6 +1178,9 @@ mod tests {
                 license: None,
                 security: "SAFE".into(),
                 installed_at: Utc::now(),
+                source: None,
+                sha256: None,
+                notes: Vec::new(),
             }],
         };
         let lock_path = ws.root.join(LOCK_FILE);

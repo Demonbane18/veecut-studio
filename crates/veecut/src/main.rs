@@ -88,7 +88,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<StyleCommand>,
     },
-    /// The skills catalog from awesome-claude-video-skills: sync, search, install, update.
+    /// Skills: the catalog, plus add your own, check, and apply a look to a project.
     Skills {
         #[command(subcommand)]
         command: Option<SkillsCommand>,

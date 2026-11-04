@@ -385,6 +385,7 @@ fn grade_for(words: &[&str], shot: usize, is_image: bool) -> Treatment {
             0.25
         },
         recolor: None,
+        pixelate: 0.0,
     }
 }
 
@@ -1167,7 +1168,7 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
             },
         )?;
     }
-    add_captions(job, &mut p, &transcript)?;
+    add_captions(job, &dir, &mut p, &transcript)?;
 
     // The bed: Editor V1 keeps it about 5.5 LU under the voice from frame 0, cuts it out under the
     // punchline and slams it back on the next line, and pulls it down under black cards.
@@ -1179,15 +1180,14 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
         .map(|d| (d.start, d.end))
         .collect();
     let bed = music_bed(job, &dir, &mut p, voice_lufs, punch.as_ref(), &pulls)?;
-    if bed.is_some() {
-        if let Some((_, cut_end, _)) = &punch {
-            if *cut_end < total - 0.3 {
-                cues.push(Cue {
-                    at: (cut_end - 0.06).max(0.0),
-                    sound: Sound::Impact,
-                });
-            }
-        }
+    if bed.is_some()
+        && let Some((_, cut_end, _)) = &punch
+        && *cut_end < total - 0.3
+    {
+        cues.push(Cue {
+            at: (cut_end - 0.06).max(0.0),
+            sound: Sound::Impact,
+        });
     }
 
     // A click on every change, at Editor V1's measured levels, unless the style is voice only.
@@ -1344,6 +1344,7 @@ fn transition_name(kind: TransitionKind) -> &'static str {
         TransitionKind::Tiles => "tile reveal",
         TransitionKind::Focus => "rack focus",
         TransitionKind::Whip => "whip",
+        TransitionKind::Pixelate => "pixelate",
     }
 }
 
@@ -1603,8 +1604,11 @@ fn mega_words(
                 .text
                 .trim_matches(|c: char| !c.is_alphanumeric())
                 .to_uppercase();
-            (!text.is_empty() && face_through(p, w.timeline_start, b.end))
-                .then(|| (w.timeline_start, b.end, text))
+            (!text.is_empty() && face_through(p, w.timeline_start, b.end)).then_some((
+                w.timeline_start,
+                b.end,
+                text,
+            ))
         })
         .take(budget)
         .collect();

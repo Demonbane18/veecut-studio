@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use eframe::egui::{self, Color32, Key};
 use serde_json::json;
 use veecut_engine::{
-    media,
+    look, media,
     ops::{self, Op},
     project::*,
     recipes::{self, EditReport, EditRequest, ExplainerMotion},
@@ -188,6 +188,7 @@ pub(crate) struct Studio {
     new_broll: Vec<PathBuf>,
     new_music: Option<PathBuf>,
     new_motion: Option<ExplainerMotion>,
+    new_skill: Option<String>,
     footage: footage_panel::FootagePanel,
     doc_work: Option<documentary::Work>,
     cutout: documentary::Cutout,
@@ -256,6 +257,7 @@ impl Studio {
             new_broll: Vec::new(),
             new_music: None,
             new_motion: None,
+            new_skill: None,
             footage: footage_panel::FootagePanel::default(),
             doc_work: None,
             cutout: documentary::Cutout::default(),
@@ -380,6 +382,36 @@ impl Studio {
             }
             Ok(false) => {}
             Err(error) => self.notice(format!("{error:#}")),
+        }
+    }
+
+    /// Applies an installed skill's look as ops, so it is one undo step like any other edit.
+    fn apply_look(&mut self, name: &str, skill_dir: &Path) {
+        let Some(doc) = &self.document else {
+            return;
+        };
+        match look_ops(&self.workspace, &doc.project, doc.dir(), skill_dir) {
+            Ok(ops) => {
+                let count = ops.len();
+                self.apply(ops);
+                self.notice(format!(
+                    "Applied look {name} ({count} changes). Undo takes it back."
+                ));
+            }
+            Err(error) => self.notice(format!("{error:#}")),
+        }
+    }
+
+    /// A look's first suited kind becomes the default kind of a new edit.
+    fn suit_kind(&mut self) {
+        let kind = self
+            .new_skill
+            .as_deref()
+            .and_then(|name| self.services.look_skills().find(|skill| skill.name == name))
+            .and_then(|skill| look::load(&skill.dir).ok())
+            .and_then(|pack| pack.kinds.first().copied());
+        if let Some(kind) = kind {
+            self.new_kind = kind;
         }
     }
 
@@ -732,6 +764,9 @@ impl Studio {
                         open = rfd::FileDialog::new().add_filter("VeeCut project", &["json"]).pick_file();
                     }
                     if let Some(path) = open { if let Err(error) = self.open_project(path) { self.notice(format!("{error:#}")); } }
+                    egui::CollapsingHeader::new("Skills").id_salt("welcome_skills").show(ui, |ui| {
+                        self.services.skills_ui(ui, &self.workspace, None);
+                    });
                     let ui = &mut columns[1];
                     ui.heading("New edit");
                     ui.label("Project name"); ui.text_edit_singleline(&mut self.new_name);
@@ -739,6 +774,13 @@ impl Studio {
                         for kind in VideoKind::ALL { ui.selectable_value(&mut self.new_kind, kind, kind.label()); }
                     });
                     canvas_combo(ui, "new_canvas", &mut self.new_canvas);
+                    ui.label("Look (optional)");
+                    let chosen = self.new_skill.clone();
+                    egui::ComboBox::from_id_salt("new_skill").selected_text(self.new_skill.as_deref().unwrap_or("No look")).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.new_skill, None, "No look");
+                        for skill in self.services.look_skills() { ui.selectable_value(&mut self.new_skill, Some(skill.name.clone()), &skill.name); }
+                    });
+                    if self.new_skill != chosen { self.suit_kind(); }
                     let source_label = if self.new_kind == VideoKind::Explainer { "Choose narration (audio or video)..." } else { "Choose source file..." };
                     if ui.button(source_label).clicked() { self.new_source = rfd::FileDialog::new().add_filter("Video or audio", &["mp4", "mov", "mkv", "webm", "m4v", "mp3", "wav", "m4a", "aiff", "flac"]).pick_file(); }
                     if let Some(path) = &self.new_source { ui.label(path.display().to_string()); }
@@ -846,6 +888,14 @@ impl Studio {
             .workspace
             .add_asset(&mut project, &dir, source, AssetRole::Source)?;
         ops::apply(&mut project, &add_clip(asset, 0.0))?;
+        if let Some(name) = &self.new_skill {
+            let skill = self
+                .services
+                .look_skills()
+                .find(|skill| &skill.name == name)
+                .with_context(|| format!("skill {name} is no longer installed"))?;
+            look::apply(&self.workspace, &mut project, &dir, &skill.dir)?;
+        }
         self.workspace.save_project(&dir, &project)?;
         self.open_project(dir)
     }
@@ -858,6 +908,7 @@ impl Studio {
         let mut request = EditRequest::new(self.new_kind);
         request.sources = vec![source];
         request.canvas = Some(self.new_canvas.clone());
+        request.skill = self.new_skill.clone();
         request.name = Some(self.new_name.trim().to_string());
         if self.new_kind == VideoKind::Documentary {
             request.find = self.new_find;
@@ -950,9 +1001,11 @@ impl Studio {
                             }
                         }
                         Tab::Skills => {
-                            if let Some(doc) = &self.document {
-                                self.services
-                                    .skills_ui(ui, &self.workspace, doc.project.kind);
+                            let project = self.document.as_ref().map(|doc| &doc.project);
+                            if let Some((name, dir)) =
+                                self.services.skills_ui(ui, &self.workspace, project)
+                            {
+                                self.apply_look(&name, &dir);
                             }
                         }
                         Tab::Agent => {
@@ -1717,7 +1770,7 @@ fn canvas_combo(ui: &mut egui::Ui, id: &str, canvas: &mut Canvas) -> bool {
         });
     changed
 }
-fn text_presets() -> [(TextPreset, &'static str); 16] {
+fn text_presets() -> [(TextPreset, &'static str); 18] {
     [
         (TextPreset::Hook, "Hook"),
         (TextPreset::Title, "Title"),
@@ -1735,6 +1788,8 @@ fn text_presets() -> [(TextPreset, &'static str); 16] {
         (TextPreset::Shock, "Shock"),
         (TextPreset::BlackCard, "Black card"),
         (TextPreset::Mega, "Mega"),
+        (TextPreset::Marker, "Marker"),
+        (TextPreset::Meter, "Meter"),
     ]
 }
 fn format_timecode(seconds: f64, fps: f64) -> String {
@@ -1784,6 +1839,16 @@ fn reveal(path: &Path) -> Result<()> {
         open::that(path.parent().unwrap_or(Path::new(".")))?;
     }
     Ok(())
+}
+
+fn look_ops(
+    ws: &Workspace,
+    project: &Project,
+    project_dir: &Path,
+    skill_dir: &Path,
+) -> Result<Vec<Op>> {
+    let pack = look::load(skill_dir)?;
+    look::ops_for(ws, project, project_dir, skill_dir, &pack)
 }
 
 #[cfg(test)]
@@ -1867,5 +1932,40 @@ mod tests {
         );
         assert!(doc.undo(true));
         assert!(doc.project.markers[0].done);
+    }
+
+    #[test]
+    fn applying_a_look_is_one_undo_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            root: tmp.path().into(),
+        };
+        let (dir, mut project) = ws
+            .create_project("look", VideoKind::TalkingHeadShort, Canvas::vertical())
+            .unwrap();
+        project.captions.size = 0.07;
+        let skill = veecut_engine::skills::new_skill(
+            &ws,
+            "mine",
+            "test look",
+            Some(look::capture(&project)),
+        )
+        .unwrap();
+        project.captions.size = 0.03;
+        let before = project.clone();
+        let mut doc = Document {
+            project,
+            path: dir.join(PROJECT_FILE),
+            modified: None,
+            dirty: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        };
+        let ops = look_ops(&ws, &doc.project, &dir, &skill).unwrap();
+        assert!(doc.apply(&ops).unwrap());
+        assert!((doc.project.captions.size - 0.07).abs() < 1e-6);
+        assert_eq!(doc.undo.len(), 1);
+        assert!(doc.undo(false));
+        assert_eq!(doc.project, before);
     }
 }

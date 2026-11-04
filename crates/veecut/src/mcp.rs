@@ -170,6 +170,28 @@ fn project_call<T: DeserializeOwned>(
     run(&Ctx::open(workspace)?, args)
 }
 
+/// Rooted MCP authority: a file a tool reads as text must resolve, symlinks included, inside the
+/// workspace. The command line keeps its explicit-path freedom.
+fn mcp_read_path(ctx: &Ctx, path: &Path) -> Result<PathBuf> {
+    let file = resolved(path)?;
+    if !file.starts_with(resolved(&ctx.ws.root)?) {
+        bail!(
+            "{} is outside this workspace; MCP tools only use files inside it",
+            path.display()
+        );
+    }
+    Ok(file)
+}
+
+/// A file a tool writes: inside the workspace and never in inbox/, where originals stay unchanged.
+fn mcp_write_path(ctx: &Ctx, path: &Path) -> Result<PathBuf> {
+    let out = mcp_read_path(ctx, path)?;
+    if out.starts_with(resolved(&ctx.ws.inbox())?) {
+        bail!("MCP tools never write into inbox/; omit out to use the default place");
+    }
+    Ok(out)
+}
+
 fn validate_args(name: &str, args: &Value) -> Result<()> {
     let tool = tools()
         .iter()
@@ -223,7 +245,18 @@ fn call(workspace: &Option<PathBuf>, name: &str, args: &Value) -> Result<Out> {
     match name {
         "status" => project_call(ws, args, Ctx::status),
         "add" => project_call(ws, args, Ctx::add),
-        "edit" => project_call(ws, args, |ctx, args| ctx.edit(args, &mut progress)),
+        "edit" => project_call(ws, args, |ctx, mut args: EditArgs| {
+            let copy = args
+                .copy
+                .as_deref()
+                .filter(|copy| Path::new(copy).is_file())
+                .map(|copy| mcp_read_path(ctx, Path::new(copy)))
+                .transpose()?;
+            if let Some(file) = copy {
+                args.copy = Some(file.display().to_string());
+            }
+            ctx.edit(args, &mut progress)
+        }),
         "cutout" => project_call(ws, args, |ctx, args| ctx.cutout(args, &mut progress)),
         "ops" => {
             let mut args = args.clone();
@@ -232,12 +265,27 @@ fn call(workspace: &Option<PathBuf>, name: &str, args: &Value) -> Result<Out> {
                     *ops = Value::String(ops.to_string());
                 }
             }
-            project_call(ws, &args, Ctx::ops)
+            // JSON only: never a file or standard input, which carries this protocol.
+            project_call(ws, &args, |ctx, args: OpsArgs| {
+                let ops = args.ops.context(
+                    "give the ops as JSON, for example {\"ops\":{\"op\":\"cut_range\",\"from\":2.0,\"to\":3.5}}; call schema for every op",
+                )?;
+                ctx.apply_ops(&ops, &args.project)
+            })
         }
         "schema" => schema(),
-        "render" => project_call(ws, args, |ctx, args| ctx.render(args, &mut progress)),
-        "frame" => project_call(ws, args, Ctx::frame),
-        "frames" => project_call(ws, args, Ctx::frames),
+        "render" => project_call(ws, args, |ctx, mut args: RenderArgs| {
+            args.out = args.out.map(|o| mcp_write_path(ctx, &o)).transpose()?;
+            ctx.render(args, &mut progress)
+        }),
+        "frame" => project_call(ws, args, |ctx, mut args: FrameArgs| {
+            args.out = args.out.map(|o| mcp_write_path(ctx, &o)).transpose()?;
+            ctx.frame(args)
+        }),
+        "frames" => project_call(ws, args, |ctx, mut args: FramesArgs| {
+            args.out = args.out.map(|o| mcp_write_path(ctx, &o)).transpose()?;
+            ctx.frames(args)
+        }),
         "transcript" => project_call(ws, args, Ctx::transcript),
         "transcript_search" => project_call(ws, args, Ctx::transcript_search),
         "cut_phrase" => project_call(ws, args, Ctx::cut_phrase),
@@ -388,6 +436,7 @@ pub fn serve(workspace: Option<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use veecut_engine::project::Project;
 
     #[test]
     fn mcp_edit_motion_uses_shared_optional_enum_and_rejects_wrong_kind() {
@@ -606,5 +655,158 @@ mod tests {
         assert_eq!(schema["isError"], false);
         let bad = tool_result(call(&None, "nope", &Value::Null));
         assert_eq!(bad["isError"], true);
+    }
+
+    #[test]
+    fn mcp_ops_take_json_only_and_errors_never_echo_input() {
+        let (_temp, ctx, dir) = crate::commands::tests::speech_project();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "AUDIT_SECRET=synthetic-marker\n").unwrap();
+        let before = std::fs::read(dir.join("project.json")).unwrap();
+        let workspace = Some(ctx.ws.root.clone());
+        for (arguments, expected) in [
+            (
+                json!({"project": "my-edit", "file": secret}),
+                "unknown argument",
+            ),
+            (
+                json!({"project": "my-edit", "ops": "AUDIT_SECRET=synthetic-marker"}),
+                "line 1",
+            ),
+            (
+                json!({"project": "my-edit", "ops": "{\"op\":\"cut_range\",\"from\":1,\"to\":2}\nAUDIT_SECRET=synthetic-marker"}),
+                "line 2",
+            ),
+        ] {
+            let result = handle(
+                &workspace,
+                "tools/call",
+                &json!({"name": "ops", "arguments": arguments}),
+            )
+            .unwrap();
+            assert_eq!(result["isError"], true, "{result}");
+            let text = result.to_string();
+            assert!(!text.contains("synthetic-marker"), "{text}");
+            assert!(text.contains(expected), "{text}");
+        }
+        assert_eq!(before, std::fs::read(dir.join("project.json")).unwrap());
+    }
+
+    #[test]
+    fn rooted_mcp_outputs_stay_inside_the_workspace() {
+        let (_temp, ctx, dir) = crate::commands::tests::speech_project();
+        for folder in ["inbox", "outbox", "projects/my-edit/.cache"] {
+            std::fs::create_dir_all(ctx.ws.root.join(folder)).unwrap();
+        }
+        let other = tempfile::tempdir().unwrap();
+        let victim = other.path().join("project.json");
+        std::fs::write(&victim, b"{}").unwrap();
+        let workspace = Some(ctx.ws.root.clone());
+        let mut outs = vec![victim.clone()];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(other.path(), dir.join(".cache/escape")).unwrap();
+            outs.push(dir.join(".cache/escape/project.json"));
+        }
+        for out in outs {
+            for (name, arguments) in [
+                (
+                    "frame",
+                    json!({"project": "my-edit", "at": 20.0, "out": out}),
+                ),
+                ("render", json!({"project": "my-edit", "out": out})),
+            ] {
+                let result = handle(
+                    &workspace,
+                    "tools/call",
+                    &json!({"name": name, "arguments": arguments}),
+                )
+                .unwrap();
+                assert_eq!(result["isError"], true, "{result}");
+                let text = result["content"][0]["text"].as_str().unwrap();
+                assert!(text.contains("outside this workspace"), "{name}: {text}");
+            }
+        }
+        assert_eq!(std::fs::read(&victim).unwrap(), b"{}");
+        let inbox = ctx.ws.inbox().join("frame.png");
+        let refused = handle(
+            &workspace,
+            "tools/call",
+            &json!({
+                "name": "frame", "arguments": {"project": "my-edit", "at": 20.0, "out": inbox}
+            }),
+        )
+        .unwrap();
+        assert_eq!(refused["isError"], true, "{refused}");
+        assert!(!inbox.exists());
+        let inside = dir.join(".cache/check.png");
+        let saved = handle(
+            &workspace,
+            "tools/call",
+            &json!({
+                "name": "frame", "arguments": {"project": "my-edit", "at": 20.0, "out": inside}
+            }),
+        )
+        .unwrap();
+        assert_eq!(saved["isError"], false, "{saved}");
+        assert!(inside.is_file());
+    }
+
+    #[test]
+    fn ops_cannot_approve_unflag_or_replace_sources_from_cli_or_mcp() {
+        let (_temp, ctx, dir) = crate::commands::tests::speech_project();
+        let file = dir.join("project.json");
+        let mut project = Project::load(&file).unwrap();
+        project.sources.insert(
+            "speech".into(),
+            serde_json::from_value(json!({
+                "url": "https://example.org/speech", "license": "CC BY-NC 2.0",
+                "flag": true, "flag_reason": "non-commercial"
+            }))
+            .unwrap(),
+        );
+        project.save(&file).unwrap();
+        let mut approved = serde_json::to_value(&project).unwrap();
+        approved["sources"]["speech"]["approved"] = json!(true);
+        let before = std::fs::read(&file).unwrap();
+        let workspace = Some(ctx.ws.root.clone());
+        for op in [
+            json!({"op": "set", "path": "/sources/speech/approved", "value": true}),
+            json!({"op": "set", "path": "/sources/speech/flag", "value": false}),
+            json!([{"op": "set", "path": "/sources/speech/flag_reason", "value": "fine"}]),
+            json!({"op": "set", "path": "/sources/speech", "value": {"url": "https://example.org", "license": "CC0"}}),
+            json!({"op": "set", "path": "/sources", "value": {}}),
+            json!({"op": "set", "path": "", "value": approved}),
+            json!({"op": "set", "path": "/", "value": approved}),
+        ] {
+            let cli = ctx
+                .ops(OpsArgs {
+                    ops: Some(op.to_string()),
+                    ..Default::default()
+                })
+                .err()
+                .unwrap();
+            assert_eq!(format!("{cli:#}"), APPROVAL_IS_HUMAN, "{op}");
+            let mcp = handle(
+                &workspace,
+                "tools/call",
+                &json!({"name": "ops", "arguments": {"project": "my-edit", "ops": op}}),
+            )
+            .unwrap();
+            assert_eq!(mcp["isError"], true, "{mcp}");
+            assert_eq!(mcp["content"][0]["text"], APPROVAL_IS_HUMAN, "{mcp}");
+        }
+        assert_eq!(before, std::fs::read(&file).unwrap());
+        let credit = json!({"op": "set", "path": "/sources/speech/credit", "value": "Clip by A"});
+        call(
+            &workspace,
+            "ops",
+            &json!({"project": "my-edit", "ops": credit}),
+        )
+        .unwrap();
+        let saved = Project::load(&file).unwrap();
+        assert_eq!(saved.sources["speech"].credit.as_deref(), Some("Clip by A"));
+        assert!(saved.sources["speech"].blocks_final());
     }
 }

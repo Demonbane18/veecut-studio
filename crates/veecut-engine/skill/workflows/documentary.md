@@ -94,7 +94,7 @@ More ops in `reference/editor-api.md`, sound in `reference/sound.md`, footage an
 - Every found file keeps its own licence, recorded in the project. `veecut sources` shows them.
 - Files whose rights are unclear are flagged: no licence, non-commercial, no-derivatives, fair use, GFDL only, or a credit naming someone other than NASA. `--find` never picks a flagged file, but `veecut fetch` can download one if the user picks it.
 - A final render refuses flagged files nobody approved. Drafts still render.
-- You never decide that a flagged source is fine. Show the user the file, its page and the reason, and let them check it. Only the user approves: they run `veecut sources --approve ASSET`, press Approve in Studio's Sources tab, or tell you they checked that file and want it approved. Otherwise replace the file.
+- You never decide that a flagged source is fine. Show the user the file, its page and the reason, and let them check it. Only the user approves: ask them to press Approve in Studio's Sources tab or run `veecut sources --approve ASSET` themselves in a terminal. You cannot approve for them, even when they ask. Otherwise replace the file.
 - If a file looks like a company's film, a news photo or someone's own clip, flag it even when its licence looks fine: `veecut sources --flag asset-4 --reason "looks like a news photo"`.
 - Never upload or publish anything.
 

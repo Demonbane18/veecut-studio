@@ -75,8 +75,10 @@ pub struct ExportReport {
     pub seconds_taken: f64,
 }
 
-/// Renders the project to an MP4 (H.264 + AAC). Returning false from `progress` cancels
-/// and deletes the partial file.
+/// Renders the project to an MP4 (H.264 + AAC). Refuses an `out` that is one of the project's
+/// own asset files. Encodes to a temp file beside `out` and renames it over `out` only after
+/// success, so a failed or cancelled export (return false from `progress`) removes just the
+/// temp file and leaves any earlier `out` untouched.
 pub fn export(
     project: &Project,
     project_dir: &Path,
@@ -85,6 +87,7 @@ pub fn export(
     progress: &mut dyn FnMut(&Progress) -> bool,
 ) -> Result<ExportReport> {
     let started = Instant::now();
+    refuse_asset_overwrite(project, project_dir, out)?;
     let (start, end) = timeline_range(project, opts.range)?;
     let fps = project.canvas.fps;
     if !(1.0..=120.0).contains(&fps) {
@@ -130,12 +133,9 @@ pub fn export(
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
     }
-    let mut partial = PartialFile {
-        path: out.to_path_buf(),
-        keep: false,
-    };
+    let tmp = temp_sibling(out)?;
     let mut enc = spawn_encoder(
-        out,
+        &tmp,
         width,
         height,
         fps,
@@ -146,18 +146,18 @@ pub fn export(
     let mut last_tick = Instant::now();
     for i in 0..frames {
         let Some(item) = stream.next() else {
-            enc.fail(out)?;
+            enc.fail(&tmp)?;
             bail!("renderer ended at frame {i} of {frames}");
         };
         let (_t, pixmap) = match item {
             Ok(v) => v,
             Err(e) => {
-                enc.fail(out)?;
+                enc.fail(&tmp)?;
                 return Err(e);
             }
         };
         if let Err(e) = enc.write_frame(pixmap.data()) {
-            let detail = enc.fail(out).unwrap_or_default();
+            let detail = enc.fail(&tmp).unwrap_or_default();
             bail!("encoder stopped at frame {i}: {e}{detail}");
         }
         if last_tick.elapsed() >= Duration::from_millis(500) || i + 1 == frames {
@@ -167,7 +167,7 @@ pub fn export(
                 done: (i + 1) as f64,
                 total: frames as f64,
             }) {
-                enc.fail(out)?;
+                enc.fail(&tmp)?;
                 bail!("export cancelled");
             }
         }
@@ -175,10 +175,10 @@ pub fn export(
     enc.finish()
         .with_context(|| format!("encoding {}", out.display()))?;
     if let Some(wav) = &wav {
-        audio::fit_true_peak(out, wav.path(), project.audio.true_peak_db)
+        audio::fit_true_peak(&tmp, wav.path(), project.audio.true_peak_db)
             .context("bringing the exported audio under its true-peak ceiling")?;
     }
-    partial.keep = true;
+    publish(tmp, out)?;
     Ok(ExportReport {
         path: out.to_path_buf(),
         duration,
@@ -317,17 +317,80 @@ fn timeline_range(project: &Project, range: Option<(f64, f64)>) -> Result<(f64, 
     Ok((a.max(0.0), b.min(dur)))
 }
 
-struct PartialFile {
-    path: PathBuf,
-    keep: bool,
-}
-
-impl Drop for PartialFile {
-    fn drop(&mut self) {
-        if !self.keep {
-            let _ = std::fs::remove_file(&self.path);
+/// Errors when `out` is, by path or by file identity (hard link, symlink), one of the
+/// project's asset files.
+fn refuse_asset_overwrite(project: &Project, project_dir: &Path, out: &Path) -> Result<()> {
+    let Ok(out_canon) = out.canonicalize() else {
+        return Ok(()); // does not exist yet, so it cannot be an existing asset
+    };
+    #[cfg(unix)]
+    let out_id = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&out_canon)
+            .map(|m| (m.dev(), m.ino()))
+            .ok()
+    };
+    for asset in &project.assets {
+        let path = project.asset_path(project_dir, asset);
+        let Ok(canon) = path.canonicalize() else {
+            continue;
+        };
+        #[cfg(unix)]
+        let same_inode = {
+            use std::os::unix::fs::MetadataExt;
+            out_id.is_some() && out_id == std::fs::metadata(&canon).map(|m| (m.dev(), m.ino())).ok()
+        };
+        #[cfg(not(unix))]
+        let same_inode = false;
+        if canon == out_canon || same_inode {
+            bail!(
+                "refusing to render over {}: it is the project's asset {:?}. Choose another output path.",
+                out.display(),
+                asset.id
+            );
         }
     }
+    Ok(())
+}
+
+/// A fresh empty file next to `out`, removed on drop unless [`publish`]ed.
+fn temp_sibling(out: &Path) -> Result<tempfile::TempPath> {
+    let dir = match out.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let suffix = format!(
+        ".{}",
+        out.extension().and_then(|e| e.to_str()).unwrap_or("mp4")
+    );
+    Ok(tempfile::Builder::new()
+        .prefix(".veecut-export-")
+        .suffix(&suffix)
+        .tempfile_in(dir)
+        .with_context(|| format!("creating a temp file beside {}", out.display()))?
+        .into_temp_path())
+}
+
+/// Flushes `tmp` to disk and renames it onto `out`, keeping `out`'s permissions if it existed.
+fn publish(tmp: tempfile::TempPath, out: &Path) -> Result<()> {
+    std::fs::File::open(&tmp)
+        .and_then(|f| f.sync_all())
+        .with_context(|| format!("flushing {}", tmp.display()))?;
+    let perms = match std::fs::metadata(out) {
+        Ok(m) => Some(m.permissions()),
+        #[cfg(unix)]
+        Err(_) => {
+            use std::os::unix::fs::PermissionsExt;
+            Some(std::fs::Permissions::from_mode(0o644)) // temp files start private
+        }
+        #[cfg(not(unix))]
+        Err(_) => None,
+    };
+    if let Some(perms) = perms {
+        std::fs::set_permissions(&tmp, perms)?;
+    }
+    tmp.persist(out)
+        .map_err(|e| anyhow!("writing {}: {}", out.display(), e.error))
 }
 
 struct Encoder {
@@ -802,6 +865,92 @@ mod smoke {
         export_bed(&dir, &picture, &kicks, &dir.join("kicks.mp4"), 37.0);
         let speech_len = media::probe(&speech).unwrap().duration.min(30.0);
         export_bed(&dir, &picture, &speech, &dir.join("speech.mp4"), speech_len);
+    }
+
+    fn asset_project(dir: &Path, file: &Path) -> Project {
+        let mut project = Project::new("t", VideoKind::Clips, Canvas::new(64, 64));
+        project.canvas.fps = 10.0;
+        project.assets.push(Asset {
+            id: "src".into(),
+            path: file.strip_prefix(dir).unwrap_or(file).to_path_buf(),
+            kind: AssetKind::Video,
+            role: AssetRole::Source,
+            duration: 1.0,
+            width: 64,
+            height: 64,
+            fps: 10.0,
+            has_audio: false,
+        });
+        project.main_mut().items.push(Item {
+            id: "a".into(),
+            start: 0.0,
+            duration: 1.0,
+            body: ItemBody::Clip(Clip::new("src", 0.0)),
+        });
+        project
+    }
+
+    #[test]
+    fn export_refuses_to_overwrite_an_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset = dir.path().join("src.mp4");
+        std::fs::write(&asset, b"original footage").unwrap();
+        let project = asset_project(dir.path(), &asset);
+        let opts = RenderOptions::for_canvas(&project.canvas, Quality::Draft);
+        let mut go = |_: &Progress| true;
+        // Same path, a `..` spelling of it, and (unix) a hard link all name the asset.
+        let dotted = dir.path().join("sub/../src.mp4");
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut outs = vec![asset.clone(), dotted];
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.mp4");
+            std::fs::hard_link(&asset, &link).unwrap();
+            outs.push(link);
+        }
+        for out in outs {
+            let err = export(&project, dir.path(), &out, &opts, &mut go).unwrap_err();
+            assert!(err.to_string().contains("refusing to render over"), "{err}");
+            assert_eq!(std::fs::read(&asset).unwrap(), b"original footage");
+        }
+    }
+
+    #[test]
+    fn cancelled_export_keeps_an_existing_output() {
+        if media::ffmpeg().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.mp4");
+        let mut cmd = media::ffmpeg_command().unwrap();
+        cmd.args(["-y", "-f", "lavfi", "-i", "color=c=red:s=64x64:r=10:d=1"]);
+        cmd.args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&src);
+        media::run(&mut cmd).unwrap();
+        let project = asset_project(dir.path(), &src);
+        let mut opts = RenderOptions::for_canvas(&project.canvas, Quality::Draft);
+        opts.audio = false;
+        let out = dir.path().join("out.mp4");
+        std::fs::write(&out, b"earlier render").unwrap();
+        let mut cancel = |p: &Progress| p.stage != "video";
+        let err = export(&project, dir.path(), &out, &opts, &mut cancel).unwrap_err();
+        assert!(err.to_string().contains("cancelled"), "{err}");
+        assert_eq!(std::fs::read(&out).unwrap(), b"earlier render");
+        let stray: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".veecut-export-")
+            })
+            .collect();
+        assert!(stray.is_empty(), "temp file left behind: {stray:?}");
+        // A successful export replaces it and reports the requested path.
+        let mut go = |_: &Progress| true;
+        let report = export(&project, dir.path(), &out, &opts, &mut go).unwrap();
+        assert_eq!(report.path, out);
+        assert!(media::probe(&out).is_ok());
     }
 
     fn export_bed(dir: &Path, picture: &Path, audio: &Path, out: &Path, seconds: f64) {

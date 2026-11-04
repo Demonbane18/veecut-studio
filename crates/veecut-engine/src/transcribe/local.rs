@@ -1,5 +1,6 @@
 //! Local transcription with whisper.cpp (through whisper-rs), behind the `whisper` cargo feature.
-//! Models come from https://huggingface.co/ggerganov/whisper.cpp and live in `~/.veecut/models`.
+//! Models come from https://huggingface.co/ggerganov/whisper.cpp, pinned to one commit with a
+//! fixed size and SHA-256, and live in `~/.veecut/models`.
 
 use std::path::{Path, PathBuf};
 
@@ -9,33 +10,46 @@ use crate::config;
 use crate::transcript::Transcript;
 
 /// A ggml model VeeCut knows how to fetch.
+#[cfg_attr(not(feature = "whisper"), allow(dead_code))]
 struct Model {
     name: &'static str,
     file: &'static str,
-    megabytes: u32,
+    /// Exact size of `file` at [`REVISION`].
+    bytes: u64,
+    /// Lowercase hex SHA-256 of `file` at [`REVISION`].
+    sha256: &'static str,
 }
+
+/// ggerganov/whisper.cpp commit (2024-10-29) the models are fetched from and checked against.
+/// Update it together with every size and digest below.
+#[cfg(feature = "whisper")]
+const REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
 
 const DEFAULT_MODEL: &str = "large-v3-turbo";
 const MODELS: [Model; 4] = [
     Model {
         name: "large-v3-turbo",
         file: "ggml-large-v3-turbo-q5_0.bin",
-        megabytes: 574,
+        bytes: 574041195,
+        sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
     },
     Model {
         name: "base",
         file: "ggml-base.bin",
-        megabytes: 148,
+        bytes: 147951465,
+        sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
     },
     Model {
         name: "small",
         file: "ggml-small.bin",
-        megabytes: 488,
+        bytes: 487601967,
+        sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
     },
     Model {
         name: "medium",
         file: "ggml-medium.bin",
-        megabytes: 1533,
+        bytes: 1533763059,
+        sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
     },
 ];
 
@@ -65,7 +79,7 @@ pub(super) fn status() -> String {
         format!(
             "local: ready; the {} model (about {} MB) downloads to {} on first use",
             m.name,
-            m.megabytes,
+            m.bytes / 1_000_000,
             path.display()
         )
     }
@@ -95,7 +109,14 @@ pub(super) fn transcribe(
 ) -> Result<Transcript> {
     let m = self::model(model.unwrap_or(DEFAULT_MODEL))?;
     let path = model_path(m);
-    if !path.is_file() {
+    if !cached_model_ok(&path, m.bytes, m.sha256)? {
+        if path.exists() {
+            progress(&format!(
+                "{} does not match the pinned {} model (size or SHA-256); downloading it again",
+                path.display(),
+                m.name
+            ));
+        }
         download(m, &path, progress)?;
     }
     let pcm = crate::media::pcm_mono(media, whisper::SAMPLE_RATE, None)?;
@@ -109,35 +130,86 @@ pub(super) fn transcribe(
     })
 }
 
-/// Fetches a model into `path` through a `.part` file, so an interrupted download never looks
-/// complete.
+/// True when `path` has exactly `bytes` bytes and SHA-256 `sha256`. The size is checked on
+/// every call; the digest once, then remembered in `<file>.sha256` (digest, size, mtime) so a
+/// large model is not re-hashed on every run. Editing or replacing the file invalidates it.
+#[cfg(feature = "whisper")]
+fn cached_model_ok(path: &Path, bytes: u64, sha256: &str) -> Result<bool> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(false);
+    };
+    if !meta.is_file() || meta.len() != bytes {
+        return Ok(false);
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    let marker = {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".sha256");
+        PathBuf::from(name)
+    };
+    let want = format!("{sha256} {bytes} {mtime}");
+    if std::fs::read_to_string(&marker).is_ok_and(|m| m.trim() == want) {
+        return Ok(true);
+    }
+    let _ = std::fs::remove_file(&marker);
+    if sha256_hex(std::fs::File::open(path)?)? != sha256 {
+        return Ok(false);
+    }
+    let _ = std::fs::write(&marker, want); // best effort: only speeds up the next run
+    Ok(true)
+}
+
+#[cfg(feature = "whisper")]
+fn sha256_hex(mut reader: impl std::io::Read) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            return Ok(format!("{:x}", hash.finalize()));
+        }
+        hash.update(&buf[..n]);
+    }
+}
+
+/// Fetches a model into `path` through a temp file next to it, checked against the pinned size
+/// and SHA-256 before it is renamed into place, so an interrupted or tampered download never
+/// looks complete.
 #[cfg(feature = "whisper")]
 fn download(m: &Model, path: &Path, progress: &mut dyn FnMut(&str)) -> Result<()> {
     use std::io::{Read, Write};
 
     use anyhow::{Context, ensure};
+    use sha2::{Digest, Sha256};
 
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let url = format!(
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/{REVISION}/{}",
         m.file
     );
     progress(&format!(
         "Downloading the {} whisper model (about {} MB, first use only) to {}",
         m.name,
-        m.megabytes,
+        m.bytes / 1_000_000,
         dir.display()
     ));
     let reply = ureq::get(&url)
         .call()
         .with_context(|| format!("downloading {url}; check your internet connection"))?;
-    let total = reply.body().content_length();
     let mut body = reply.into_body().into_reader();
-    let part = path.with_extension("bin.part");
-    let mut file = std::io::BufWriter::new(
-        std::fs::File::create(&part).with_context(|| format!("creating {}", part.display()))?,
-    );
+    let mut part = tempfile::Builder::new()
+        .prefix("whisper-")
+        .suffix(".part")
+        .tempfile_in(dir)
+        .with_context(|| format!("creating a temp file in {}", dir.display()))?;
+    let mut hash = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     let (mut done, mut next_report) = (0u64, 0.1f64);
     loop {
@@ -147,24 +219,29 @@ fn download(m: &Model, path: &Path, progress: &mut dyn FnMut(&str)) -> Result<()
         if n == 0 {
             break;
         }
-        file.write_all(&buf[..n])?;
         done += n as u64;
-        if let Some(t) = total.filter(|t| *t > 0)
-            && done as f64 / t as f64 >= next_report
-        {
+        ensure!(
+            done <= m.bytes,
+            "the {} model download is larger than its pinned size ({} bytes); refusing it",
+            m.name,
+            m.bytes
+        );
+        hash.update(&buf[..n]);
+        part.write_all(&buf[..n])?;
+        if done as f64 / m.bytes as f64 >= next_report {
             progress(&format!("Model download {:.0}%", next_report * 100.0));
             next_report += 0.1;
         }
     }
-    file.flush()?;
-    drop(file);
-    if let Some(t) = total {
-        ensure!(
-            done == t,
-            "the model download stopped early ({done} of {t} bytes); run again to retry"
-        );
-    }
-    std::fs::rename(&part, path).with_context(|| format!("saving {}", path.display()))?;
+    ensure!(
+        done == m.bytes && format!("{:x}", hash.finalize()) == m.sha256,
+        "the {} model download failed size/SHA-256 verification ({done} of {} bytes); run again to retry",
+        m.name,
+        m.bytes
+    );
+    part.as_file().sync_all()?;
+    part.persist(path)
+        .with_context(|| format!("saving {}", path.display()))?;
     Ok(())
 }
 
@@ -439,6 +516,49 @@ mod whisper {
                     "{got:?}"
                 );
             }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "whisper"))]
+mod verify_tests {
+    use super::*;
+
+    const HELLO_SHA: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+    #[test]
+    fn cached_model_must_match_the_pinned_size_and_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ggml-test.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        assert!(cached_model_ok(&path, 5, HELLO_SHA).unwrap());
+        assert!(dir.path().join("ggml-test.bin.sha256").is_file());
+        // Same size, wrong digest (also after the marker exists), and wrong size.
+        let wrong = "0".repeat(64);
+        assert!(!cached_model_ok(&path, 5, &wrong).unwrap());
+        assert!(!cached_model_ok(&path, 6, HELLO_SHA).unwrap());
+        // Tampering with same-size content invalidates the remembered digest.
+        std::fs::write(&path, b"jello").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(!cached_model_ok(&path, 5, HELLO_SHA).unwrap());
+        assert!(!cached_model_ok(&dir.path().join("missing.bin"), 5, HELLO_SHA).unwrap());
+    }
+
+    #[test]
+    fn pinned_digests_are_well_formed() {
+        for m in &MODELS {
+            assert_eq!(m.sha256.len(), 64, "{}", m.name);
+            assert!(
+                m.sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            );
         }
     }
 }

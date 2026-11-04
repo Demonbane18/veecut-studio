@@ -1,8 +1,17 @@
 [package]
 name = "veecut-studio"
 version.workspace = true
+description = "VeeCut Studio desktop editor (egui): timeline, preview, inspector and export over the VeeCut engine"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# Standalone builds (`cargo run -p veecut-studio`) keep local transcription; the `veecut` crate
+# turns it off here and decides through its own `whisper` feature.
+default = ["whisper"]
+whisper = ["veecut-engine/whisper"]
 
 [dependencies]
 anyhow.workspace = true
@@ -15,7 +24,7 @@ rodio = { version = "0.23", default-features = false, features = ["playback"] }
 serde_json.workspace = true
 tiny-skia = "0.12"
 ureq = "3"
-veecut-engine = { path = "../veecut-engine" }
+veecut-engine = { path = "../veecut-engine", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

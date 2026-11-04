@@ -2,9 +2,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use veecut_engine::ops::{self, Op};
 use veecut_engine::project::{AssetRole, Source};
 use veecut_engine::workspace::Workspace;
 
-use crate::commands::{Ctx, Out, ProjectArg, rel};
+use crate::commands::{APPROVAL_IS_HUMAN, Ctx, Out, ProjectArg, rel};
 
 #[derive(Args, Deserialize, JsonSchema, Default)]
 pub struct FindArgs {
@@ -55,8 +56,8 @@ pub struct FetchArgs {
 #[derive(Args, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct SourcesArgs {
-    /// The user checked this flagged asset's rights and allows it in the final render.
-    /// Not offered over MCP: approving is the user's decision.
+    /// The user checked this flagged asset's rights and allows it in the final render. Needs an
+    /// interactive terminal; not offered over MCP: approving is the user's decision.
     #[arg(long, value_name = "ASSET")]
     #[serde(skip)]
     pub approve: Option<String>,
@@ -265,8 +266,12 @@ impl Ctx {
         ))
     }
 
-    /// The rights table; approves (user only) or flags through ops so undo works; credits.
+    /// The rights table; approves (a person at a terminal only) or flags through ops so undo
+    /// works; credits. Agents run without a terminal, so they cannot approve.
     pub fn sources(&self, args: SourcesArgs) -> Result<Out> {
+        if args.approve.is_some() && !std::io::stdin().is_terminal() {
+            bail!(APPROVAL_IS_HUMAN);
+        }
         let (dir, mut p) = self.project(&args.project)?;
         let mut changes = Vec::new();
         if let Some(asset) = &args.approve {

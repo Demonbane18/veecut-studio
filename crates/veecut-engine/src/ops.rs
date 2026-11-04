@@ -181,16 +181,18 @@ pub fn apply_all(project: &mut Project, ops: &[Op]) -> Result<Vec<Applied>> {
     Ok(out)
 }
 
-/// Parses one op, a JSON array of ops, or JSON lines.
+/// Parses one op, a JSON array of ops, or JSON lines. Errors name the line, never echo it.
 pub fn parse_ops(text: &str) -> Result<Vec<Op>> {
-    let text = text.trim();
-    if text.starts_with('[') {
-        return serde_json::from_str(text).context("ops must be a JSON array of op objects");
+    if text.trim_start().starts_with('[') {
+        return serde_json::from_str(text.trim()).context("ops must be a JSON array of op objects");
     }
     text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).with_context(|| format!("not a valid op: {l}")))
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, l)| {
+            serde_json::from_str(l.trim())
+                .with_context(|| format!("line {} is not a valid op", i + 1))
+        })
         .collect()
 }
 

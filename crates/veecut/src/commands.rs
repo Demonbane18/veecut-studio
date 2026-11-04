@@ -1,6 +1,7 @@
 //! Every command, shared by the command line and the MCP server. Each returns an [`Out`]: text
 //! for people, JSON for agents, and a PNG when the command made a picture.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
@@ -15,7 +16,7 @@ use veecut_engine::config::{self, Config};
 use veecut_engine::graphics::{self, FaceFit, Graphics};
 use veecut_engine::ops::{self, Op};
 use veecut_engine::project::{
-    AssetKind, AssetRole, Canvas, CaptionMode, ItemBody, PROJECT_FILE, Project, TrackKind,
+    AssetKind, AssetRole, Canvas, CaptionMode, ItemBody, PROJECT_FILE, Project, Source, TrackKind,
     VideoKind,
 };
 use veecut_engine::recipes::{self, EditRequest, ExplainerMotion};
@@ -77,7 +78,8 @@ pub struct EditArgs {
     /// Explainer visual motion: hold, push or glide. Omit to keep recipe defaults.
     #[arg(long, value_name = "MOTION")]
     pub motion: Option<ExplainerMotion>,
-    /// Text the edit shows (promo lines, list items, LRC lyrics), or a path to a text file.
+    /// Text the edit shows (promo lines, list items, LRC lyrics), or a path to a text file
+    /// (inside the workspace over MCP).
     #[arg(long)]
     pub copy: Option<String>,
     #[arg(long)]
@@ -154,10 +156,11 @@ pub struct CutPhraseArgs {
 #[derive(Args, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct OpsArgs {
-    /// One op, a JSON array of ops, or JSON lines. `-` reads standard input.
+    /// One op, a JSON array of ops, or JSON lines. On the command line `-` reads standard input.
     pub ops: Option<String>,
-    /// Read the ops from a file.
+    /// Read the ops from a file. Not offered over MCP: tools send the ops as JSON.
     #[arg(long)]
+    #[serde(skip)]
     pub file: Option<PathBuf>,
     #[command(flatten)]
     #[serde(flatten)]
@@ -177,6 +180,7 @@ pub struct RenderArgs {
     /// Part of the timeline in seconds, like 0-5.
     #[arg(long)]
     pub range: Option<String>,
+    /// Output file; default outbox/. Never inside inbox/; MCP keeps it inside the workspace.
     #[arg(long)]
     pub out: Option<PathBuf>,
     #[command(flatten)]
@@ -193,7 +197,8 @@ pub struct FrameArgs {
     /// Width in pixels (default 540).
     #[arg(long)]
     pub width: Option<u32>,
-    /// Check PNG destination; default project .cache. inbox/ and outbox/ are protected.
+    /// Check PNG destination; default project .cache. inbox/ and outbox/ are protected; MCP keeps
+    /// it inside the workspace.
     #[arg(long)]
     pub out: Option<PathBuf>,
     #[command(flatten)]
@@ -207,7 +212,8 @@ pub struct FramesArgs {
     /// Seconds between frames. Default: about 12 frames across the edit.
     #[arg(long)]
     pub every: Option<f64>,
-    /// Check PNG destination; default project .cache. inbox/ and outbox/ are protected.
+    /// Check PNG destination; default project .cache. inbox/ and outbox/ are protected; MCP keeps
+    /// it inside the workspace.
     #[arg(long)]
     pub out: Option<PathBuf>,
     #[command(flatten)]
@@ -358,8 +364,9 @@ pub(crate) fn rel(ws: &Workspace, path: &Path) -> String {
         .to_string()
 }
 
-/// Resolve existing symlinks before checking protected folders, including a new file's parents.
-fn frame_output_path(ws: &Workspace, path: &Path) -> Result<PathBuf> {
+/// `path` made absolute with every existing part resolved, so a symlink cannot hide where a file
+/// lands; parts that do not exist yet stay as given.
+pub(crate) fn resolved(path: &Path) -> Result<PathBuf> {
     let absolute = std::path::absolute(path)?;
     let mut out = PathBuf::new();
     for part in absolute.components() {
@@ -378,14 +385,99 @@ fn frame_output_path(ws: &Workspace, path: &Path) -> Result<PathBuf> {
             }
         }
     }
+    Ok(out)
+}
+
+fn frame_output_path(ws: &Workspace, path: &Path) -> Result<PathBuf> {
+    let out = resolved(path)?;
     for protected in [ws.inbox(), ws.outbox()] {
-        if out.starts_with(protected.canonicalize()?) {
+        if out.starts_with(resolved(&protected)?) {
             bail!(
                 "check frames cannot be saved in inbox/ or outbox/; omit --out to use the project's .cache"
             );
         }
     }
     Ok(out)
+}
+
+/// The original recordings in inbox/ are never changed, so no render lands there.
+fn render_output_path(ws: &Workspace, path: &Path) -> Result<PathBuf> {
+    let out = resolved(path)?;
+    if out.starts_with(resolved(&ws.inbox())?) {
+        bail!(
+            "renders cannot be saved in inbox/, where the original recordings stay unchanged; omit --out to render into outbox/"
+        );
+    }
+    Ok(out)
+}
+
+pub(crate) const APPROVAL_IS_HUMAN: &str = "Approving or unflagging footage is your decision: use Studio's Sources tab or run `veecut sources --approve` in a terminal.";
+
+/// Every asset's id and resolved file; asset paths are relative to the project folder or absolute.
+fn asset_files(dir: &Path, p: &Project) -> Result<Vec<(String, PathBuf)>> {
+    p.assets
+        .iter()
+        .map(|a| Ok((a.id.clone(), resolved(&dir.join(&a.path))?)))
+        .collect()
+}
+
+/// Ops come from agents and scripts, so they may not grant approval, change a flag, delete or
+/// replace a source record, or replace the rights table or the whole project. A record covers
+/// its asset's file too: ops may not point that asset elsewhere, drop it, or give the file to
+/// another asset. Adding a new, unapproved record and editing other source fields still work.
+/// `files` is [`asset_files`] before the ops (empty when there were no records).
+fn check_rights(
+    dir: &Path,
+    before: &BTreeMap<String, Source>,
+    files: &[(String, PathBuf)],
+    list: &[Op],
+    after: &Project,
+) -> Result<()> {
+    let replaces = list.iter().any(|op| {
+        let Op::Set { path, .. } = op else {
+            return false;
+        };
+        let keys: Vec<String> = path
+            .split('/')
+            .skip(1)
+            .map(|k| k.replace("~1", "/").replace("~0", "~"))
+            .collect();
+        match keys.as_slice() {
+            [] => true,
+            [key] => key.is_empty() || key == "sources",
+            [key, id] => key == "sources" && before.contains_key(id),
+            _ => false,
+        }
+    });
+    let changed = before.iter().any(|(id, old)| {
+        after.sources.get(id).is_none_or(|new| {
+            (new.approved && !old.approved)
+                || new.flag != old.flag
+                || new.flag_reason != old.flag_reason
+        })
+    }) || after
+        .sources
+        .iter()
+        .any(|(id, new)| new.approved && !before.contains_key(id));
+    if replaces || changed {
+        bail!(APPROVAL_IS_HUMAN);
+    }
+    if before.is_empty() {
+        return Ok(());
+    }
+    let now = asset_files(dir, after)?;
+    let had = |id: &str, file: &Path| files.iter().any(|(i, f)| i == id && f == file);
+    let moved = files
+        .iter()
+        .filter(|(id, _)| before.contains_key(id))
+        .any(|(id, file)| {
+            !now.iter().any(|(i, f)| i == id && f == file)
+                || now.iter().any(|(i, f)| f == file && i != id && !had(i, f))
+        });
+    if moved {
+        bail!(APPROVAL_IS_HUMAN);
+    }
+    Ok(())
 }
 
 fn time(t: f64) -> String {
@@ -762,9 +854,21 @@ impl Ctx {
                 "give the ops as JSON, with --file, or `-` for standard input; `veecut schema` shows them"
             ),
         };
-        let list = ops::parse_ops(&input)?;
-        let (dir, mut p) = self.project(&args.project)?;
+        self.apply_ops(&input, &args.project)
+    }
+
+    /// Applies ops given as JSON text; MCP calls this directly, so it never reads files or stdin.
+    pub(crate) fn apply_ops(&self, input: &str, project: &ProjectArg) -> Result<Out> {
+        let list = ops::parse_ops(input)?;
+        let (dir, mut p) = self.project(project)?;
+        let before = p.sources.clone();
+        let files = if before.is_empty() {
+            Vec::new()
+        } else {
+            asset_files(&dir, &p)?
+        };
         let done = ops::apply_all(&mut p, &list)?;
+        check_rights(&dir, &before, &files, &list, &p)?;
         self.ws.save_project(&dir, &p)?;
         let mut text = String::new();
         for d in &done {
@@ -877,7 +981,7 @@ impl Ctx {
             ));
         }
         let out = match args.out {
-            Some(o) => o,
+            Some(o) => render_output_path(&self.ws, &o)?,
             None if args.final_ => self.ws.outbox().join(format!("{slug}-final{suffix}.mp4")),
             None => {
                 let next = self.ws.next_draft_path(&slug);
@@ -1873,5 +1977,86 @@ pub(crate) mod tests {
             std::os::unix::fs::symlink(&source, cache.join("check.png")).unwrap();
             assert!(frame_output_path(&ws, &cache.join("check.png")).is_err());
         }
+    }
+
+    #[test]
+    fn render_refuses_outputs_in_inbox() {
+        let (_temp, ctx, _) = speech_project();
+        std::fs::create_dir_all(ctx.ws.inbox()).unwrap();
+        let source = ctx.ws.inbox().join("source.mp4");
+        std::fs::write(&source, b"original").unwrap();
+        for out in [
+            source.clone(),
+            ctx.ws.root.join("projects/../inbox/source.mp4"),
+        ] {
+            let args = RenderArgs {
+                out: Some(out),
+                ..Default::default()
+            };
+            let error = ctx.render(args, &mut |_: &str| {}).err().unwrap();
+            assert!(
+                format!("{error:#}").contains("cannot be saved in inbox/"),
+                "{error:#}"
+            );
+        }
+        assert_eq!(std::fs::read(&source).unwrap(), b"original");
+    }
+
+    #[test]
+    fn ops_cannot_hand_a_sourced_file_to_another_asset() {
+        let (_temp, ctx, dir) = speech_project();
+        let file = dir.join(PROJECT_FILE);
+        let mut project = Project::load(&file).unwrap();
+        project.assets.push(
+            serde_json::from_value(json!({
+                "id": "asset-2", "path": "other.mp4", "kind": "video", "role": "broll",
+                "duration": 10.0, "width": 1080, "height": 1920, "fps": 30.0, "has_audio": false
+            }))
+            .unwrap(),
+        );
+        project.sources.insert(
+            "speech".into(),
+            serde_json::from_value(json!({
+                "url": "https://example.org/speech", "license": "CC BY-NC 2.0",
+                "flag": true, "flag_reason": "non-commercial"
+            }))
+            .unwrap(),
+        );
+        project.save(&file).unwrap();
+        let before = std::fs::read(&file).unwrap();
+        let mut swapped = serde_json::to_value(&project.assets).unwrap();
+        swapped[0]["id"] = json!("asset-2");
+        swapped[1]["id"] = json!("speech");
+        let mut copy = serde_json::to_value(&project.assets[0]).unwrap();
+        copy["id"] = json!("copy");
+        copy["path"] = json!("./speech.mp4");
+        for op in [
+            json!({"op": "set", "path": "/assets/1/path", "value": "speech.mp4"}),
+            json!([
+                {"op": "set", "path": "/assets/0/path", "value": "other.mp4"},
+                {"op": "set", "path": "/assets/1/path", "value": "speech.mp4"}
+            ]),
+            json!({"op": "set", "path": "/assets", "value": swapped}),
+            json!({"op": "set", "path": "/assets/-", "value": copy}),
+        ] {
+            let error = ctx
+                .ops(OpsArgs {
+                    ops: Some(op.to_string()),
+                    ..Default::default()
+                })
+                .err()
+                .unwrap();
+            assert_eq!(format!("{error:#}"), APPROVAL_IS_HUMAN, "{op}");
+        }
+        assert_eq!(before, std::fs::read(&file).unwrap());
+        let elsewhere = json!({"op": "set", "path": "/assets/1/path", "value": "elsewhere.mp4"});
+        ctx.ops(OpsArgs {
+            ops: Some(elsewhere.to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        let saved = Project::load(&file).unwrap();
+        assert_eq!(saved.assets[1].path, Path::new("elsewhere.mp4"));
+        assert!(saved.sources["speech"].blocks_final());
     }
 }

@@ -249,11 +249,7 @@ Found footage comes in with `veecut fetch` instead, which also records its sourc
 
 `/sources` holds the provenance of every found file, keyed by asset id: `url`, `title`, `author`, `license`, `license_url`, `credit`, `provider`, `flag`, `flag_reason`, `approved` and `retrieved`. `veecut fetch` and the documentary recipe fill it in; `veecut sources` lists it. A final render refuses any flagged source the edit uses that is not `approved`.
 
-```json
-{"op":"set","path":"/sources/asset-4/approved","value":true}
-```
-
-Set `approved` only when the user has checked that file's rights and tells you to approve it. Never decide it yourself, and never approve to get a final render through. To flag a file, prefer `veecut sources --flag ASSET --reason TEXT`.
+Ops cannot approve: any op that sets `approved` to true, changes `flag` or `flag_reason`, deletes or replaces a source record, or replaces `/sources` or the whole project is refused. Approval is the user's decision. When they have checked a file's rights, ask them to press Approve in Studio's Sources tab or run `veecut sources --approve ASSET` themselves in a terminal. To flag a file, use `veecut sources --flag ASSET --reason TEXT`.
 
 ## Notes and the ops that fix them
 
@@ -290,6 +286,6 @@ Look up ids with `veecut status --json` and times with `veecut transcript --json
 | "Move that word", "remove that word" | `move` or `delete` the text item, and do the same to its tick on the `sfx` track |
 | "Big red word behind me" | `veecut cutout --at T --dur D --mega WORD` inside one main-track clip |
 | "Keep the music under the punchline", "fewer clicks" | See Common notes in `workflows/documentary.md` |
-| "This file is fine, I checked it" | Only for the asset they named: `veecut sources --approve ASSET`, or the `set` op above |
+| "This file is fine, I checked it" | Ask them to approve that asset in Studio's Sources tab or run `veecut sources --approve ASSET` in their own terminal; you cannot approve it |
 
 After ops from Studio, check a frame if needed, answer briefly and stop. Render or open a video only when the note asks for one. Outside Studio, run `veecut render` for the next draft.

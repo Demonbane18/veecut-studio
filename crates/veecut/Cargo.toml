@@ -12,7 +12,7 @@ default = ["studio", "whisper"]
 # The desktop editor (`veecut studio`).
 studio = ["dep:veecut-studio"]
 # Local transcription through whisper.cpp.
-whisper = ["veecut-engine/whisper"]
+whisper = ["veecut-engine/whisper", "veecut-studio?/whisper"]
 
 [dependencies]
 anyhow.workspace = true
@@ -26,7 +26,7 @@ serde_json.workspace = true
 tiny-skia = "0.12"
 toml.workspace = true
 veecut-engine = { path = "../veecut-engine", default-features = false }
-veecut-studio = { path = "../veecut-studio", optional = true }
+veecut-studio = { path = "../veecut-studio", optional = true, default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

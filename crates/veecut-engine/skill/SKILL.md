@@ -92,7 +92,7 @@ These habits keep small models on track, and they work for big ones too.
 - `veecut sfx` lists the built-in synthesized sound kit. Levels and timing are in `reference/sound.md`.
 - `veecut cutout --at T --dur D [--mega WORD] [--world FILE]` cuts the speaker out of their own camera inside one main-track clip, with an optional huge word or picture behind them. The first run downloads a 26 MB model once.
 - `veecut qa FILE --words` transcribes a render again and lists words that a sound, the music or a cut masked. Run it before calling a documentary final.
-- A final render refuses any found file whose rights are flagged and not approved. Only the user approves, after checking the file and its licence: they run `veecut sources --approve ASSET`, use Studio's Sources tab, or tell you they checked that file and want it approved. Drafts are never blocked.
+- A final render refuses any found file whose rights are flagged and not approved. Only the user approves, after checking the file and its licence: ask them to press Approve in Studio's Sources tab or run `veecut sources --approve ASSET` themselves in a terminal. Never approve for them, even when they ask: ops refuse it, and `sources --approve` needs an interactive terminal. Drafts are never blocked.
 
 ## Extra skills from the catalog
 
@@ -106,7 +106,7 @@ VeeCut keeps a catalog of community video skills from awesome-claude-video-skill
 
 ## MCP tools
 
-When VeeCut is connected as an MCP server (`veecut mcp`, which `veecut init` registers in `opencode.json`), you can call tools instead of the command line: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `transcript_search`, `cut_phrase`, `cutout`, `captions`, `note`, `undo`, `redo`, `skills_search`, `skills_install`, `verify_words`, `find_footage`, `fetch_footage` and `sources`. Tool fields follow the matching command's options; `project` accepts the same selectors as `-p`. Search with `transcript_search` using `{"phrase":"PHRASE"}`, then call `cut_phrase` with the same phrase and, if needed, `"occurrence":2`. `frame`, `frames` and `find_footage` return the PNG as an image you can look at. `edit` takes `find` for documentary edits; `verify_words` is `veecut qa FILE --words`; `sources` cannot approve. Use one way or the other; both change the same project.
+When VeeCut is connected as an MCP server (`veecut mcp`, which `veecut init` registers in `opencode.json`), you can call tools instead of the command line: `status`, `add`, `edit`, `ops`, `schema`, `render`, `frame`, `frames`, `transcript`, `transcript_search`, `cut_phrase`, `cutout`, `captions`, `note`, `undo`, `redo`, `skills_search`, `skills_install`, `verify_words`, `find_footage`, `fetch_footage` and `sources`. Tool fields follow the matching command's options; `project` accepts the same selectors as `-p`. Search with `transcript_search` using `{"phrase":"PHRASE"}`, then call `cut_phrase` with the same phrase and, if needed, `"occurrence":2`. `frame`, `frames` and `find_footage` return the PNG as an image you can look at. `edit` takes `find` for documentary edits; `verify_words` is `veecut qa FILE --words`; `sources` cannot approve. `ops` takes JSON only, never a file. An `out` path or `copy` file must be inside the workspace, and nothing is written into inbox/. Use one way or the other; both change the same project.
 
 Explainer `edit` accepts optional `"motion":"hold"`, `"push"` or `"glide"` alongside
 ordered `broll`, narration supplied through `voice` or `files`, and optional `music`. Other kinds reject

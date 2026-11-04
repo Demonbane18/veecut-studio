@@ -2,6 +2,8 @@
 //!
 //! Installing never runs anything from a skill repo: VeeCut downloads the tarball at a pinned
 //! commit, copies the folders that hold a `SKILL.md` and records the commit in `skills.lock.json`.
+//! Lock-file skill names must be safe direct children of the skill roots, excluding built-in
+//! `veecut`; the entire lock is checked before removal or replacement can delete any directory.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -96,8 +98,29 @@ pub struct LockedRepo {
 impl Lock {
     pub fn load(path: &Path) -> Result<Lock> {
         match fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text)
-                .with_context(|| format!("{} is not valid JSON", path.display())),
+            Ok(text) => {
+                let lock: Lock = serde_json::from_str(&text)
+                    .with_context(|| format!("{} is not valid JSON", path.display()))?;
+                for repo in &lock.repos {
+                    for name in &repo.skills {
+                        let mut components = Path::new(name).components();
+                        if name.eq_ignore_ascii_case("veecut")
+                            || safe_name(name).as_deref() != Some(name.as_str())
+                            || !matches!(
+                                (components.next(), components.next()),
+                                (Some(Component::Normal(_)), None)
+                            )
+                        {
+                            bail!(
+                                "{} has unsafe skill name {name:?} in {}: expected one safe directory name other than built-in veecut",
+                                path.display(),
+                                repo.repo
+                            );
+                        }
+                    }
+                }
+                Ok(lock)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Lock::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -477,7 +500,7 @@ fn install_at(
             .or_else(|| safe_name(repo_name))
             .unwrap_or_else(|| "skill".into());
         let mut name = base.clone();
-        if taken.contains(&name) {
+        if name.eq_ignore_ascii_case("veecut") || taken.contains(&name) {
             name = format!("{}-{base}", safe_name(owner).unwrap_or_default());
         }
         let mut n = 2;
@@ -1021,6 +1044,72 @@ mod tests {
         let loaded = Lock::load(&path).unwrap();
         assert_eq!(loaded, lock);
         assert!(loaded.get("Remotion-Dev/Skills").is_some());
+    }
+
+    #[test]
+    fn unsafe_lock_names_fail_before_removing_any_skill_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            root: tmp.path().join("workspace"),
+        };
+        fs::create_dir_all(&ws.root).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("sentinel"), "keep").unwrap();
+        for base in ws.skill_dirs() {
+            fs::create_dir_all(base.join("valid-skill")).unwrap();
+            fs::create_dir_all(base.join("veecut")).unwrap();
+            fs::create_dir_all(base.parent().unwrap().join("outside")).unwrap();
+        }
+        let mut lock = Lock {
+            repos: vec![LockedRepo {
+                repo: "owner/repo".into(),
+                commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                skills: Vec::new(),
+                license: None,
+                security: "SAFE".into(),
+                installed_at: Utc::now(),
+            }],
+        };
+        let lock_path = ws.root.join(LOCK_FILE);
+        for unsafe_name in [
+            "../outside",
+            outside.to_str().unwrap(),
+            "",
+            ".",
+            "..",
+            "nested/skill",
+            "nested\\skill",
+            "veecut",
+            "VeeCut",
+            "valid-skill/",
+        ] {
+            lock.repos[0].skills = vec!["valid-skill".into(), unsafe_name.into()];
+            lock.save(&lock_path).unwrap();
+            for result in [remove(&ws, "owner/repo"), update(&ws, None).map(|_| ())] {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("unsafe skill name"), "{error:#}");
+            }
+            assert_eq!(
+                fs::read_to_string(outside.join("sentinel")).unwrap(),
+                "keep"
+            );
+            for base in ws.skill_dirs() {
+                assert!(base.join("valid-skill").is_dir());
+                assert!(base.join("veecut").is_dir());
+                assert!(base.parent().unwrap().join("outside").is_dir());
+            }
+        }
+
+        lock.repos[0].skills = vec!["valid-skill".into()];
+        lock.save(&lock_path).unwrap();
+        remove(&ws, "owner/repo").unwrap();
+        for base in ws.skill_dirs() {
+            assert!(!base.join("valid-skill").exists());
+            assert!(base.join("veecut").is_dir());
+        }
+        assert!(outside.join("sentinel").is_file());
+        assert!(installed(&ws).unwrap().repos.is_empty());
     }
 
     #[test]

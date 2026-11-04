@@ -641,31 +641,38 @@ fn concrete(text: &str) -> Option<String> {
     .then_some(n)
 }
 
-/// The video's subject: concrete words said at least twice and scoring 4 or more (a name said
-/// twice, or a plain word said four times), best first.
+/// The video's subject: acronyms (even once), then repeated concrete words, best first.
 fn topic_terms(words: &[PlacedWord]) -> Vec<String> {
-    // word -> (score, times said, first index)
-    let mut seen: BTreeMap<String, (i32, usize, usize)> = BTreeMap::new();
+    // ponytail: lexical subject ranking; semantic search can replace it when keyword recall falls short.
+    // word -> (acronym, times said, first index)
+    let mut seen: BTreeMap<String, (bool, usize, usize)> = BTreeMap::new();
     for (k, w) in words.iter().enumerate() {
         let Some(n) = concrete(&w.text) else { continue };
-        let name = k > 0
-            && w.text.chars().next().is_some_and(char::is_uppercase)
-            && !words[k - 1].text.ends_with(['.', '?', '!']);
-        let e = seen.entry(n).or_insert((0, 0, k));
-        e.0 += if name { 3 } else { 1 };
+        let acronym = w
+            .text
+            .chars()
+            .filter(|c| c.is_alphabetic())
+            .all(char::is_uppercase);
+        let e = seen.entry(n).or_insert((false, 0, k));
+        e.0 |= acronym;
         e.1 += 1;
     }
-    let mut ranked: Vec<(String, (i32, usize, usize))> = seen
+    let mut ranked: Vec<_> = seen
         .into_iter()
-        .filter(|(_, (score, said, _))| *said >= 2 && *score >= 4)
+        .filter(|(_, (acronym, said, _))| *acronym || *said >= 2)
         .collect();
-    ranked.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.1.2.cmp(&b.1.2)));
+    ranked.sort_by(|a, b| {
+        b.1.0
+            .cmp(&a.1.0)
+            .then(b.1.1.cmp(&a.1.1))
+            .then(a.1.2.cmp(&b.1.2))
+    });
     ranked.into_iter().take(4).map(|(n, _)| n).collect()
 }
 
 /// A short search query for a run: its own name or stressed concrete word, anchored with the
-/// video's main subject, so a line about "the test" finds rockets, not gyms. Runs without a
-/// concrete word rotate through the subject terms so the pictures vary.
+/// video's main subject, so a line about "the test" finds rockets, not gyms. Vague runs
+/// rotate secondary terms while keeping the same subject anchor.
 fn query_for(
     words: &[&PlacedWord],
     emphasis: &[bool],
@@ -691,7 +698,14 @@ fn query_for(
             Some(main) if *main != own => format!("{main} {own}"),
             _ => own,
         }),
-        None => (!topic.is_empty()).then(|| topic[run % topic.len()].clone()),
+        None => topic.first().map(|main| {
+            let other = &topic[run % topic.len()];
+            if main == other {
+                main.clone()
+            } else {
+                format!("{main} {other}")
+            }
+        }),
     }
 }
 
@@ -702,9 +716,19 @@ const UNSAFE_WORDS: &[&str] = &[
     "behead", "tortur", "massacre", "genocide", "lynch",
 ];
 
-/// Keeps a found result only when a title word starts with the first five letters of a query
-/// word and no title word starts with one of [`UNSAFE_WORDS`]. Full-text search on Commons and
-/// the Archive matches descriptions, which brings in gym tutorials for "properly".
+// ponytail: common English plural suffixes only; keep whole-word matching for unrelated stems.
+fn singular(word: &str) -> &str {
+    if word.len() > 3 {
+        word.strip_suffix("es")
+            .or_else(|| word.strip_suffix('s'))
+            .unwrap_or(word)
+    } else {
+        word
+    }
+}
+
+/// Requires the query's subject (its first word) as a whole title word and rejects unsafe titles.
+/// Full-text search on Commons and the Archive also matches descriptions and unrelated names.
 fn relevant(title: &str, query: &str) -> bool {
     let title = title.to_lowercase();
     let words: Vec<&str> = title
@@ -717,10 +741,10 @@ fn relevant(title: &str, query: &str) -> bool {
     {
         return false;
     }
-    query.split_whitespace().any(|q| {
-        let stem: String = q.chars().take(5).collect();
-        words.iter().any(|w| w.starts_with(&stem))
-    })
+    query
+        .split_whitespace()
+        .next()
+        .is_some_and(|subject| words.iter().any(|word| singular(word) == singular(subject)))
 }
 
 /// A word worth a shock: money, a number with a unit, or a big quantity.
@@ -1268,7 +1292,7 @@ fn material(p: &Project, id: &str) -> Material {
 
 /// Where a video's own pictures start: past a tenth of it, and past the first 10 s (a quarter
 /// of a short one), where B-roll packages put slates, titles and contact cards.
-fn past_opening(duration: f64) -> f64 {
+pub(super) fn past_opening(duration: f64) -> f64 {
     (duration * 0.1).max((duration * 0.25).min(10.0))
 }
 
@@ -1299,7 +1323,7 @@ fn lit_start(path: &Path, start: f64, len: f64, duration: f64) -> f64 {
 
 /// Whether the frame at `t` reads as black: 95 % of its pixels under 10 % luma, a little
 /// stricter than the render check's blackdetect (98 %). An unreadable frame counts as lit.
-fn black_at(path: &Path, t: f64) -> bool {
+pub(super) fn black_at(path: &Path, t: f64) -> bool {
     let Ok(img) = media::frame_rgba(path, t, 96) else {
         return false;
     };
@@ -1384,6 +1408,35 @@ fn documentary_captions(p: &mut Project) {
     c.max_chars = if landscape { 32 } else { 20 };
 }
 
+/// Try a run's own subject only when the global subject finds no usable title matches.
+fn search_with_fallback(
+    query: &str,
+    fallback: Option<&str>,
+    seen: &HashSet<String>,
+    mut search: impl FnMut(&str) -> Result<footage::SearchResult>,
+) -> Result<(String, footage::SearchResult)> {
+    let mut result = search(query)?;
+    let keep = |result: &mut footage::SearchResult, query: &str| {
+        result
+            .candidates
+            .retain(|c| !c.flag && !seen.contains(&c.id) && relevant(&c.title, query));
+    };
+    keep(&mut result, query);
+    if result.candidates.is_empty()
+        && let Some(fallback) = fallback.filter(|fallback| *fallback != query)
+    {
+        match search(fallback) {
+            Ok(mut next) => {
+                keep(&mut next, fallback);
+                next.warnings.splice(0..0, result.warnings);
+                return Ok((fallback.to_string(), next));
+            }
+            Err(error) => result.warnings.push(format!("\"{fallback}\": {error:#}")),
+        }
+    }
+    Ok((query.to_string(), result))
+}
+
 /// Finds footage for runs that have none, one query per run, licence-clear results only.
 #[allow(clippy::too_many_arguments)]
 fn find_material(
@@ -1449,20 +1502,22 @@ fn find_material(
         if providers.is_empty() {
             break;
         }
-        progress(&format!("Searching footage for \"{query}\""));
-        let result = match footage::search(
-            &query,
-            &SearchOptions {
-                providers,
-                ..SearchOptions::default()
-            },
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                warnings.push(format!("\"{query}\": {e:#}"));
-                continue;
-            }
+        let fallback = query_for(&run_words, &run_emph, &[], i);
+        let opts = SearchOptions {
+            providers,
+            ..SearchOptions::default()
         };
+        let (query, result) =
+            match search_with_fallback(&query, fallback.as_deref(), &seen_ids, |query| {
+                progress(&format!("Searching footage for \"{query}\""));
+                footage::search(query, &opts)
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    warnings.push(format!("\"{query}\": {e:#}"));
+                    continue;
+                }
+            };
         for w in result.warnings {
             match Provider::ALL
                 .iter()
@@ -1479,11 +1534,7 @@ fn find_material(
         }
         let mut picked = 0;
         // Moving footage first (Editor V1: 50 to 75 percent of the runtime moves), then stills.
-        let mut candidates: Vec<_> = result
-            .candidates
-            .into_iter()
-            .filter(|c| !c.flag && !seen_ids.contains(&c.id) && relevant(&c.title, &query))
-            .collect();
+        let mut candidates = result.candidates;
         candidates.sort_by_key(|c| {
             (
                 c.kind != MediaKind::Video,
@@ -2031,11 +2082,104 @@ mod tests {
         let refs: Vec<&PlacedWord> = vague.iter().collect();
         assert_eq!(
             query_for(&refs, &[false; 3], &topic, 1).as_deref(),
-            Some("artemis")
+            Some("sls artemis")
         );
         assert!(relevant("Artemis I Launch Imagery", "artemis test"));
         assert!(!relevant("How to properly leg press", "sls test"));
         assert!(!relevant("Child Molester, The", "child safety"));
+    }
+
+    #[test]
+    fn one_subject_acronym_beats_repeated_locations_and_titles_need_the_subject() {
+        let talk: Vec<PlacedWord> =
+            "The SLS booster segments travel from Utah to Kennedy Space Center. \
+            Booster segments leave Utah. Utah ships booster segments for Artemis."
+                .split_whitespace()
+                .map(|text| PlacedWord {
+                    id: "w0".into(),
+                    text: text.into(),
+                    source_start: 0.0,
+                    source_end: 0.1,
+                    timeline_start: 0.0,
+                    timeline_end: 0.1,
+                })
+                .collect();
+        let topic = topic_terms(&talk);
+        assert_eq!(topic.first().map(String::as_str), Some("sls"));
+        assert!(topic.iter().any(|t| t == "booster"));
+        let refs: Vec<_> = talk[..15].iter().collect();
+        let query = query_for(&refs, &[], &topic, 0).unwrap();
+        assert!(query.starts_with("sls"), "{query}");
+        assert!(relevant("SLS Booster Segments head to Kennedy", &query));
+        for title in [
+            "Senator John Kennedy speaks on the U.S. Senate floor",
+            "Clip of the State Funeral of John Kennedy",
+            "Utah01",
+            "Space Station Astronauts Discuss Life In Space With Utah Students",
+            "OSIRIS-REx Sample Landing and Recovery in Utah",
+        ] {
+            assert!(!relevant(title, "sls kennedy"), "{title}");
+        }
+        assert!(!relevant("Boosterism in Utah", "booster"));
+        assert!(!relevant("Utah01", "utah"));
+    }
+
+    #[test]
+    fn title_matching_tolerates_plural_suffixes_without_prefix_matches() {
+        assert!(relevant("SLS Booster Segments", "boosters"));
+        assert!(relevant("SLS Boosters", "booster"));
+        assert!(relevant("Artemis launches", "launch"));
+        assert!(relevant("Artemis launch", "launches"));
+        assert!(!relevant("Boosterism in Utah", "boosters"));
+        assert!(!relevant("Utah01", "utah"));
+    }
+
+    #[test]
+    fn incidental_acronym_falls_back_to_the_runs_own_subject() {
+        let words: Vec<PlacedWord> = "The Artemis boosters launch. Artemis flies with NASA."
+            .split_whitespace()
+            .map(|text| PlacedWord {
+                id: "w0".into(),
+                text: text.into(),
+                source_start: 0.0,
+                source_end: 0.1,
+                timeline_start: 0.0,
+                timeline_end: 0.1,
+            })
+            .collect();
+        let topic = topic_terms(&words);
+        assert_eq!(topic[0], "nasa");
+        let run: Vec<_> = words[..4].iter().collect();
+        let query = query_for(&run, &[], &topic, 0).unwrap();
+        let fallback = query_for(&run, &[], &[], 0).unwrap();
+        let mut calls = Vec::new();
+        let (used, result) =
+            search_with_fallback(&query, Some(&fallback), &HashSet::new(), |query| {
+                calls.push(query.to_string());
+                Ok(footage::SearchResult {
+                    candidates: vec![footage::Candidate {
+                        id: "nasa:artemis".into(),
+                        provider: Provider::Nasa,
+                        kind: MediaKind::Video,
+                        title: "Artemis Booster Launch".into(),
+                        page_url: String::new(),
+                        thumb_url: String::new(),
+                        width: 1280,
+                        height: 720,
+                        duration: 10.0,
+                        license: "public domain".into(),
+                        license_url: None,
+                        author: None,
+                        flag: false,
+                        flag_reason: None,
+                    }],
+                    warnings: Vec::new(),
+                })
+            })
+            .unwrap();
+        assert_eq!(calls, ["nasa artemis", "artemis"]);
+        assert_eq!(used, "artemis");
+        assert_eq!(result.candidates.len(), 1);
     }
 
     #[test]

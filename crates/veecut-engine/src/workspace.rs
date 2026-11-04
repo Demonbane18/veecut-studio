@@ -215,8 +215,8 @@ impl Workspace {
         Ok((dir, project))
     }
 
-    /// Probes `file` and adds it to the project as `asset-N`; returns the id. Files inside the
-    /// workspace are stored relative to the project folder so the workspace can move. Does not save.
+    /// Probes `file` and adds it as `asset-N`, importing any adjacent `.source.json` provenance.
+    /// Files inside the workspace stay relative to the project folder. Does not save.
     pub fn add_asset(
         &self,
         project: &mut Project,
@@ -227,6 +227,7 @@ impl Workspace {
         let file =
             std::path::absolute(file).with_context(|| format!("resolving {}", file.display()))?;
         let info = media::probe(&file)?;
+        let source = crate::footage::source_for(&file)?;
         let project_dir = std::path::absolute(project_dir)?;
         let path = if file.starts_with(&self.root) && project_dir.starts_with(&self.root) {
             relative(&project_dir, &file)
@@ -245,6 +246,9 @@ impl Workspace {
             fps: info.fps,
             has_audio: info.has_audio,
         });
+        if let Some(source) = source {
+            project.sources.insert(id.clone(), source);
+        }
         Ok(id)
     }
 

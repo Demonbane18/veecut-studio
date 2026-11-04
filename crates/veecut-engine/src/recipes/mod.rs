@@ -17,8 +17,8 @@ use crate::config::Config;
 use crate::graphics::{self, FaceFit, Graphics};
 use crate::ops::{self, Op};
 use crate::project::{
-    Anim, AssetKind, AssetRole, Canvas, CaptionMode, ItemBody, KenBurns, Point, Project,
-    TextPreset, TrackKind, VideoKind,
+    Anim, AssetKind, AssetRole, Canvas, CaptionMode, FaceSample, ItemBody, KenBurns, Point,
+    Project, TextPreset, TrackKind, VideoKind,
 };
 use crate::render::{self, Quality, RenderOptions};
 use crate::style::{Format, Pace, Sound, Style};
@@ -136,6 +136,9 @@ pub struct EditReport {
     pub summary: Vec<String>,
     /// Decisions left to a person or an agent, such as possible retakes the recipe kept.
     pub review: Vec<String>,
+    /// Folders `Job::start` created, finished or not; failed runs delete the unfinished ones.
+    #[serde(skip)]
+    started: Vec<PathBuf>,
 }
 
 /// Runs the recipe for `req.kind`.
@@ -156,19 +159,33 @@ pub fn edit(
         style,
         report: EditReport::default(),
     };
-    match req.kind {
+    let result = match req.kind {
         VideoKind::TalkingHeadShort | VideoKind::TalkingHeadLong | VideoKind::Tutorial => {
-            speech::talking_head(&mut job, progress)?
+            speech::talking_head(&mut job, progress)
         }
-        VideoKind::Podcast => speech::podcast(&mut job, progress)?,
-        VideoKind::Clips => speech::clips(&mut job, progress)?,
-        VideoKind::Explainer => speech::explainer(&mut job, progress)?,
+        VideoKind::Podcast => speech::podcast(&mut job, progress),
+        VideoKind::Clips => speech::clips(&mut job, progress),
+        VideoKind::Explainer => speech::explainer(&mut job, progress),
         VideoKind::Vlog | VideoKind::Promo | VideoKind::MusicVideo => {
-            beat::edit(&mut job, progress)?
+            beat::edit(&mut job, progress)
         }
-        VideoKind::Documentary => documentary::edit(&mut job, progress)?,
+        VideoKind::Documentary => documentary::edit(&mut job, progress),
+    };
+    if let Err(e) = result {
+        discard_unfinished(ws, &job.report);
+        return Err(e);
     }
     Ok(job.report)
+}
+
+/// A failed edit must not leave an empty project behind: drops every folder the run created and
+/// never finished (finished ones are valid projects and stay).
+fn discard_unfinished(ws: &Workspace, report: &EditReport) {
+    for dir in &report.started {
+        if !report.projects.contains(dir) && dir.starts_with(ws.projects()) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
 
 pub(crate) struct Job<'a> {
@@ -215,6 +232,7 @@ impl Job<'_> {
             .create_project(name, self.req.kind, canvas.clone())?;
         self.style.apply_to(&mut project);
         project.canvas = canvas;
+        self.report.started.push(dir.clone());
         Ok((dir, project))
     }
 
@@ -314,6 +332,7 @@ impl Job<'_> {
         project: &mut Project,
         progress: &mut dyn FnMut(&str),
     ) -> Result<()> {
+        aim_clips_at_faces(project);
         project.normalize();
         project
             .validate()
@@ -395,6 +414,57 @@ impl Job<'_> {
         self.report.drafts.push(out.to_path_buf());
         Ok(())
     }
+}
+
+/// Per clip: the speaker's face where this part of the source shows it, so a crop and the
+/// punch-ins inside it follow a speaker who moves, and one false detection cannot drag them off.
+/// Only clips a recipe already aimed (focus set) and whose source has face boxes change. A zoom
+/// without its own focus gets the face over its own stretch.
+fn aim_clips_at_faces(project: &mut Project) {
+    let faces = project.faces.clone();
+    for item in &mut project.main_mut().items {
+        let len = item.duration;
+        let Some(clip) = item.clip_mut() else {
+            continue;
+        };
+        let (Some(track), Some(_)) = (faces.get(&clip.asset), clip.focus) else {
+            continue;
+        };
+        let (src_in, speed) = (clip.src_in, clip.speed);
+        if let Some(f) = face_between(track, src_in, src_in + len * speed) {
+            clip.focus = Some(f);
+        }
+        for z in clip.zooms.iter_mut().filter(|z| z.focus.is_none()) {
+            let (a, b) = (z.at.max(0.0), (z.at + z.duration).min(len));
+            if b > a {
+                z.focus = face_between(track, src_in + a * speed, src_in + b * speed);
+            }
+        }
+    }
+}
+
+/// Face samples farther than this from a stretch (seconds) no longer say where the face is.
+const FACE_REACH: f64 = 5.0;
+/// Fewest samples a median is taken over; short stretches borrow their nearest neighbours.
+const FACE_MIN_SAMPLES: usize = 5;
+
+/// Median face center over source seconds `a..b`. A stretch with fewer than five samples borrows
+/// the nearest ones within five seconds, so a single false detection in a short clip is outvoted.
+fn face_between(track: &[FaceSample], a: f64, b: f64) -> Option<Point> {
+    let gap = |s: &FaceSample| (a - s.t).max(s.t - b).max(0.0);
+    let mut near: Vec<(f64, FaceSample)> = track
+        .iter()
+        .map(|s| (gap(s), *s))
+        .filter(|(d, _)| *d <= FACE_REACH)
+        .collect();
+    near.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let inside = near.iter().take_while(|(d, _)| *d == 0.0).count();
+    let picked: Vec<FaceSample> = near
+        .into_iter()
+        .take(inside.max(FACE_MIN_SAMPLES))
+        .map(|(_, s)| s)
+        .collect();
+    analyze::focus(&picked)
 }
 
 /// The first asset transcribed in a project owns `transcript.json` (what `veecut transcript` and
@@ -644,13 +714,39 @@ pub(crate) fn hook(
     Ok(())
 }
 
-/// A complete sentence of at most ten words, preferring the opener, then the clips scorer.
-/// Highlight titles are shortened for display, so recover the full sentence from its source time.
+/// Words that open a thought already under way, so a sentence starting with one cannot open a
+/// video (lowercase, letters only).
+const HOOK_BAD_OPENERS: &[&str] = &[
+    "and", "but", "so", "or", "nor", "yet", "because", "also", "then", "plus", "which", "whose",
+    "although", "though", "whereas", "um", "uh", "like", "it", "its", "that", "this", "these",
+    "those", "they", "he", "she",
+];
+
+/// A complete sentence that can stand alone as the opener: it ends with punctuation, does not
+/// start lowercase (a fragment cut from the middle of a sentence) and does not start with a
+/// conjunction or a pronoun pointing back at something unsaid.
+fn can_open(text: &str) -> bool {
+    let text = text.trim();
+    let first = text.split_whitespace().next().unwrap_or("");
+    let word: String = first
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '\'')
+        .flat_map(char::to_lowercase)
+        .collect();
+    text.ends_with(['.', '?', '!'])
+        && !first
+            .chars()
+            .find(|c| c.is_alphabetic())
+            .is_some_and(char::is_lowercase)
+        && !HOOK_BAD_OPENERS.contains(&word.as_str())
+}
+
+/// A complete sentence of at most ten words that can open the video, preferring the opener, then
+/// the clips scorer. Highlight titles are shortened for display, so recover the full sentence from
+/// its source time. None when nothing qualifies: a mid-video fragment is worse than no hook.
 pub(crate) fn hook_from(transcript: &Transcript) -> Option<(String, f64)> {
     let sentences = transcript.sentences();
-    let fits = |s: &&crate::transcript::Sentence| {
-        s.end_word - s.first <= 10 && s.text.trim_end().ends_with(['.', '?', '!'])
-    };
+    let fits = |s: &&crate::transcript::Sentence| s.end_word - s.first <= 10 && can_open(&s.text);
     let first = sentences.first()?;
     let picked = if fits(&first) {
         first
@@ -670,7 +766,8 @@ pub(crate) fn hook_from(transcript: &Transcript) -> Option<(String, f64)> {
         };
         let best = analyze::highlights(&candidates, 0.0, max_len, 1)
             .into_iter()
-            .next()?;
+            .next()
+            .filter(|h| h.score > 0.0)?;
         short.into_iter().find(|s| s.start == best.start)?
     };
     let words = &transcript.words[picked.first..picked.end_word];
@@ -735,7 +832,7 @@ pub(crate) fn track_face(
         },
     ) {
         Ok(_) => job.report.summary.push(format!(
-            "Face found at {found} checks over {:.0} s; captions keep off the mouth and chin where it was found",
+            "Face found at {found} checks over {:.0} s; captions keep off the eyes, mouth and chin where it was found",
             range.1 - range.0
         )),
         Err(e) => job.report.review.push(format!(
@@ -939,5 +1036,150 @@ mod tests {
         req.motion = Some(ExplainerMotion::Hold);
         let error = edit(&ws, &req, &mut |_| {}).unwrap_err().to_string();
         assert!(error.contains("only supported for explainer"), "{error}");
+    }
+
+    fn words(text: &str) -> Transcript {
+        let words = text
+            .split_whitespace()
+            .enumerate()
+            .map(|(i, w)| crate::transcript::TranscriptWord {
+                text: w.into(),
+                start: i as f64 * 0.4,
+                end: i as f64 * 0.4 + 0.3,
+                confidence: None,
+            })
+            .collect::<Vec<_>>();
+        Transcript {
+            asset: "a".into(),
+            provider: "test".into(),
+            language: None,
+            duration: words.last().map_or(0.0, |w| w.end),
+            words,
+        }
+    }
+
+    #[test]
+    fn hook_never_opens_on_a_fragment_or_a_dangling_pronoun() {
+        let long = "You know I got the opportunity to visit a place far away yesterday.";
+        // Only fragments to choose from: no hook, so the recipe asks for one in the review.
+        for tail in [
+            "and covered by protective coverings.",
+            "And covered by protective coverings.",
+            "It was late.",
+            "But then we left!",
+        ] {
+            assert!(
+                hook_from(&words(&format!("{long} {tail}"))).is_none(),
+                "{tail}"
+            );
+        }
+        // A fragment that would have been the opener is skipped for the next whole sentence.
+        let (text, _) = hook_from(&words("And then we left. Why do you always quit?")).unwrap();
+        assert_eq!(text.replace('*', ""), "Why do you always quit");
+        // Unaffected: a plain sentence and a non-English opener.
+        assert!(hook_from(&words("We walked home. Why do you quit?")).is_some());
+        assert!(hook_from(&words("Kumusta. Ako si Karl.")).is_some());
+    }
+
+    #[test]
+    fn failed_edit_removes_the_project_it_started_but_keeps_finished_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            root: dir.path().to_path_buf(),
+        };
+        let req = EditRequest::new(VideoKind::Clips);
+        let mut job = Job {
+            ws: &ws,
+            req: &req,
+            style: Style::default(),
+            report: EditReport::default(),
+        };
+        let (done, _) = job.start("done", Canvas::vertical()).unwrap();
+        job.report.projects.push(done.clone());
+        let (half, _) = job.start("half", Canvas::vertical()).unwrap();
+        assert!(half.exists());
+        discard_unfinished(&ws, &job.report);
+        assert!(!half.exists());
+        assert!(done.exists());
+    }
+
+    #[test]
+    fn clips_aim_at_the_face_where_they_are_and_ignore_one_false_detection() {
+        use crate::project::{Asset, Zoom};
+        let mut p = Project::new("t", VideoKind::TalkingHeadShort, Canvas::vertical());
+        p.assets.push(Asset {
+            id: "a".into(),
+            path: "a.mp4".into(),
+            kind: AssetKind::Video,
+            role: AssetRole::Source,
+            duration: 30.0,
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            has_audio: true,
+        });
+        // The speaker sits left for ten seconds, then right; one detection at 5.5 s is wrong.
+        let track: Vec<FaceSample> = (0..40)
+            .map(|k| {
+                let t = k as f64 * 0.5;
+                let x = if (t - 5.5).abs() < 1e-9 {
+                    0.8
+                } else if t < 10.0 {
+                    0.3
+                } else {
+                    0.7
+                };
+                FaceSample {
+                    t,
+                    x,
+                    y: 0.3,
+                    w: 0.2,
+                    h: 0.2,
+                }
+            })
+            .collect();
+        p.faces.insert("a".into(), track);
+        for (src_in, duration) in [(0.0, 8.0), (5.0, 1.0), (12.0, 8.0)] {
+            ops::apply(
+                &mut p,
+                &Op::AddClip {
+                    asset: "a".into(),
+                    track: Some("main".into()),
+                    start: None,
+                    index: None,
+                    src_in,
+                    duration: Some(duration),
+                    frame: None,
+                    volume: None,
+                    duck: None,
+                },
+            )
+            .unwrap();
+        }
+        for item in &mut p.main_mut().items {
+            let clip = item.clip_mut().unwrap();
+            clip.focus = Some(Point::new(0.5, 0.4));
+        }
+        p.main_mut().items[2].clip_mut().unwrap().zooms.push(Zoom {
+            at: 1.0,
+            duration: 2.0,
+            scale: 1.15,
+            focus: None,
+            ease: 0.0,
+        });
+        aim_clips_at_faces(&mut p);
+        let focus: Vec<Point> = p
+            .main()
+            .items
+            .iter()
+            .map(|i| i.clip().unwrap().focus.unwrap())
+            .collect();
+        assert!((focus[0].x - 0.4).abs() < 1e-5, "{focus:?}");
+        // The one-second clip holds the false detection; its neighbours outvote it.
+        assert!((focus[1].x - 0.4).abs() < 1e-5, "{focus:?}");
+        assert!((focus[2].x - 0.8).abs() < 1e-5, "{focus:?}");
+        assert!((focus[2].y - 0.4).abs() < 1e-5, "{focus:?}");
+        let zoom = &p.main().items[2].clip().unwrap().zooms[0];
+        assert!((zoom.focus.unwrap().x - 0.8).abs() < 1e-5);
     }
 }

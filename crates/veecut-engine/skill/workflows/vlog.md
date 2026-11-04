@@ -22,7 +22,7 @@ veecut edit inbox/beach1.mp4 inbox/beach2.mp4 inbox/sunset.jpg inbox/dinner.mp4 
 ## What the recipe does
 
 - Finds the song's beat and cuts the footage on it, 2, 4 or 8 beats per shot, whichever comes closest to 2 s. Without a clear beat it uses a steady 120 BPM grid.
-- Takes the files in turn and uses each stretch of footage once, starting about a tenth of the way into each clip. A photo is used once, with a slow pan and zoom. Footage plays muted.
+- Takes the files in turn and uses each stretch of footage once, starting past each clip's opening and skipping black or dark stretches. A photo is used once, with a slow pan and zoom. Footage plays muted. If the footage runs out before the song ends, the review says so.
 - Adds a 0.3 s crossfade every 8 shots, fades in the first shot and fades out the last.
 - Shows the first `--copy` line as a title at the start.
 - Plays the music at full level under everything and fades it out at the end.

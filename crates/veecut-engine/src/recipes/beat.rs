@@ -1,9 +1,10 @@
 //! Recipes cut to music: vlog and B-roll montages, product promos, music and lyric videos.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use super::documentary::{black_at, past_opening};
 use super::{Job, SAMPLE_RATE, add_captions, audio_files, audio_track, pcm, place_audio, text_sfx};
 use crate::analyze;
 use crate::media;
@@ -37,6 +38,64 @@ fn beats_per_shot(spb: f64, target: f64, choices: &[usize]) -> usize {
                 .total_cmp(&((**b as f64 * spb) - target).abs())
         })
         .expect("choices are not empty")
+}
+
+/// Crossfade between vlog shots, in seconds.
+const CROSSFADE: f64 = 0.3;
+/// Silence between one promo line leaving and the next arriving, in seconds.
+const LINE_GAP: f64 = 0.05;
+
+/// Where to start looking for a `len`-second shot in a video of `duration` seconds. A video
+/// not yet used opens past its opening, but never so late that the shot cannot fit: a short
+/// phone clip would otherwise be skipped for a shot it could hold.
+fn search_from(cursor: f64, len: f64, duration: f64, fresh: bool) -> f64 {
+    if fresh {
+        cursor.min((duration - 0.05 - len).max(0.0))
+    } else {
+        cursor
+    }
+}
+
+/// Where a `len`-second shot can start at or after `from` in a video of `duration` seconds
+/// without a black frame at its start, middle or end; None when the rest of the video has none.
+/// Fades and slates are black, and a black beat looks like a fault and fails the render check.
+fn lit_run(path: &Path, from: f64, len: f64, duration: f64) -> Option<f64> {
+    let mut at = from;
+    // ponytail: probes every half second with up to three frame grabs; a faster scan if montages get slow
+    while at + len <= duration - 0.05 + 1e-9 {
+        if [
+            0.25f64.min(len / 2.0),
+            len / 2.0,
+            (len - 0.25).max(len / 2.0),
+        ]
+        .iter()
+        .all(|d| !black_at(path, at + d))
+        {
+            return Some(at);
+        }
+        at += 0.5;
+    }
+    None
+}
+
+/// Start and length of each promo line: line `i` starts on beat `8 i` and is gone `LINE_GAP`
+/// before the next one arrives (the last one holds to `total`). The beat grid can be tighter
+/// than the nominal tempo, so the next start, not `8 * spb`, ends a line.
+fn promo_spans(grid: &[f64], spb: f64, n: usize, total: f64) -> Vec<(f64, f64)> {
+    let starts: Vec<f64> = (0..n)
+        .map(|i| {
+            grid.get(i * 8)
+                .copied()
+                .unwrap_or(i as f64 * 8.0 * spb)
+                .min(total - 0.5 * (n - i) as f64)
+        })
+        .collect();
+    (0..n)
+        .map(|i| {
+            let end = starts.get(i + 1).map_or(total, |s| s - LINE_GAP);
+            (starts[i], end - starts[i])
+        })
+        .collect()
 }
 
 /// Splits `[0, length)` into shots that start and end on beats, `per_shot` beats long, starting
@@ -177,7 +236,10 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
 
     let length = match kind {
         // Each line holds two bars, plus a bar for the end card to land.
-        VideoKind::Promo => (lines.len() as f64 * 8.0 + 4.0) * spb,
+        VideoKind::Promo => grid
+            .get(lines.len() * 8 + 4)
+            .copied()
+            .unwrap_or((lines.len() as f64 * 8.0 + 4.0) * spb),
         _ => music_len,
     }
     .min(music_len);
@@ -194,14 +256,18 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
     if !visual_ids.is_empty() {
         let mut cursor: Vec<f64> = visual_ids
             .iter()
-            .map(|id| p.asset(id).map(|a| a.duration * 0.1).unwrap_or(0.0))
+            .map(|id| p.asset(id).map(|a| past_opening(a.duration)).unwrap_or(0.0))
             .collect();
         let mut exhausted = vec![false; visual_ids.len()];
+        let mut fresh = vec![true; visual_ids.len()];
         let mut ops = Vec::new();
         let mut kb = Vec::new();
         let mut k = 0;
         for &(s, e) in &bounds {
-            let len = e - s;
+            // A crossfaded shot starts early by the overlap; lengthen it so its end, and every
+            // later cut, stays on the beat.
+            let crossfaded = kind == VideoKind::Vlog && !kb.is_empty() && kb.len() % 8 == 0;
+            let len = e - s + if crossfaded { CROSSFADE } else { 0.0 };
             let mut placed = false;
             for _ in 0..visual_ids.len() {
                 let i = k % visual_ids.len();
@@ -225,23 +291,26 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
                     kb.push(true);
                     exhausted[i] = true;
                 } else {
-                    if cursor[i] + len > asset.duration - 0.05 {
+                    let path = p.asset_path(&dir, &asset);
+                    let from = search_from(cursor[i], len, asset.duration, fresh[i]);
+                    let Some(at) = lit_run(&path, from, len, asset.duration) else {
                         exhausted[i] = true;
                         continue;
-                    }
+                    };
                     ops.push(Op::AddClip {
                         asset: asset.id.clone(),
                         track: Some("main".into()),
                         start: None,
                         index: None,
-                        src_in: cursor[i],
+                        src_in: at,
                         duration: Some(len),
                         frame: None,
                         volume: None,
                         duck: None,
                     });
                     kb.push(false);
-                    cursor[i] += len;
+                    cursor[i] = at + len;
+                    fresh[i] = false;
                 }
                 placed = true;
                 break;
@@ -249,12 +318,6 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
             if !placed {
                 break;
             }
-            used = e;
-        }
-        if used < length - 0.5 {
-            job.report.review.push(format!(
-                "The footage ran out at {used:.1}s of {length:.1}s of music; the video ends there. Add more clips to fill the song."
-            ));
         }
         ops::apply_all(&mut p, &ops)?;
         let ids: Vec<String> = p.main().items.iter().map(|i| i.id.clone()).collect();
@@ -278,7 +341,7 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
             if kind == VideoKind::Vlog && n > 0 && n % 8 == 0 {
                 patch["transition"] = serde_json::to_value(Transition {
                     kind: TransitionKind::Crossfade,
-                    duration: 0.3,
+                    duration: CROSSFADE,
                 })?;
             }
             if n == 0 {
@@ -296,6 +359,12 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
             )?;
         }
         used = p.duration();
+        // Checked after the crossfade overlaps are applied, so they cannot hide a short timeline.
+        if used < length - 0.5 {
+            job.report.review.push(format!(
+                "The footage ran out at {used:.1}s of {length:.1}s of music; the video ends there. Add more clips to fill the song."
+            ));
+        }
     }
     let total = if used > 0.0 { used } else { length };
 
@@ -312,14 +381,9 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
 
     match kind {
         VideoKind::Promo => {
-            for (n, line) in lines.iter().enumerate() {
-                let start = grid
-                    .get(n * 8)
-                    .copied()
-                    .unwrap_or(n as f64 * 8.0 * spb)
-                    .min(total - 0.5);
+            let spans = promo_spans(&grid, spb, lines.len(), total);
+            for (n, (line, &(start, duration))) in lines.iter().zip(&spans).enumerate() {
                 let last = n + 1 == lines.len();
-                let duration = if last { total - start } else { 8.0 * spb };
                 let preset = if last {
                     TextPreset::Cta
                 } else if line.split_whitespace().count() <= 3 {
@@ -424,5 +488,83 @@ mod tests {
         assert_eq!(lyric_captions(&mut p, &lines, 6.0), 2);
         let cap = &p.tracks[3].items[1];
         assert!((cap.start - 3.5).abs() < 1e-9 && (cap.duration - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_short_clip_still_holds_its_first_shot() {
+        // 2.5 s phone clip: past_opening is 0.625 s, and 0.625 + 2 s overruns the clip.
+        let from = search_from(0.625, 2.0, 2.5, true);
+        assert!((from - 0.45).abs() < 1e-9, "from {from}");
+        assert!(from + 2.0 <= 2.5 - 0.05 + 1e-9, "the shot fits");
+        assert_eq!(
+            search_from(5.0, 2.0, 60.0, true),
+            5.0,
+            "a long clip starts past its opening"
+        );
+        assert_eq!(
+            search_from(0.625, 2.0, 2.5, false),
+            0.625,
+            "a used clip carries on"
+        );
+        assert_eq!(
+            search_from(0.5, 4.0, 3.0, true),
+            0.0,
+            "a clip shorter than the shot"
+        );
+    }
+
+    #[test]
+    fn promo_lines_end_before_the_next_starts() {
+        // The detected grid is tighter (0.4 s) than the nominal 0.5 s per beat.
+        let grid: Vec<f64> = (0..60).map(|i| 0.2 + i as f64 * 0.4).collect();
+        let spans = promo_spans(&grid, 0.5, 3, 12.0);
+        assert_eq!(spans.len(), 3);
+        for w in spans.windows(2) {
+            assert!(w[0].0 + w[0].1 < w[1].0, "{w:?} overlap");
+        }
+        let (s, d) = spans[2];
+        assert!(
+            (s + d - 12.0).abs() < 1e-9,
+            "the last line holds to the end"
+        );
+    }
+
+    #[test]
+    fn shots_skip_black_stretches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fade.mp4");
+        let mut cmd = media::ffmpeg_command().unwrap();
+        cmd.args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=160x90:r=30:d=4",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=160x90:r=30:d=4",
+        ])
+        .args([
+            "-filter_complex",
+            "[0:v][1:v]concat=n=2:v=1[v]",
+            "-map",
+            "[v]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&path);
+        media::run(&mut cmd).unwrap();
+        let at = lit_run(&path, 0.0, 1.0, 8.0).expect("the lit half has room");
+        assert!(at >= 3.9 && at + 1.0 <= 8.0, "start {at}");
+        assert_eq!(
+            lit_run(&path, 5.0, 1.0, 8.0),
+            Some(5.0),
+            "a lit start stays"
+        );
+        assert_eq!(lit_run(&path, 7.5, 1.0, 8.0), None, "no room left");
+        assert_eq!(lit_run(&path, 0.0, 3.0, 4.0), None, "all black");
     }
 }

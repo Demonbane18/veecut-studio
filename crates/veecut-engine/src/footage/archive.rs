@@ -186,7 +186,7 @@ fn seconds(s: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// MP4 videos, 720p to 1080p first and then smaller; JPEG or PNG pictures, largest first.
+/// MP4 videos: medium HD first, smaller files first. Known over-cap files are skipped.
 fn pick(files: &[File], kind: MediaKind) -> Vec<&File> {
     let mut out: Vec<&File> = files
         .iter()
@@ -197,6 +197,11 @@ fn pick(files: &[File], kind: MediaKind) -> Vec<&File> {
                 || f.format == "Thumbnail"
                 || f.format == "Item Tile";
             !thumb
+                && num(&f.size)
+                    <= match kind {
+                        MediaKind::Video => super::VIDEO_CAP as f64,
+                        MediaKind::Image => super::IMAGE_CAP as f64,
+                    }
                 && match kind {
                     MediaKind::Video => name.ends_with(".mp4"),
                     MediaKind::Image => [".jpg", ".jpeg", ".png"].iter().any(|e| name.ends_with(e)),
@@ -206,7 +211,7 @@ fn pick(files: &[File], kind: MediaKind) -> Vec<&File> {
     match kind {
         MediaKind::Video => out.sort_by_key(|f| {
             let h = num(&f.height) as i64;
-            (!(720..=1080).contains(&h), if h > 1080 { h } else { -h })
+            (!(720..=1080).contains(&h), num(&f.size) as u64, h)
         }),
         MediaKind::Image => out.sort_by_key(|f| std::cmp::Reverse(num(&f.size) as u64)),
     }
@@ -275,19 +280,34 @@ mod tests {
             .iter()
             .map(|f| f.name.as_str())
             .collect();
-        assert_eq!(
-            names,
-            [
-                "Operatio1955_hd.mp4",
-                "Operatio1955.mp4",
-                "Operatio1955_512kb.mp4"
-            ]
-        );
+        // The 195 MB HD file is over VIDEO_CAP, so it is not offered; smaller files come first.
+        assert_eq!(names, ["Operatio1955_512kb.mp4", "Operatio1955.mp4"]);
         assert_eq!(seconds("15:10"), 910.0);
         assert_eq!(seconds("910.78"), 910.78);
         assert!(
             pick(&m.files, MediaKind::Image).is_empty(),
             "thumbnails are not pictures to fetch"
         );
+    }
+
+    #[test]
+    fn oversized_renditions_do_not_hide_smaller_files() {
+        let file = |name: &str, height: &str, bytes: u64| File {
+            name: name.into(),
+            height: Some(height.into()),
+            size: Some(bytes.to_string()),
+            ..File::default()
+        };
+        let files = [
+            file("oversized.mp4", "720", super::super::VIDEO_CAP + 1),
+            file("large.mp4", "1080", 100_000_000),
+            file("medium.mp4", "720", 30_000_000),
+            file("small.mp4", "360", 10_000_000),
+        ];
+        let names: Vec<_> = pick(&files, MediaKind::Video)
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(names, ["medium.mp4", "large.mp4", "small.mp4"]);
     }
 }

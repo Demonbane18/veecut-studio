@@ -21,7 +21,7 @@ veecut edit inbox/setup-walkthrough.mov --kind tutorial --json
 
 - Makes a 16:9 project and transcribes the voice.
 - Cuts pauses the natural way (over 0.55 s, or 0.25 s when the style pace is `tight`) and cuts stutters, false starts and high-confidence retakes, keeping the last take.
-- Keeps silent stretches of 2 s or more, because the viewer may need to see them (typing, loading), but plays them 2 to 8 times faster and muted, with an "N× SPEED" label.
+- Keeps silent stretches of 2 s or more, because the viewer may need to see them (typing, loading), but plays them 2 to 8 times faster and muted, with an "N× SPEED" label at the bottom center. Only stretches with no spoken words are sped up; narration always plays at normal speed.
 - Shows plain subtitles low in the frame (0.88 of the height), not in capitals, unless the style turns captions off.
 - Uses each `--broll` file (for example a slide or a photo of the result) once as a full-frame cutaway of at most 3 s, muted, at a sentence start after the first 3 s, spread evenly; stills get a slow push-in. In a tutorial the screen usually matters more, so pass B-roll only when the user asks.
 - Adds a music bed and sound effects only as the style asks (see `workflows/talking-head-short.md`, relative to the loaded `SKILL.md` directory, for the levels).

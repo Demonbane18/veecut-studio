@@ -18,8 +18,8 @@ use crate::project::{
 use crate::transcript::Transcript;
 
 /// Herk Edit Kit's camera for talking heads: alternate wide and punched-in framing, switching
-/// only at cuts and phrase boundaries, so no shot runs past `max_shot` (its measured reels: shots
-/// 1.1-1.4 s on average, none over about 2.8 s). Long-form uses slower numbers.
+/// at cuts and phrase boundaries, falling back to word gaps before `max_shot` (its measured
+/// reels: shots 1.1-1.4 s on average, none over about 2.8 s). Long-form uses slower numbers.
 pub(super) fn punch_ins(
     project: &mut Project,
     transcript: &Transcript,
@@ -29,25 +29,25 @@ pub(super) fn punch_ins(
     scale: f32,
 ) {
     let asset = transcript.asset.as_str();
-    let mut points: Vec<(f64, bool)> = project
+    let mut points: Vec<(f64, bool, bool)> = project
         .main()
         .items
         .iter()
         .skip(1)
-        .map(|i| (i.start, true))
+        .map(|i| (i.start, true, true))
         .collect();
     for pair in transcript.words.windows(2) {
         let (a, b) = (&pair[0], &pair[1]);
         let phrase_end =
             a.text.ends_with([',', '.', ';', ':', '?', '!']) || b.start - a.end >= 0.12;
-        if !phrase_end {
+        if b.start < a.end {
             continue;
         }
-        let ta = project.source_to_timeline(asset, (a.end - 0.01).max(a.start));
-        let tb = project.source_to_timeline(asset, (b.start + 0.01).min(b.end));
+        let ta = project.source_to_timeline(asset, a.end);
+        let tb = project.source_to_timeline(asset, b.start);
         if let (Some(ta), Some(tb)) = (ta, tb) {
             if (0.0..0.6).contains(&(tb - ta)) {
-                points.push(((ta + tb) / 2.0, false));
+                points.push(((ta + tb) / 2.0, false, phrase_end));
             }
         }
     }
@@ -55,7 +55,7 @@ pub(super) fn punch_ins(
     let end = project.duration();
     let (mut punched, mut shot_start) = (false, 0.0);
     let mut intervals = Vec::new();
-    for (i, &(t, is_cut)) in points.iter().enumerate() {
+    for (i, &(t, is_cut, phrase_end)) in points.iter().enumerate() {
         let len = t - shot_start;
         if len <= 0.05 {
             continue;
@@ -63,8 +63,15 @@ pub(super) fn punch_ins(
         let next = points.get(i + 1).map(|p| p.0).unwrap_or(end);
         let change = if is_cut {
             len >= min_shot * 0.5
+        } else if phrase_end {
+            let next_phrase = points[i + 1..]
+                .iter()
+                .find(|p| p.1 || p.2)
+                .map(|p| p.0)
+                .unwrap_or(end);
+            len >= target || (len >= min_shot && next_phrase - shot_start > max_shot)
         } else {
-            len >= target || (len >= min_shot && next - shot_start > max_shot)
+            len >= min_shot && next - shot_start > max_shot
         };
         if change {
             if punched {
@@ -117,8 +124,8 @@ pub(super) fn stem(path: &Path) -> String {
 pub(super) fn note_reviews(job: &mut Job, removed: &[analyze::Removal]) {
     for r in removed.iter().filter(|r| r.review) {
         job.report.review.push(format!(
-            "Possible {:?} kept at {:.2}-{:.2}s of the source: \"{}\". If it is a mistake, cut it.",
-            r.reason, r.start, r.end, r.text
+            "Possible {:?} kept at {:.2}-{:.2}s of the source: \"{}\". {} Listen to both takes before editing; remove only a confirmed repeated phrase, preserving unique speech.",
+            r.reason, r.start, r.end, r.text, r.note
         ));
     }
 }
@@ -149,11 +156,8 @@ fn add_hook(
         .clone()
         .map(|text| (text, 3.0))
         .or_else(|| hook_from(transcript));
-    if let Some((text, src_end)) = picked {
-        let until = project
-            .source_to_timeline(&transcript.asset, src_end)
-            .unwrap_or(3.0);
-        hook(project, &text, until, face)?;
+    if let Some((text, _)) = picked {
+        hook(project, &text, 3.0, face)?;
         if job.req.hook.is_none() {
             job.report.review.push(format!(
                 "Automatic hook: \"{text}\". Check that it works as the opener."
@@ -186,14 +190,14 @@ pub(super) fn talking_head(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Res
     let plan = analyze::plan_cuts(&transcript, &samples, SAMPLE_RATE, &job.cut_settings());
     note_reviews(job, &plan.removed);
     if kind == VideoKind::Tutorial {
-        lay_tutorial(&mut p, &src, &plan)?;
+        lay_tutorial(&mut p, &src, &plan, &transcript)?;
     } else {
         lay_main(&mut p, &src, &plan.keep)?;
     }
     cut_summary(job, &plan.removed, info.duration, p.duration());
 
     // Framing: keep the face in a cover crop and at the center of punch-ins, and track it so
-    // captions stay off the mouth and chin. Screen recordings have no face to find.
+    // captions stay off the eyes, mouth and chin. Screen recordings have no face to find.
     let face = if kind != VideoKind::Tutorial {
         progress("Finding the face");
         track_face(job, &mut p, &src, &source, (0.0, info.duration))
@@ -226,13 +230,27 @@ pub(super) fn talking_head(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Res
 
 /// Tutorials keep long silent stretches (typing, loading) but play them fast and muted, with
 /// a small speed label, instead of cutting what the viewer needs to see.
-fn lay_tutorial(p: &mut Project, src: &str, plan: &analyze::CutPlan) -> Result<()> {
+fn lay_tutorial(
+    p: &mut Project,
+    src: &str,
+    plan: &analyze::CutPlan,
+    transcript: &Transcript,
+) -> Result<()> {
     let mut segments: Vec<(f64, f64, f64)> = plan.keep.iter().map(|&(a, b)| (a, b, 1.0)).collect();
     for r in plan
         .removed
         .iter()
         .filter(|r| r.reason == CutReason::Silence && !r.review)
     {
+        // Transcript words win over an audio-only silence estimate, even in an old cut plan.
+        if transcript
+            .words
+            .iter()
+            .any(|w| w.start < r.end && w.end > r.start)
+        {
+            segments.push((r.start, r.end, 1.0));
+            continue;
+        }
         let len = r.end - r.start - 0.4;
         if len >= 2.0 {
             let speed = (len / 1.5).clamp(2.0, 8.0).round();
@@ -274,7 +292,7 @@ fn lay_tutorial(p: &mut Project, src: &str, plan: &analyze::CutPlan) -> Result<(
                 start,
                 duration,
                 preset: TextPreset::Label,
-                position: Some(Point::new(0.88, 0.1)),
+                position: Some(Point::new(0.5, 0.92)),
                 style: None,
                 anim_in: Some(Anim::Fade),
                 anim_out: Some(Anim::Fade),
@@ -511,7 +529,8 @@ pub(super) fn clips(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()>
     let transcript = job.transcript(&cache, &scratch, &src_id, progress)?;
     let samples = pcm(&scratch, &cache, &src_id)?;
     let plan = analyze::plan_cuts(&transcript, &samples, SAMPLE_RATE, &job.cut_settings());
-    let moments = analyze::highlights(&transcript, 20.0, 60.0, job.req.clips.max(1));
+    let moments =
+        analyze::highlights_with_cuts(&transcript, &plan.keep, 20.0, 60.0, job.req.clips.max(1));
     if moments.is_empty() {
         bail!(
             "found no self-contained moment between 20 and 60 seconds; is the recording long enough?"
@@ -530,13 +549,13 @@ pub(super) fn clips(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()>
         let src = job.ws.add_asset(&mut p, &dir, &source, AssetRole::Source)?;
         let mut t = transcript.clone();
         t.asset = src.clone();
-        t.save(&dir.join("transcript.json"))?;
         t.words.retain(|w| w.start >= m.start && w.end <= m.end);
+        t.save(&dir.join("transcript.json"))?;
         let keeps: Vec<(f64, f64)> = plan
             .keep
             .iter()
             .map(|&(a, b)| (a.max(m.start), b.min(m.end)))
-            .filter(|(a, b)| b - a > 0.2)
+            .filter(|(a, b)| b > a)
             .collect();
         lay_main(&mut p, &src, &keeps)?;
         let face = track_face(job, &mut p, &src, &source, (m.start, m.end));
@@ -547,7 +566,7 @@ pub(super) fn clips(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()>
             "Clip {}: {} ({:.0} s), score {:.2}: {}",
             n + 1,
             m.title,
-            m.end - m.start,
+            p.duration(),
             m.score,
             m.reason
         ));
@@ -598,12 +617,24 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
     let voice = voice.context(
         "an explainer needs narration: pass --voice FILE, an audio source, or a video with audio",
     )?;
-    if !media::probe(&voice)?.has_audio {
+    let voice_info = media::probe(&voice)?;
+    if !voice_info.has_audio {
         bail!(
             "narration source {} has no audio; pass --voice FILE or an audio source",
             voice.display()
         );
     }
+    // Reject bad B-roll before creating a project that could become the default.
+    for visual in &visuals {
+        if media::probe(visual)?.kind == AssetKind::Audio {
+            bail!(
+                "visual {} has no picture; pass an image or video",
+                visual.display()
+            );
+        }
+    }
+    let synced_picture =
+        voice_info.kind == AssetKind::Video && visuals.len() == 1 && visuals[0] == voice;
     let name = job.req.name.clone().unwrap_or_else(|| stem(&voice));
     let canvas = job.canvas(30.0);
     let (dir, mut p) = job.start(&name, canvas)?;
@@ -647,14 +678,18 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
         .enumerate()
         .map(|(i, &s)| (s, starts.get(i + 1).copied().unwrap_or(total)))
         .collect();
+    explainer_picture_style(&mut p, !visual_ids.is_empty());
     if visual_ids.is_empty() {
-        // The words are the picture: big centered captions.
-        p.captions.position = 0.5;
-        p.captions.size = p.captions.size.max(0.06);
-        if p.captions.mode == CaptionMode::Off || p.captions.mode == CaptionMode::Subtitle {
-            p.captions.mode = CaptionMode::Highlight;
-        }
+        // The words are the picture.
         job.report.review.push("No images or footage were given, so the captions carry the picture. Add visuals with --broll for a richer explainer.".into());
+    } else if synced_picture {
+        lay_explainer_synced_video(&mut p, &visual_ids[0], &plan.keep, job.req.motion)?;
+        job.report
+            .summary
+            .push("Narration video's picture follows the same source cuts as its voice".into());
+        job.report
+            .review
+            .extend(explainer_visual_reviews(&p, &visual_ids, 1));
     } else {
         lay_explainer_visuals(&mut p, &visual_ids, &shots, job.req.motion)?;
         job.report.summary.push(format!(
@@ -662,6 +697,9 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
             shots.len(),
             visual_ids.len()
         ));
+        job.report
+            .review
+            .extend(explainer_visual_reviews(&p, &visual_ids, shots.len()));
     }
     if let Some(copy) = &job.req.copy {
         // Heading cards sit at the top; captions move below them when they would collide.
@@ -671,33 +709,189 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
                 .summary
                 .push("Captions moved to the lower third, under the heading cards".into());
         }
-        for (line, &(s, e)) in copy
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .zip(&shots)
-        {
-            ops::apply(
-                &mut p,
-                &Op::AddText {
-                    text: line.into(),
-                    start: s,
-                    duration: (e - s).min(4.0),
-                    preset: TextPreset::Card,
-                    position: Some(Point::new(0.5, 0.18)),
-                    style: None,
-                    anim_in: Some(Anim::SlideUp),
-                    anim_out: Some(Anim::Fade),
-                    track: None,
-                },
-            )?;
-        }
+        job.report
+            .review
+            .extend(add_explainer_headings(&mut p, &transcript, copy)?);
     }
     cut_summary(job, &plan.removed, transcript.duration, total);
     add_captions(job, &mut p, &transcript)?;
     music_bed(job, &dir, &mut p, true)?;
     text_sfx(job, &dir, &mut p)?;
     job.finish(&dir, &mut p, progress)
+}
+
+fn explainer_picture_style(p: &mut Project, has_visuals: bool) {
+    if !has_visuals {
+        // Clear blackdetect's 10% threshold even between caption pages.
+        p.canvas.background = crate::project::Color::rgb(40, 48, 64);
+        p.captions.position = 0.5;
+        p.captions.size = p.captions.size.max(0.08);
+        p.captions.max_words = 1;
+        if matches!(p.captions.mode, CaptionMode::Off | CaptionMode::Subtitle) {
+            p.captions.mode = CaptionMode::Highlight;
+        }
+    } else if p.canvas.width > p.canvas.height && p.captions.position < 0.4 {
+        p.captions.position = 0.8;
+    }
+}
+
+fn explainer_visual_reviews(p: &Project, visuals: &[String], shots: usize) -> Vec<String> {
+    let mut reviews = Vec::new();
+    let reused = shots.saturating_sub(visuals.len());
+    if reused > 0 {
+        reviews.push(format!(
+            "{reused} shots reuse earlier visuals in the supplied order, without matching their subject to the narration. Add {reused} more visuals in story order or replace those shots."
+        ));
+    }
+    for id in visuals {
+        if let Some(asset) = p.asset(id) {
+            let source = asset.width.max(1) as f64 / asset.height.max(1) as f64;
+            let canvas = p.canvas.width as f64 / p.canvas.height as f64;
+            let kept = (source / canvas).min(canvas / source);
+            if kept < 0.7 {
+                reviews.push(format!(
+                    "{} loses {:.0}% of its picture to the cover crop. Inspect the subject and any baked-in labels; patch its clips with {{\"fit\":\"contain\",\"ken_burns\":null}} to show the whole image with bars.",
+                    asset.path.display(),
+                    (1.0 - kept) * 100.0,
+                ));
+            }
+        }
+    }
+    reviews
+}
+
+fn add_explainer_headings(
+    p: &mut Project,
+    transcript: &Transcript,
+    copy: &str,
+) -> Result<Vec<String>> {
+    let mut headings = Vec::new();
+    let mut reviews = Vec::new();
+    let placed = transcript.placed_words(p);
+    let mut after = -1.0;
+    for line in copy.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let exact = transcript
+            .find_phrase(p, line)
+            .ok()
+            .and_then(|matches| matches.into_iter().find(|m| m.timeline_start > after))
+            .map(|m| m.timeline_start);
+        // ponytail: literal topic words only; unmatched paraphrases need a manual heading op.
+        let words: Vec<_> = line
+            .split_whitespace()
+            .filter_map(explainer_topic_word)
+            .collect();
+        let matched = exact.or_else(|| {
+            if words.is_empty() {
+                return None;
+            }
+            transcript.sentences().iter().find_map(|sentence| {
+                let spoken: Vec<_> = placed
+                    .iter()
+                    .filter(|word| {
+                        word.source_start >= sentence.start
+                            && word.source_start <= sentence.end
+                            && word.timeline_start > after
+                    })
+                    .filter_map(|word| {
+                        Some((explainer_topic_word(&word.text)?, word.timeline_start))
+                    })
+                    .collect();
+                if words
+                    .iter()
+                    .all(|word| spoken.iter().any(|(text, _)| text == word))
+                {
+                    spoken
+                        .iter()
+                        .find(|(word, _)| words.contains(word))
+                        .map(|(_, at)| *at)
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(start) = matched {
+            headings.push((line, start));
+            after = start;
+        } else {
+            reviews.push(format!(
+                "Heading {line:?} did not match a spoken topic in order, so it was not placed. Add it at its intended beat with add_text."
+            ));
+        }
+    }
+    for (index, &(line, start)) in headings.iter().enumerate() {
+        let end = headings.get(index + 1).map_or(p.duration(), |(_, at)| *at);
+        ops::apply(
+            p,
+            &Op::AddText {
+                text: line.into(),
+                start,
+                duration: (end - start).min(4.0),
+                preset: TextPreset::Card,
+                position: Some(Point::new(0.5, 0.18)),
+                style: None,
+                anim_in: Some(Anim::SlideUp),
+                anim_out: Some(Anim::Fade),
+                track: None,
+            },
+        )?;
+    }
+    Ok(reviews)
+}
+
+fn explainer_topic_word(text: &str) -> Option<String> {
+    let word = text
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+    (!word.is_empty()
+        && !matches!(
+            word.as_str(),
+            "a" | "an"
+                | "the"
+                | "our"
+                | "of"
+                | "in"
+                | "on"
+                | "to"
+                | "is"
+                | "are"
+                | "and"
+                | "or"
+                | "like"
+        ))
+    .then_some(word)
+}
+
+fn lay_explainer_synced_video(
+    p: &mut Project,
+    visual: &str,
+    keep: &[(f64, f64)],
+    motion: Option<super::ExplainerMotion>,
+) -> Result<()> {
+    let mut cursor = 0.0;
+    let shots: Vec<_> = keep
+        .iter()
+        .filter(|(start, end)| end - start > 0.1)
+        .map(|(start, end)| {
+            let at = cursor;
+            cursor += end - start;
+            (at, cursor)
+        })
+        .collect();
+    lay_explainer_visuals(p, &[visual.into()], &shots, motion)?;
+    let ids: Vec<_> = p.main().items.iter().map(|item| item.id.clone()).collect();
+    for (id, &(source_start, _)) in ids
+        .into_iter()
+        .zip(keep.iter().filter(|(start, end)| end - start > 0.1))
+    {
+        ops::apply(
+            p,
+            &Op::Patch {
+                item: id,
+                patch: serde_json::json!({ "src_in": source_start }),
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// Fill every sentence interval before appending the next magnetic main-track shot.
@@ -733,15 +927,20 @@ fn lay_explainer_visuals(
             Some(ExplainerMotion::Hold) => None,
             None if video => None,
             mode => {
-                let (from, to) = if mode == Some(ExplainerMotion::Push) {
-                    (Point::new(0.5, 0.5), Point::new(0.5, 0.5))
-                } else if n % 2 == 0 {
-                    (Point::new(0.42, 0.5), Point::new(0.58, 0.5))
-                } else {
-                    (Point::new(0.58, 0.45), Point::new(0.42, 0.55))
-                };
+                // At 1x the decoded frame has no pan room, even when cover crops the source.
+                // Reserve room first, then express its focus offsets in source coordinates.
+                let push = mode == Some(ExplainerMotion::Push);
+                let from_scale = if push { 1.0 } else { 1.06 };
+                let room = (1.0 - 1.0 / from_scale) * 0.4;
+                let source = asset.width.max(1) as f32 / asset.height.max(1) as f32;
+                let canvas = p.canvas.width as f32 / p.canvas.height as f32;
+                let dx = room * (canvas / source).min(1.0);
+                let dy = room * (source / canvas).min(1.0);
+                let direction = if n % 2 == 0 { 1.0 } else { -1.0 };
+                let from = Point::new(0.5 - direction * dx, 0.5 - direction * dy);
+                let to = Point::new(0.5 + direction * dx, 0.5 + direction * dy);
                 Some(KenBurns {
-                    from_scale: 1.0,
+                    from_scale,
                     to_scale: 1.12,
                     from_focus: Some(from),
                     to_focus: Some(to),
@@ -931,6 +1130,229 @@ mod tests {
         assert!((p.main().items.last().unwrap().end() - 2.0000001).abs() < 1e-9);
     }
 
+    #[test]
+    fn explainer_glide_never_clamps_or_lurches_on_vertical_canvas() {
+        use super::super::ExplainerMotion;
+        use crate::project::Rect;
+
+        for (width, height) in [(1920, 1080), (1080, 1920), (900, 1800)] {
+            for shot in 0..2 {
+                let mut p = explainer_project(1.0);
+                p.assets[1].width = width;
+                p.assets[1].height = height;
+                let shots = vec![(0.0, 10.0); shot + 1];
+                lay_explainer_visuals(
+                    &mut p,
+                    &["still".into()],
+                    &shots,
+                    Some(ExplainerMotion::Glide),
+                )
+                .unwrap();
+                let clip = p.main().items[shot].clip().unwrap();
+                let camera = clip.ken_burns.as_ref().unwrap();
+                let mut previous: Option<(f32, f32)> = None;
+                let mut previous_step: Option<(f32, f32)> = None;
+                for frame in 0..=300 {
+                    let t = frame as f64 / 30.0;
+                    let transform = crate::render::canvas_rect(
+                        clip,
+                        (width, height),
+                        (1080, 1920),
+                        t,
+                        10.0,
+                        Rect::FULL,
+                    );
+                    let phase = camera.progress(t / 10.0);
+                    let from = camera.from_focus.unwrap();
+                    let to = camera.to_focus.unwrap();
+                    let focus = Point::new(
+                        from.x + (to.x - from.x) * phase,
+                        from.y + (to.y - from.y) * phase,
+                    );
+                    // A free (unclamped) zoom window puts its requested focus at canvas center.
+                    assert!((transform.x + focus.x * transform.w - 0.5).abs() < 1e-5);
+                    assert!((transform.y + focus.y * transform.h - 0.5).abs() < 1e-5);
+                    let center = (
+                        (transform.x + 0.5 * transform.w) * 1080.0,
+                        (transform.y + 0.5 * transform.h) * 1920.0,
+                    );
+                    if let Some((x, y)) = previous {
+                        let step = (center.0 - x, center.1 - y);
+                        if let Some((dx, dy)) = previous_step {
+                            assert!((step.0 - dx).abs() < 0.1, "horizontal lurch at {frame}");
+                            assert!((step.1 - dy).abs() < 0.1, "vertical lurch at {frame}");
+                        }
+                        previous_step = Some(step);
+                    }
+                    previous = Some(center);
+                }
+                assert_ne!(camera.from_focus, camera.to_focus);
+            }
+        }
+    }
+
+    #[test]
+    fn explainer_headings_follow_spoken_topics_and_report_unmatched_lines() {
+        let mut p = explainer_project(1.0);
+        let mut t = transcript(
+            "Our solar system has many rocks. Another sentence comes first. \
+             This force is called the Yarkovsky effect. More follows.",
+        );
+        t.asset = "voice".into();
+        lay_voice(&mut p, "voice", &[(0.0, 10.0)]).unwrap();
+        let reviews = add_explainer_headings(
+            &mut p,
+            &t,
+            "Our solar system\nThe Yarkovsky effect\nUnspoken topic",
+        )
+        .unwrap();
+        let headings: Vec<_> = p
+            .tracks
+            .iter()
+            .flat_map(|track| &track.items)
+            .filter(|item| matches!(&item.body, ItemBody::Text(_)))
+            .collect();
+        assert_eq!(headings.len(), 2);
+        assert_eq!(headings[0].start, 0.0);
+        let spoken = t
+            .words
+            .iter()
+            .find(|word| word.text == "the")
+            .unwrap()
+            .start;
+        assert!((headings[1].start - spoken).abs() < 1e-9);
+        assert!(headings[0].end() <= headings[1].start);
+        assert_eq!(reviews.len(), 1);
+        assert!(reviews[0].contains("Unspoken topic"));
+    }
+
+    #[test]
+    fn explainer_topic_heading_matches_kept_voice_after_source_cuts() {
+        let mut p = explainer_project(1.0);
+        let mut t = transcript("Discard this. Asteroids such as Bennu are rocky.");
+        t.asset = "voice".into();
+        lay_voice(&mut p, "voice", &[(0.8, 8.0)]).unwrap();
+        let reviews = add_explainer_headings(&mut p, &t, "Asteroids and Bennu").unwrap();
+        assert!(reviews.is_empty());
+        let heading = p
+            .tracks
+            .iter()
+            .flat_map(|track| &track.items)
+            .find(|item| matches!(&item.body, ItemBody::Text(_)))
+            .unwrap();
+        assert_eq!(heading.start, 0.0);
+    }
+
+    #[test]
+    fn explainer_narration_video_picture_follows_every_voice_cut() {
+        let mut p = explainer_project(30.0);
+        let keep = [(5.4, 8.4), (15.0, 19.0), (22.0, 26.0)];
+        lay_voice(&mut p, "short", &keep).unwrap();
+        lay_explainer_synced_video(&mut p, "short", &keep, None).unwrap();
+        let voice = p.tracks.iter().find(|track| track.name == "Voice").unwrap();
+        assert_eq!(p.main().items.len(), voice.items.len());
+        for (picture, voice) in p.main().items.iter().zip(&voice.items) {
+            assert_eq!(picture.start, voice.start);
+            assert_eq!(picture.duration, voice.duration);
+            assert_eq!(picture.clip().unwrap().src_in, voice.clip().unwrap().src_in);
+            assert!(picture.clip().unwrap().muted);
+        }
+        p.validate().unwrap();
+    }
+
+    #[test]
+    fn explainer_caption_picture_uses_nonblack_background_and_large_centered_words() {
+        let mut p = explainer_project(1.0);
+        p.captions.mode = CaptionMode::Off;
+        explainer_picture_style(&mut p, false);
+        let bg = p.canvas.background;
+        let luma = 0.2126 * bg.r as f64 + 0.7152 * bg.g as f64 + 0.0722 * bg.b as f64;
+        assert!(
+            luma > 255.0 * 0.1,
+            "background must clear QA's black threshold"
+        );
+        assert_eq!(p.captions.position, 0.5);
+        assert!(p.captions.size >= 0.08);
+        assert_eq!(p.captions.max_words, 1);
+        assert_eq!(p.captions.mode, CaptionMode::Highlight);
+    }
+
+    #[test]
+    fn explainer_landscape_captions_default_below_picture_subject() {
+        let mut p = explainer_project(1.0);
+        p.canvas = Canvas::landscape();
+        p.captions.position = 0.25;
+        explainer_picture_style(&mut p, true);
+        assert_eq!(p.captions.position, 0.8);
+        p.captions.position = 0.65;
+        explainer_picture_style(&mut p, true);
+        assert_eq!(
+            p.captions.position, 0.65,
+            "keep already safe style position"
+        );
+    }
+
+    #[test]
+    fn explainer_reviews_count_reused_shots() {
+        let p = explainer_project(1.0);
+        let reviews = explainer_visual_reviews(&p, &["still".into()], 4);
+        assert!(reviews.iter().any(|note| note.contains("3 shots reuse")));
+        let reviews = explainer_visual_reviews(&p, &["still".into()], 1);
+        assert!(reviews.iter().all(|note| !note.contains("reuse")));
+    }
+
+    #[test]
+    fn explainer_reviews_warn_about_heavy_crop_and_offer_native_contain() {
+        let mut p = explainer_project(1.0);
+        let reviews = explainer_visual_reviews(&p, &["still".into()], 1);
+        assert!(
+            reviews
+                .iter()
+                .any(|note| note.contains("\"fit\":\"contain\""))
+        );
+        p.assets[1].width = p.canvas.width;
+        p.assets[1].height = p.canvas.height;
+        assert!(explainer_visual_reviews(&p, &["still".into()], 1).is_empty());
+    }
+
+    #[test]
+    fn explainer_invalid_broll_does_not_create_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = crate::workspace::Workspace {
+            root: dir.path().into(),
+        };
+        let voice = dir.path().join("voice.wav");
+        // A one-second silent PCM WAV: no render, model, network or fixture media.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&32036u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&32000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&32000u32.to_le_bytes());
+        wav.resize(32044, 0);
+        std::fs::write(&voice, wav).unwrap();
+        let bad = dir.path().join("headings.txt");
+        std::fs::write(&bad, "Not media").unwrap();
+        let mut req = super::super::EditRequest::new(VideoKind::Explainer);
+        req.voice = Some(voice);
+        req.broll.push(bad);
+        let mut job = Job {
+            ws: &ws,
+            req: &req,
+            style: crate::style::Style::default(),
+            report: super::super::EditReport::default(),
+        };
+        assert!(explainer(&mut job, &mut |_| {}).is_err());
+        assert!(!dir.path().join("projects").exists());
+    }
+
     fn transcript(text: &str) -> Transcript {
         let words: Vec<_> = text
             .split_whitespace()
@@ -1024,8 +1446,7 @@ mod tests {
         assert!(job.report.review.is_empty());
     }
 
-    #[test]
-    fn punch_ins_alternate_and_respect_max_shot() {
+    fn speech_project() -> Project {
         let mut p = Project::new("t", VideoKind::TalkingHeadShort, Canvas::vertical());
         p.assets.push(Asset {
             id: "a".into(),
@@ -1053,17 +1474,152 @@ mod tests {
             },
         )
         .unwrap();
-        // A word every 0.4 s, a phrase boundary every 5 words (2 s).
+        p
+    }
+
+    #[test]
+    fn clips_keep_twenty_seconds_after_pause_cuts_and_short_keeps() {
+        let mut t = transcript(&"Creators can learn. ".repeat(67));
+        for word in &mut t.words {
+            word.end = word.start + 0.15;
+        }
+        t.duration = t.words.last().unwrap().end;
+        let keep: Vec<_> = t.words.iter().map(|w| (w.start, w.end)).collect();
+        let moments = analyze::highlights_with_cuts(&t, &keep, 20.0, 60.0, 1);
+        assert_eq!(moments.len(), 1);
+        let m = &moments[0];
+        let ranges: Vec<_> = keep
+            .iter()
+            .map(|&(a, b)| (a.max(m.start), b.min(m.end)))
+            .filter(|(a, b)| b > a)
+            .collect();
+        let mut p = speech_project();
+        p.main_mut().items.clear();
+        p.assets[0].duration = t.duration;
+        lay_main(&mut p, "a", &ranges).unwrap();
+        assert!((20.0..=60.0).contains(&p.duration()), "{}", p.duration());
+        assert!(p.main().items.iter().all(|i| i.duration < 0.2));
+    }
+
+    #[test]
+    fn tutorial_restores_mislabeled_speech_and_speeds_only_silence() {
+        let mut p = speech_project();
+        p.main_mut().items.clear();
+        let mut t = transcript("Quiet narration.");
+        for (i, word) in t.words.iter_mut().enumerate() {
+            word.start = 2.0 + i as f64;
+            word.end = word.start + 0.4;
+        }
+        let plan = analyze::CutPlan {
+            keep: vec![(0.0, 1.0), (5.0, 6.0), (10.0, 12.0)],
+            removed: [(1.0, 5.0), (6.0, 10.0)]
+                .into_iter()
+                .map(|(start, end)| analyze::Removal {
+                    start,
+                    end,
+                    reason: CutReason::Silence,
+                    text: String::new(),
+                    review: false,
+                    note: String::new(),
+                })
+                .collect(),
+        };
+        lay_tutorial(&mut p, "a", &plan, &t).unwrap();
+        for word in &t.words {
+            assert!(
+                p.main().items.iter().any(|item| {
+                    let c = item.clip().unwrap();
+                    c.src_in <= word.start
+                        && c.src_out(item.duration) >= word.end
+                        && c.speed == 1.0
+                        && !c.muted
+                }),
+                "{word:?}"
+            );
+        }
+        let fast: Vec<_> = p
+            .main()
+            .items
+            .iter()
+            .filter(|i| i.clip().unwrap().speed > 1.0)
+            .collect();
+        assert_eq!(fast.len(), 1);
+        let c = fast[0].clip().unwrap();
+        assert!(c.src_in >= 6.0 && c.src_out(fast[0].duration) <= 10.0 && c.muted);
+        let label = p
+            .tracks
+            .iter()
+            .flat_map(|t| &t.items)
+            .find_map(|i| {
+                if let ItemBody::Text(text) = &i.body {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert_eq!(label.position, Some(Point::new(0.5, 0.92)));
+    }
+
+    #[test]
+    fn short_automatic_hook_holds_for_three_seconds() {
+        let ws = crate::workspace::Workspace { root: ".".into() };
+        let req = super::super::EditRequest::new(VideoKind::TalkingHeadShort);
+        let mut job = Job {
+            ws: &ws,
+            req: &req,
+            style: crate::style::Style::default(),
+            report: super::super::EditReport::default(),
+        };
+        let mut p = speech_project();
+        add_hook(&mut job, &mut p, &transcript("Kumusta ka."), None).unwrap();
+        let hook = p
+            .tracks
+            .iter()
+            .flat_map(|t| &t.items)
+            .find(|i| matches!(i.body, ItemBody::Text(_)))
+            .unwrap();
+        assert_eq!(hook.start, 0.0);
+        assert_eq!(hook.duration, 3.0);
+    }
+
+    #[test]
+    fn mistake_reviews_require_listening_and_protect_unique_speech() {
+        let ws = crate::workspace::Workspace { root: ".".into() };
+        let req = super::super::EditRequest::new(VideoKind::TalkingHeadLong);
+        let mut job = Job {
+            ws: &ws,
+            req: &req,
+            style: crate::style::Style::default(),
+            report: super::super::EditReport::default(),
+        };
+        note_reviews(
+            &mut job,
+            &[analyze::Removal {
+                start: 75.0,
+                end: 78.0,
+                reason: CutReason::Retake,
+                text: "So the surface was unexpected.".into(),
+                review: true,
+                note: "Opening repeats later with a different continuation".into(),
+            }],
+        );
+        let review = &job.report.review[0];
+        assert!(review.contains("Listen"));
+        assert!(review.contains("unique speech"));
+        assert!(review.contains("Opening repeats later with a different continuation"));
+        assert!(!review.contains("If it is a mistake, cut it"));
+    }
+
+    #[test]
+    fn punch_ins_use_word_gaps_and_bound_wide_and_punched_shots() {
+        let p = speech_project();
+        // Dense narration without punctuation or a 0.12 s phrase gap.
         let words = (0..30)
             .map(|i| {
                 let start = i as f64 * 0.4;
-                let text = if i % 5 == 4 {
-                    "word,".to_string()
-                } else {
-                    "word".to_string()
-                };
                 TranscriptWord {
-                    text,
+                    text: "word".into(),
                     start,
                     end: start + 0.3,
                     confidence: None,
@@ -1077,21 +1633,44 @@ mod tests {
             duration: 12.0,
             words,
         };
-        punch_ins(&mut p, &t, 1.2, 2.0, 2.8, 1.15);
-        let zooms = &p.main().items[0].clip().unwrap().zooms;
-        assert!(zooms.len() >= 2, "{zooms:?}");
-        // Wide and punched shots alternate, so punched intervals never touch.
-        for pair in zooms.windows(2) {
+        for punctuated in [false, true] {
+            let mut p = p.clone();
+            let mut t = t.clone();
+            if punctuated {
+                for word in t.words.iter_mut().skip(4).step_by(5) {
+                    word.text.push(',');
+                }
+            }
+            punch_ins(&mut p, &t, 1.2, 2.0, 2.8, 1.15);
+            let zooms = &p.main().items[0].clip().unwrap().zooms;
+            assert!(zooms.len() >= 2, "{zooms:?}");
+            // Wide and punched shots alternate, so punched intervals never touch.
+            for pair in zooms.windows(2) {
+                assert!(
+                    pair[1].at > pair[0].at + pair[0].duration + 1.0,
+                    "{zooms:?}"
+                );
+            }
             assert!(
-                pair[1].at > pair[0].at + pair[0].duration + 1.0,
-                "{zooms:?}"
+                zooms
+                    .iter()
+                    .all(|z| z.duration <= 2.8 + 1e-6 && z.scale == 1.15)
             );
+            let mut cursor = 0.0;
+            for zoom in zooms {
+                assert!(zoom.at - cursor <= 2.8 + 1e-6, "{zooms:?}");
+                for boundary in [zoom.at, zoom.at + zoom.duration] {
+                    assert!(
+                        !t.words
+                            .iter()
+                            .any(|w| w.start < boundary && boundary < w.end),
+                        "switch inside a word at {boundary}"
+                    );
+                }
+                cursor = zoom.at + zoom.duration;
+            }
+            assert!(p.duration() - cursor <= 2.8 + 1e-6, "{zooms:?}");
         }
-        assert!(
-            zooms
-                .iter()
-                .all(|z| z.duration <= 2.8 + 1e-6 && z.scale == 1.15)
-        );
     }
 
     #[test]

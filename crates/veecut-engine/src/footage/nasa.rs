@@ -123,15 +123,15 @@ pub(super) fn resolve(id: &str) -> Result<(Candidate, Vec<String>)> {
     Ok((c.clone(), pick(&files, c.kind)))
 }
 
-/// Renditions between 720p and 1080p first, never a multi-GB original unless nothing else
-/// exists (the download cap still applies). Measured on the library: `~large.mp4` is 1080p,
-/// `~medium.mp4` 720p, `~small.mp4` 360p.
+/// Prefer the 720p medium rendition, then smaller files, before 1080p or an original.
+/// The download cap still applies to every fallback.
 fn pick(files: &[String], kind: MediaKind) -> Vec<String> {
     let order: &[&str] = match kind {
         MediaKind::Video => &[
-            "~large.mp4",
             "~medium.mp4",
             "~small.mp4",
+            "~mobile.mp4",
+            "~large.mp4",
             "~orig.mp4",
             "~orig.mov",
         ],
@@ -388,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn picks_a_720_to_1080_rendition_over_the_original() {
+    fn picks_medium_and_smaller_renditions_before_large_or_original() {
         let base = "http://images-assets.nasa.gov/video/K/K";
         let files: Vec<String> = [
             "~orig.mp4",
@@ -405,12 +405,14 @@ mod tests {
         let picked = pick(&files, MediaKind::Video);
         assert_eq!(
             picked[0],
-            "https://images-assets.nasa.gov/video/K/K~large.mp4"
+            "https://images-assets.nasa.gov/video/K/K~medium.mp4"
         );
         assert_eq!(
             picked[1],
-            "https://images-assets.nasa.gov/video/K/K~medium.mp4"
+            "https://images-assets.nasa.gov/video/K/K~small.mp4"
         );
+        assert!(picked[2].ends_with("~mobile.mp4"));
+        assert!(picked[3].ends_with("~large.mp4"));
         assert_eq!(
             picked.last().unwrap(),
             "https://images-assets.nasa.gov/video/K/K~orig.mp4"

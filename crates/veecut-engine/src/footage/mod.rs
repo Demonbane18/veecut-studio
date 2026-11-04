@@ -32,8 +32,9 @@ use crate::workspace::Workspace;
 
 pub use sheet::contact_sheet;
 
-/// Largest video file `fetch` downloads.
-pub const VIDEO_CAP: u64 = 300 * 1024 * 1024;
+/// Largest video file `fetch` downloads. Documentary shots use a few seconds of each file, so
+/// bigger renditions only slow a first `--find` down; a skipped file falls through to the next.
+pub const VIDEO_CAP: u64 = 150 * 1024 * 1024;
 /// Largest picture file `fetch` downloads.
 pub const IMAGE_CAP: u64 = 40 * 1024 * 1024;
 
@@ -400,6 +401,20 @@ fn sidecar_path(file: &Path) -> PathBuf {
     let mut name = file.as_os_str().to_owned();
     name.push(".source.json");
     PathBuf::from(name)
+}
+
+/// Imports adjacent fetch provenance; approval must be granted in the receiving project.
+pub(crate) fn source_for(file: &Path) -> Result<Option<Source>> {
+    let path = sidecar_path(file);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let mut source: Source = serde_json::from_slice(&bytes)
+        .with_context(|| format!("reading source record {}", path.display()))?;
+    source.approved = false;
+    Ok(Some(source))
 }
 
 /// An earlier, still readable download of `stem` with its sidecar.
@@ -821,6 +836,51 @@ mod tests {
         };
         ops::apply(&mut cleared, &approve).unwrap();
         assert!(check_final(&cleared).is_ok());
+    }
+
+    #[test]
+    fn recipe_asset_import_keeps_sidecar_credits_and_blocks_flagged_finals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace::init(tmp.path()).unwrap();
+        fs::create_dir_all(ws.footage()).unwrap();
+        let file = ws.footage().join("nasa-synthetic.png");
+        image::RgbaImage::new(32, 32).save(&file).unwrap();
+        let mut source = flagged("third-party credit needs review");
+        source.credit = Some("Synthetic credit, CC BY-NC 2.0".into());
+        source.approved = true;
+        fs::write(
+            sidecar_path(&file),
+            serde_json::to_vec(&Sidecar {
+                source,
+                candidate: Candidate::new(Provider::Nasa, "synthetic", MediaKind::Image),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let (dir, mut project) = ws
+            .create_project("recipe", VideoKind::Explainer, Canvas::vertical())
+            .unwrap();
+        // Recipes and `veecut add` share this import path, not `add_to_project`.
+        let id = ws
+            .add_asset(&mut project, &dir, &file, AssetRole::Broll)
+            .unwrap();
+        assert_eq!(
+            project.sources[&id].credit.as_deref(),
+            Some("Synthetic credit, CC BY-NC 2.0")
+        );
+        assert!(
+            !project.sources[&id].approved,
+            "approval belongs to this project"
+        );
+        assert!(check_final(&project).is_ok(), "unused files do not block");
+        let clip: Op = serde_json::from_value(serde_json::json!({
+            "op": "add_clip", "asset": id, "track": "main", "duration": 2.0
+        }))
+        .unwrap();
+        ops::apply(&mut project, &clip).unwrap();
+        ws.save_project(&dir, &project).unwrap();
+        let saved = Project::load(&dir.join(crate::project::PROJECT_FILE)).unwrap();
+        assert!(check_final(&saved).unwrap_err().to_string().contains(&id));
     }
 
     #[test]

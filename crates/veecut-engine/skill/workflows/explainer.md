@@ -28,9 +28,11 @@ Other source visuals come first, followed by `--broll` in its supplied order. Wh
 ## What the recipe does
 
 - Puts the narration on a voice track and cuts its pauses (over 0.55 s with the natural pace, over 0.25 s when tight) and its stutters, false starts and high-confidence retakes.
-- Shows one visual per sentence, in the order given, merging sentences shorter than 1.5 s into the next. Visuals repeat when needed to cover narration. A short video repeats within its sentence without moving the next shot boundary; footage plays muted. Motion follows `--motion`, or the original recipe when omitted.
-- Without any visuals, the captions become the picture: big and centered.
-- Turns each `--copy` line into a heading card near the top, one per shot from the start, up to 4 s each.
+- Shows one visual per sentence, in the order given, merging sentences shorter than 1.5 s into the next. Visuals repeat when needed to cover narration, and the review says how many shots reuse a visual (more visuals look better). A short video repeats within its sentence without moving the next shot boundary; footage plays muted. Motion follows `--motion`, or the original recipe when omitted. `glide` starts slightly zoomed so its pan never hits the picture edge.
+- Pictures are cropped to fill the frame. When a crop throws away more than 30% of a picture, the review names it and gives the patch that shows it whole instead (`{"fit":"contain","ken_burns":null}`).
+- Without any visuals, the captions become the picture: one large word at a time, centered, on a dark slate background.
+- Puts each `--copy` heading on the shot where the narration says it (matching spoken phrases or topic words, in order), each ending before the next heading. A heading that matches nothing is left out and named in the review so you can place it with `add_text`.
+- In 16:9, captions default to the lower part of the frame instead of the upper third.
 - Adds a ducked music bed from `--music` or `my-sounds/music/` when the style sound is `sfx_music`, and sound effects on text unless the style is `voice_only`.
 - Renders `outbox/<slug>-v1.mp4` and checks it, unless `--no-render` is set.
 

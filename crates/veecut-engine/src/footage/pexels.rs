@@ -175,7 +175,7 @@ fn video(v: &Video) -> (Candidate, Vec<String>) {
     c.width = v.width;
     c.height = v.height;
     c.duration = v.duration;
-    // 720p to 1080p first (by the short side, so portrait clips count too), then smaller.
+    // Prefer medium HD (720p) to 1080p by the short side, including portrait clips.
     let mut files: Vec<&VideoFile> = v
         .video_files
         .iter()
@@ -183,7 +183,7 @@ fn video(v: &Video) -> (Candidate, Vec<String>) {
         .collect();
     files.sort_by_key(|f| {
         let p = i64::from(f.width.min(f.height));
-        (!(720..=1080).contains(&p), if p > 1080 { p } else { -p })
+        (!(720..=1080).contains(&p), if p < 720 { -p } else { p })
     });
     (c, files.into_iter().map(|f| f.link.clone()).collect())
 }
@@ -233,8 +233,8 @@ mod tests {
         assert_eq!(
             files,
             [
-                "https://videos.pexels.com/hd.mp4",
                 "https://videos.pexels.com/720.mp4",
+                "https://videos.pexels.com/hd.mp4",
                 "https://videos.pexels.com/sd.mp4",
                 "https://videos.pexels.com/uhd.mp4"
             ]

@@ -30,7 +30,7 @@ veecut sources --flag asset-4 --reason "looks like a news photo"
 
 - `veecut find "IDEA"` numbers the results and saves a contact sheet to `.veecut/find/last.png`: each thumbnail with its number (red when flagged), provider, kind, size, licence and flag reason. `--images` or `--videos` limits the kind; `--from` takes `nasa`, `commons`, `archive`, `openverse` and `pexels`, comma separated; `--count` is results per provider, 1 to 20, default 4. One failing provider becomes a warning; the others still answer.
 - `veecut fetch N` downloads number N from the last find into `footage/<provider>-<id>.<ext>`, checks with ffprobe that it really is a picture or a video, writes `<file>.source.json` next to it and adds it to the project as an asset with its source record. Pictures become `image` assets and videos `broll`; `--role` overrides that with `broll`, `image` or `music`. It prints the asset id, the licence and the credit line. A file fetched before is reused.
-- Downloads are capped at 300 MB for a video and 40 MB for a picture. VeeCut takes jpg, png and webp pictures and mp4, webm and ogv videos.
+- Downloads are capped at 150 MB for a video and 40 MB for a picture, preferring medium-size renditions. VeeCut takes jpg, png and webp pictures and mp4, webm and ogv videos.
 - `footage/` and `.veecut/find/` stay out of git. Files in `footage/` are never edited after download.
 - MCP: `find_footage` (`idea`, `images`, `videos`, `from`, `count`) returns the contact sheet as an image; `fetch_footage` (`item`, `role`); `sources` (`flag`, `reason`, `credits`) has no approve option.
 
@@ -66,7 +66,7 @@ Every candidate carries its licence. VeeCut allows these without a check: public
 
 - `veecut edit --kind documentary --find` never picks a flagged file. `veecut fetch` downloads one when asked and prints FLAGGED with the reason.
 - A final render (`veecut render --final`, or Export at final quality in Studio) refuses while the edit uses a flagged file nobody approved. Drafts still render.
-- You never decide that a flagged file is fine. Show the user the file, its page and the reason. Only the user approves: they run `veecut sources --approve ASSET` after checking the rights, press Approve in Studio's Sources tab, or tell you they checked that file and want it approved. Otherwise replace the file.
+- You never decide that a flagged file is fine. Show the user the file, its page and the reason. Only the user approves, after checking the rights: ask them to press Approve in Studio's Sources tab or run `veecut sources --approve ASSET` themselves in a terminal. You cannot approve for them, even when they ask. Otherwise replace the file.
 - Flag anything that looks wrong even when its licence looks fine, such as a company's film, a news photo or someone's own clip: `veecut sources --flag ASSET --reason TEXT`. You may flag; only the user approves.
 - Credit lines are ready for the video description: `veecut sources --credits`. CC BY and CC BY-SA lines say the work was changed ("re-coloured, cropped and cut"); Pexels lines read "Photo by NAME on Pexels".
 - Each downloaded file keeps its own licence, recorded in the project and in its `.source.json`. Never upload or publish anything.

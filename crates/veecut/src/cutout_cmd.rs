@@ -61,12 +61,19 @@ impl Ctx {
                     let id = self
                         .ws
                         .add_asset(&mut next, &dir, &file, AssetRole::Broll)?;
-                    ops::apply(
+                    // add_asset also imports a fetched picture's `.source.json` licence record.
+                    ops::apply_all(
                         &mut project,
-                        &Op::Set {
-                            path: "/assets".into(),
-                            value: json!(next.assets),
-                        },
+                        &[
+                            Op::Set {
+                                path: "/assets".into(),
+                                value: json!(next.assets),
+                            },
+                            Op::Set {
+                                path: "/sources".into(),
+                                value: json!(next.sources),
+                            },
+                        ],
                     )?;
                     id
                 };

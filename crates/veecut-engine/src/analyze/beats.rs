@@ -19,6 +19,9 @@ pub struct Beats {
 
 const MIN_BPM: f64 = 60.0;
 const MAX_BPM: f64 = 200.0;
+/// Offbeat and double-tempo peaks outside this band lose to a relative inside it.
+const PREFERRED_LO: f64 = 80.0;
+const PREFERRED_HI: f64 = 160.0;
 /// How strongly the beat grid sticks to the tempo (librosa's default tightness).
 const TIGHTNESS: f64 = 100.0;
 
@@ -141,35 +144,86 @@ fn peaks(env: &[f64], fps: f64) -> Vec<usize> {
     out
 }
 
-/// Beat period in frames: the autocorrelation peak in 60-200 BPM, weighted toward 120 BPM so
-/// half and double tempo lose, refined between frames.
+/// Beat period in frames. Autocorrelation peaks in 60-200 BPM are scored with the
+/// strength at 1×, 2× and 1.5× that period. A candidate in 80-160 BPM wins when it
+/// is at least half as strong as a faster or slower relative, so offbeats do not
+/// lock the grid onto a double, dotted or subharmonic tempo.
 fn tempo_period(env: &[f64], fps: f64) -> Option<f64> {
     let lo = (60.0 * fps / MAX_BPM).floor() as usize;
     let hi = (60.0 * fps / MIN_BPM).ceil() as usize;
-    if env.len() <= hi + 2 {
+    if env.len() <= hi + 2 || lo < 1 {
         return None;
     }
-    let ac = |lag: usize| {
+    let ac = |lag: usize| -> f64 {
+        if lag == 0 || lag >= env.len() {
+            return 0.0;
+        }
         env.iter().zip(&env[lag..]).map(|(a, b)| a * b).sum::<f64>() / (env.len() - lag) as f64
     };
     let raw: Vec<f64> = (lo - 1..=hi + 1).map(ac).collect();
-    let weight = |lag: usize| {
-        let bpm = 60.0 * fps / lag as f64;
-        (-0.5 * (bpm / 120.0).log2().powi(2)).exp()
+    let at = |lag: usize| -> f64 {
+        if (lo - 1..=hi + 1).contains(&lag) {
+            raw[lag - (lo - 1)]
+        } else {
+            ac(lag)
+        }
     };
-    let best = (1..raw.len() - 1)
-        .max_by(|&a, &b| (raw[a] * weight(a + lo - 1)).total_cmp(&(raw[b] * weight(b + lo - 1))))?;
-    if raw[best] <= 0.0 {
+    let prior = |bpm: f64| (-2.0 * (bpm / 120.0).log2().powi(2)).exp();
+    let mut best: Option<(f64, usize)> = None;
+    for lag in lo..=hi {
+        let idx = lag - (lo - 1);
+        if raw[idx] < raw[idx - 1] || raw[idx] < raw[idx + 1] {
+            continue;
+        }
+        let bpm = 60.0 * fps / lag as f64;
+        let family = raw[idx] + 0.5 * at(lag * 2) + 0.35 * at(lag * 3 / 2);
+        let range = if (PREFERRED_LO..=PREFERRED_HI).contains(&bpm) {
+            1.0
+        } else {
+            0.35
+        };
+        let score = family * prior(bpm) * range;
+        if best.is_none_or(|(b, _)| score > b) {
+            best = Some((score, lag));
+        }
+    }
+    let mut lag = best?.1;
+    // Prefer the 2× / 1.5× relative inside 80-160 when it is nearly as strong and closer to 120.
+    let bpm = 60.0 * fps / lag as f64;
+    let mut rel_best = lag;
+    let mut rel_score = at(lag) * prior(bpm);
+    for factor in [0.5_f64, 2.0 / 3.0, 1.5, 2.0] {
+        let rel = (lag as f64 * factor).round() as usize;
+        if rel < lo || rel > hi {
+            continue;
+        }
+        let rel_bpm = 60.0 * fps / rel as f64;
+        if !(PREFERRED_LO..=PREFERRED_HI).contains(&rel_bpm) || at(rel) < at(lag) * 0.5 {
+            continue;
+        }
+        let s = at(rel) * prior(rel_bpm);
+        if s > rel_score && (rel_bpm - 120.0).abs() + 1e-6 < (bpm - 120.0).abs() {
+            rel_best = rel;
+            rel_score = s;
+        }
+    }
+    lag = rel_best;
+    let idx = lag - (lo - 1);
+    if raw.get(idx).copied().unwrap_or(0.0) <= 0.0 && at(lag) <= 0.0 {
         return None;
     }
-    let (a, b, c) = (raw[best - 1], raw[best], raw[best + 1]);
+    let (a, b, c) = (
+        raw.get(idx.wrapping_sub(1)).copied().unwrap_or(0.0),
+        at(lag),
+        raw.get(idx + 1).copied().unwrap_or(0.0),
+    );
     let curve = a - 2.0 * b + c;
     let shift = if curve < 0.0 {
         (0.5 * (a - c) / curve).clamp(-0.5, 0.5)
     } else {
         0.0
     };
-    Some((best + lo - 1) as f64 + shift)
+    Some(lag as f64 + shift)
 }
 
 /// Dynamic-programming beat tracker: each beat scores its onset strength plus the best earlier
@@ -177,8 +231,10 @@ fn tempo_period(env: &[f64], fps: f64) -> Option<f64> {
 fn beat_grid(env: &[f64], period: f64) -> Vec<usize> {
     let mut score = vec![0.0; env.len()];
     let mut back: Vec<Option<usize>> = vec![None; env.len()];
+    // ponytail: jumps under 0.75 period lock onto offbeats. Widen toward 0.5 only if a
+    // track's tempo really drifts that fast inside one beat.
     let (near, far) = (
-        (period / 2.0).round() as usize,
+        (period * 0.75).round() as usize,
         (period * 2.0).round() as usize,
     );
     for i in 0..env.len() {
@@ -249,5 +305,56 @@ mod tests {
                 && b.downbeats.iter().all(|d| b.beats.contains(d))
         );
         assert!(b.onsets.len() >= 28);
+    }
+
+    #[test]
+    fn offbeat_clicks_stay_at_120_and_128() {
+        let sr = 22_050u32;
+        for bpm in [120.0, 128.0] {
+            let beat = 60.0 / bpm;
+            let mut pcm = vec![0f32; sr as usize * 16];
+            let mut downs = Vec::new();
+            let mut seed = 1u32;
+            let mut t = 0.25;
+            while t < 15.5 {
+                downs.push(t);
+                // Early offbeat sits inside the old half-period window and used to double the grid.
+                for hit in [t, t + beat * 0.45] {
+                    let at = (hit * sr as f64) as usize;
+                    for i in 0..(sr as usize / 200) {
+                        if at + i >= pcm.len() {
+                            break;
+                        }
+                        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        let noise = (seed >> 9) as f32 / (1u32 << 23) as f32 * 2.0 - 1.0;
+                        pcm[at + i] += 0.8 * noise * (-(i as f32) / 40.0).exp();
+                    }
+                }
+                t += beat;
+            }
+            let b = beats(&pcm, sr);
+            assert!(
+                (b.tempo - bpm).abs() < 4.0,
+                "{bpm} BPM with offbeats detected as {}",
+                b.tempo
+            );
+            for wrong in [bpm * 1.5, bpm * 2.0, bpm / 1.5, bpm / 2.0] {
+                assert!(
+                    (b.tempo - wrong).abs() > 8.0,
+                    "locked to {wrong:.0}, got {}",
+                    b.tempo
+                );
+            }
+            let on_beat = b
+                .beats
+                .iter()
+                .filter(|t| downs.iter().any(|c| (c - *t).abs() < 0.04))
+                .count();
+            assert!(
+                on_beat * 2 >= b.beats.len(),
+                "grid followed offbeats at {bpm}: {:?}",
+                b.beats
+            );
+        }
     }
 }

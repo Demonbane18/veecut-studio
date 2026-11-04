@@ -220,15 +220,22 @@ fn candidate(page: Page) -> Option<(Candidate, Vec<String>)> {
                 .flat_map(|v| &v.derivatives)
                 .filter(transcode)
                 .collect();
-            good.sort_by_key(|d| std::cmp::Reverse(d.height));
+            good.sort_by_key(|d| {
+                (
+                    !(720..=1080).contains(&d.height),
+                    if d.height < 720 {
+                        1080 - d.height
+                    } else {
+                        d.height
+                    },
+                )
+            });
             let (hd, low): (Vec<_>, Vec<_>) = good
                 .into_iter()
                 .partition(|d| d.height >= 720 && d.height <= 1080);
             let mut list: Vec<String> = hd.iter().map(|d| d.src.clone()).collect();
-            if info.height <= 1080 {
-                list.push(info.url.clone());
-            }
             list.extend(low.iter().filter(|d| d.height < 720).map(|d| d.src.clone()));
+            list.push(info.url.clone());
             list
         }
     };
@@ -323,10 +330,10 @@ mod tests {
         assert_eq!(
             files,
             &[
-                "https://upload.wikimedia.org/t/Launch.webm.1080p.vp9.webm",
                 "https://upload.wikimedia.org/t/Launch.webm.720p.vp9.webm",
-                "https://upload.wikimedia.org/wikipedia/commons/a/ab/Launch.webm",
+                "https://upload.wikimedia.org/t/Launch.webm.1080p.vp9.webm",
                 "https://upload.wikimedia.org/t/Launch.webm.240p.vp9.webm",
+                "https://upload.wikimedia.org/wikipedia/commons/a/ab/Launch.webm",
             ]
         );
     }

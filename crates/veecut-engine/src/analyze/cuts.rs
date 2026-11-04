@@ -31,8 +31,12 @@ const TOLERANCE: f64 = 0.05;
 /// How far a pause found in the audio may reach past the transcript's word edges.
 const SLACK: f64 = 0.15;
 /// A high-confidence retake is cut on its own only when the later take starts within this many
-/// seconds of the earlier one; further apart it may be a deliberate callback, so it goes to review.
+/// seconds; further apart it may be a callback, so it goes to review.
 const RETAKE_GAP: f64 = 12.0;
+/// How far ahead a later take is still worth comparing. The marked span is never this gap.
+const RETAKE_LOOK: f64 = 75.0;
+/// A review or cut covers one repeated sentence or one near segment, not the speech between takes.
+const RETAKE_SPAN: f64 = 16.0;
 
 const FILLERS: &[&str] = &[
     "um", "umm", "uhm", "uh", "uhh", "erm", "er", "err", "ah", "ahh", "hmm", "hm", "mm", "mmm",
@@ -438,6 +442,8 @@ impl Planner<'_> {
                 (to - keep).max(limit)
             }
         };
+        // Quiet may be associated up to SLACK past the next word. Never cut into that word.
+        let end = end.min(hi);
         (end - start >= MIN_CUT).then_some((start, end, pause))
     }
 }
@@ -471,55 +477,128 @@ fn mistakes(w: &[&TranscriptWord], tokens: &[String]) -> Vec<Mistake> {
     let segments = segments(w);
     let sigs: Vec<Vec<String>> = segments.iter().map(|s| signature(&w[s.clone()])).collect();
     for i in 0..segments.len() {
-        for j in i + 1..(i + 9).min(segments.len()) {
+        for j in i + 1..segments.len() {
             let (si, sj) = (&segments[i], &segments[j]);
             let gap = w[sj.start].start - w[si.end - 1].end;
-            if gap > 75.0 {
+            if gap > RETAKE_LOOK {
                 break;
             }
             let score = jaccard(&sigs[i], &sigs[j]);
-            let same_opening = (0..4)
-                .filter(
-                    |&k| matches!((sigs[i].get(k), sigs[j].get(k)), (Some(x), Some(y)) if x == y),
-                )
-                .count()
-                >= 2;
-            if score >= 0.34 || (score >= 0.24 && same_opening) {
-                let first_len = w[si.end - 1].end - w[si.start].start;
-                let false_start = same_opening && first_len < 6.0 && gap < 12.0;
-                let level = if score >= 0.45 {
-                    "high"
-                } else if score >= 0.34 {
-                    "medium"
-                } else {
-                    "low"
-                };
-                let later: Vec<&str> = w[sj.clone()]
-                    .iter()
-                    .take(12)
-                    .map(|x| x.text.trim())
-                    .collect();
-                let note = format!(
-                    "{} ({level} confidence, similarity {score:.2}{}); keeps the later take \"{}\"",
-                    if false_start { "false start" } else { "retake" },
-                    if same_opening { ", same opening" } else { "" },
-                    later.join(" "),
-                );
-                out.push(Mistake {
-                    words: si.start..sj.start,
-                    reason: if false_start {
-                        CutReason::FalseStart
-                    } else {
-                        CutReason::Retake
-                    },
-                    score,
-                    sure: score >= 0.45 && gap <= RETAKE_GAP,
-                    note,
-                });
+            // A shared tail ("web browser") is not an opening. Only a prefix of the
+            // content words counts, and the abandoned take must not be the longer one.
+            let prefix = opening_prefix(&sigs[i], &sigs[j]);
+            let prefix_restart = prefix >= 2 && sigs[i].len() <= sigs[j].len();
+            let repeated = repeated_sentences(w, si, sj);
+            if !repeated.is_empty() {
+                for range in repeated {
+                    push_retake(&mut out, w, range, gap, score, prefix_restart, false);
+                }
+                continue;
+            }
+            // Far overlap with no repeated sentence is shared vocabulary, not a retake.
+            // A trailing phrase in common is not a retake even when the takes are close.
+            if gap > RETAKE_GAP || !prefix_restart {
+                continue;
+            }
+            // A prefix restart is a strong hint, so the looser same-opening threshold applies.
+            if score < 0.24 {
+                continue;
+            }
+            let span = w[si.end - 1].end - w[si.start].start;
+            if span <= RETAKE_SPAN {
+                push_retake(&mut out, w, si.clone(), gap, score, true, true);
             }
         }
     }
     out
+}
+
+fn push_retake(
+    out: &mut Vec<Mistake>,
+    w: &[&TranscriptWord],
+    range: Range<usize>,
+    gap: f64,
+    score: f64,
+    same_opening: bool,
+    allow_false_start: bool,
+) {
+    if range.is_empty() {
+        return;
+    }
+    let span = w[range.end - 1].end - w[range.start].start;
+    if span > RETAKE_SPAN {
+        return;
+    }
+    let false_start = allow_false_start && same_opening && span < 6.0 && gap <= RETAKE_GAP;
+    let level = if score >= 0.45 {
+        "high"
+    } else if score >= 0.34 {
+        "medium"
+    } else {
+        "low"
+    };
+    let phrase: Vec<&str> = w[range.clone()]
+        .iter()
+        .take(8)
+        .map(|x| x.text.trim())
+        .collect();
+    out.push(Mistake {
+        words: range,
+        reason: if false_start {
+            CutReason::FalseStart
+        } else {
+            CutReason::Retake
+        },
+        score,
+        sure: same_opening && score >= 0.45 && gap <= RETAKE_GAP,
+        note: format!(
+            "{} ({level} confidence, similarity {score:.2}{}); repeated phrase \"{}\"",
+            if false_start { "false start" } else { "retake" },
+            if same_opening { ", same opening" } else { "" },
+            phrase.join(" "),
+        ),
+    });
+}
+
+/// Sentences inside `earlier` whose words occur, in order, inside `later`.
+fn repeated_sentences(
+    w: &[&TranscriptWord],
+    earlier: &Range<usize>,
+    later: &Range<usize>,
+) -> Vec<Range<usize>> {
+    let hay = word_tokens(w, later.clone());
+    sentence_ranges(w, earlier)
+        .into_iter()
+        .filter(|sentence| {
+            let needle = word_tokens(w, sentence.clone());
+            needle.len() >= 4 && contains_sequence(&hay, &needle)
+        })
+        .collect()
+}
+
+fn sentence_ranges(w: &[&TranscriptWord], seg: &Range<usize>) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    let mut start = seg.start;
+    for i in seg.start..seg.end {
+        let pause = i + 1 < seg.end && w[i + 1].start - w[i].end > 0.85;
+        if ends_sentence(&w[i].text) || pause || i + 1 == seg.end {
+            out.push(start..i + 1);
+            start = i + 1;
+        }
+    }
+    out
+}
+
+fn word_tokens(w: &[&TranscriptWord], range: Range<usize>) -> Vec<String> {
+    w[range]
+        .iter()
+        .map(|x| clean_token(&x.text))
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+fn contains_sequence(hay: &[String], needle: &[String]) -> bool {
+    !needle.is_empty() && hay.windows(needle.len()).any(|win| win == needle)
 }
 
 /// Herk Edit Kit's segments: break on a pause over 0.85 s, at a sentence end once the segment is
@@ -561,6 +640,11 @@ fn jaccard(a: &[String], b: &[String]) -> f64 {
     let a: HashSet<&str> = a.iter().map(String::as_str).collect();
     let b: HashSet<&str> = b.iter().map(String::as_str).collect();
     a.intersection(&b).count() as f64 / a.union(&b).count().max(1) as f64
+}
+
+/// How many content words the two signatures share from the start.
+fn opening_prefix(a: &[String], b: &[String]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }
 
 #[cfg(test)]
@@ -776,6 +860,141 @@ mod tests {
             kept(&plan, 0.5, 3.3),
             "not cut without review: {:?}",
             plan.keep
+        );
+    }
+
+    #[test]
+    fn retake_review_covers_only_the_repeated_sentence() {
+        let repeated = "So the surface of Bennu was really unexpected.";
+        let mut words = sentence("We can maintain our orbit.", 70.0);
+        words.extend(sentence(repeated, 75.0));
+        words.extend(sentence(
+            "We had expected to find large areas of sand essentially a beach.",
+            82.0,
+        ));
+        words.extend(sentence(
+            "Finding a sample site was very difficult on that rocky surface.",
+            95.0,
+        ));
+        words.extend(sentence(repeated, 140.0));
+        words.extend(sentence(
+            "We had expected sand but designed the head for a beach of pebbles.",
+            148.0,
+        ));
+        let (t, pcm) = take(&words, 160.0);
+        let plan = plan_cuts(&t, &pcm, SR, &CutSettings::natural());
+        let retakes: Vec<_> = plan
+            .removed
+            .iter()
+            .filter(|r| matches!(r.reason, CutReason::Retake | CutReason::FalseStart))
+            .collect();
+        assert!(!retakes.is_empty(), "repeated sentence should be flagged");
+        for r in &retakes {
+            assert!(
+                r.end - r.start < 15.0,
+                "span {:.1}s swallows unique speech: {r:?}",
+                r.end - r.start
+            );
+            assert!(
+                r.text.contains("surface of Bennu") && !r.text.contains("sample site"),
+                "only the repeated sentence, got {}",
+                r.text
+            );
+        }
+        assert!(
+            kept(&plan, 95.0, 102.0),
+            "unique middle stays: {:?}",
+            plan.keep
+        );
+    }
+
+    #[test]
+    fn shared_vocabulary_across_a_long_gap_is_not_a_retake() {
+        let mut words = sentence(
+            "NASA OSIRIS mission will help better answer this question about the asteroid surface.",
+            29.0,
+        );
+        words.extend(sentence(
+            "Radiation and heat on a small asteroid change its orbit over time.",
+            40.0,
+        ));
+        words.extend(sentence(
+            "Scientists hope the spacecraft data predicts how an asteroid drifts.",
+            85.0,
+        ));
+        let (t, pcm) = take(&words, 100.0);
+        let plan = plan_cuts(&t, &pcm, SR, &CutSettings::natural());
+        let bad: Vec<_> = plan
+            .removed
+            .iter()
+            .filter(|r| matches!(r.reason, CutReason::Retake | CutReason::FalseStart))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "shared topic words are not a retake: {bad:?}"
+        );
+    }
+
+    #[test]
+    fn silence_cuts_stop_at_the_next_word() {
+        let words = [
+            ("Here", 1.00, 1.20),
+            ("I", 2.00, 2.03),
+            ("am", 2.03, 2.06),
+            ("using", 2.06, 2.12),
+        ];
+        let (t, mut pcm) = take(&words, 3.0);
+        // Transcript times sit early of the tone, so the quiet run runs through those words.
+        let from = (1.20 * SR as f64) as usize;
+        let late = (2.12 * SR as f64) as usize;
+        for (i, s) in pcm[from..late].iter_mut().enumerate() {
+            *s = if i % 2 == 0 { 1e-4 } else { -1e-4 };
+        }
+        for i in late..(2.40 * SR as f64) as usize {
+            pcm[i] = 0.3 * (i as f32 * 220.0 * std::f32::consts::TAU / SR as f32).sin();
+        }
+        let plan = plan_cuts(&t, &pcm, SR, &CutSettings::natural());
+        for r in plan.removed.iter().filter(|r| !r.review) {
+            for w in &t.words {
+                let overlaps = r.start < w.end - 1e-3 && r.end > w.start + 1e-3;
+                assert!(!overlaps, "cut {r:?} overlaps {}", w.text);
+            }
+        }
+        assert!(kept(&plan, 2.00, 2.12), "{:?}", plan.removed);
+    }
+
+    #[test]
+    fn shared_trailing_phrase_is_not_a_false_start() {
+        // Tutorial: "open your web browser." then "Here I am using Chrome web browser."
+        // The shared tail must not auto-cut the first sentence.
+        let words = [
+            ("First,", 29.38, 29.50),
+            ("open", 30.60, 30.66),
+            ("your", 30.78, 30.80),
+            ("web", 30.94, 30.98),
+            ("browser.", 31.18, 31.24),
+            ("Here", 33.64, 33.78),
+            ("I", 33.96, 33.9625),
+            ("am", 33.9625, 33.9675),
+            ("using", 33.9675, 33.98),
+            ("Chrome", 34.84, 34.872),
+            ("web", 34.872, 34.888),
+            ("browser.", 34.888, 34.92),
+        ];
+        let (t, pcm) = take(&words, 36.0);
+        let plan = plan_cuts(&t, &pcm, SR, &CutSettings::natural());
+        assert!(
+            kept(&plan, 30.60, 31.24),
+            "first sentence cut: {:?}",
+            plan.removed
+        );
+        assert!(
+            plan.removed
+                .iter()
+                .filter(|r| !r.review)
+                .all(|r| { !(r.start < 31.24 && r.end > 30.60) }),
+            "auto-cut overlaps the sentence: {:?}",
+            plan.removed
         );
     }
 }

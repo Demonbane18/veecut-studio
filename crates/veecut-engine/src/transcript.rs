@@ -167,7 +167,7 @@ struct Raw {
 /// True when a main-track item of another asset plays between `from` and `to`.
 fn foreign_between(p: &Project, asset: &str, from: f64, to: f64) -> bool {
     p.main().items.iter().any(|it| {
-        it.clip().map_or(true, |c| c.asset != asset) && it.start < to - EPS && it.end() > from + EPS
+        it.clip().is_none_or(|c| c.asset != asset) && it.start < to - EPS && it.end() > from + EPS
     })
 }
 

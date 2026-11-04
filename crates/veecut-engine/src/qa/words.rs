@@ -333,7 +333,7 @@ fn spell(n: u64, out: &mut Vec<String>) {
         out.push(ONES[n as usize].into());
     } else if n < 100 {
         out.push(TENS[(n / 10) as usize].into());
-        if n % 10 != 0 {
+        if !n.is_multiple_of(10) {
             out.push(ONES[(n % 10) as usize].into());
         }
     } else {
@@ -349,7 +349,7 @@ fn spell(n: u64, out: &mut Vec<String>) {
         .expect("n is at least 100");
         spell(n / scale, out);
         out.push(name.into());
-        if n % scale != 0 {
+        if !n.is_multiple_of(scale) {
             spell(n % scale, out);
         }
     }
@@ -416,10 +416,10 @@ fn align(e: &[Token], h: &[Token]) -> Vec<Option<(usize, bool)>> {
             let here = offset[i] + j - lo[i];
             let mut best = (cost[here], step[here]);
             let mut offer = |from: Option<usize>, add: f64, s: Step| {
-                if let Some(c) = from.map(|k| cost[k] + add) {
-                    if c < best.0 {
-                        best = (c, s);
-                    }
+                if let Some(c) = from.map(|k| cost[k] + add)
+                    && c < best.0
+                {
+                    best = (c, s);
                 }
             };
             if i > 0 && j > 0 && gap(i - 1, j - 1) <= WINDOW {

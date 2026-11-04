@@ -735,7 +735,7 @@ fn frame_image(req: &FrameReq) -> Result<(Vec<u8>, FocusMap)> {
 }
 
 fn fill_rgba(buf: &mut [u8], rgb: [u8; 3], alpha: u8) {
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
     }
 }

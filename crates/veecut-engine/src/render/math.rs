@@ -217,7 +217,7 @@ pub(crate) fn atempo_chain(speed: f64) -> Vec<f64> {
 
 pub(crate) fn round_even(n: u32) -> u32 {
     let n = n.max(2);
-    if n % 2 == 0 { n } else { n + 1 }
+    if n.is_multiple_of(2) { n } else { n + 1 }
 }
 
 pub(crate) fn color_unchanged(look: &Look) -> bool {

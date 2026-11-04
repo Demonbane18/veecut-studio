@@ -180,10 +180,10 @@ pub fn probe(path: &Path) -> Result<MediaInfo> {
             .tags
             .get("rotate")
             .and_then(|r| r.as_str()?.parse::<f64>().ok());
-        if let Some(r) = side_rotation.or(tag_rotation) {
-            if (r.abs() as i64) % 180 == 90 {
-                std::mem::swap(&mut width, &mut height);
-            }
+        if let Some(r) = side_rotation.or(tag_rotation)
+            && (r.abs() as i64) % 180 == 90
+        {
+            std::mem::swap(&mut width, &mut height);
         }
     }
     let kind = if is_image && video.is_some() {
@@ -240,7 +240,9 @@ pub fn pcm_mono(path: &Path, sample_rate: u32, range: Option<(f64, f64)>) -> Res
     ]);
     let bytes = run(&mut cmd).with_context(|| format!("decoding audio from {}", path.display()))?;
     Ok(bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect())
 }

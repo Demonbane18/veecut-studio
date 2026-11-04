@@ -45,10 +45,10 @@ pub(super) fn punch_ins(
         }
         let ta = project.source_to_timeline(asset, a.end);
         let tb = project.source_to_timeline(asset, b.start);
-        if let (Some(ta), Some(tb)) = (ta, tb) {
-            if (0.0..0.6).contains(&(tb - ta)) {
-                points.push(((ta + tb) / 2.0, false, phrase_end));
-            }
+        if let (Some(ta), Some(tb)) = (ta, tb)
+            && (0.0..0.6).contains(&(tb - ta))
+        {
+            points.push(((ta + tb) / 2.0, false, phrase_end));
         }
     }
     points.sort_by(|x, y| x.0.total_cmp(&y.0));
@@ -222,7 +222,7 @@ pub(super) fn talking_head(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Res
         add_hook(job, &mut p, &transcript, face)?;
     }
     place_broll(job, &dir, &mut p, &transcript)?;
-    add_captions(job, &mut p, &transcript)?;
+    add_captions(job, &dir, &mut p, &transcript)?;
     music_bed(job, &dir, &mut p, true)?;
     text_sfx(job, &dir, &mut p)?;
     job.finish(&dir, &mut p, progress)
@@ -471,7 +471,7 @@ pub(super) fn podcast(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<(
     }
     cut_summary(job, &plan.removed, first.duration, p.duration());
     place_broll(job, &dir, &mut p, &transcript)?;
-    add_captions(job, &mut p, &transcript)?;
+    add_captions(job, &dir, &mut p, &transcript)?;
     music_bed(job, &dir, &mut p, true)?;
     text_sfx(job, &dir, &mut p)?;
     job.finish(&dir, &mut p, progress)
@@ -570,7 +570,7 @@ pub(super) fn clips(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()>
             m.score,
             m.reason
         ));
-        add_captions(job, &mut p, &t)?;
+        add_captions(job, &dir, &mut p, &t)?;
         music_bed(job, &dir, &mut p, true)?;
         text_sfx(job, &dir, &mut p)?;
         job.finish(&dir, &mut p, progress)?;
@@ -667,10 +667,11 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
     // One shot per sentence, merging sentences shorter than 1.5 s into the next.
     let mut starts = vec![0.0];
     for s in transcript.sentences().iter().skip(1) {
-        if let Some(t) = to_timeline(s.start) {
-            if t - starts.last().copied().unwrap_or(0.0) >= 1.5 && total - t >= 1.0 {
-                starts.push(t);
-            }
+        if let Some(t) = to_timeline(s.start)
+            && t - starts.last().copied().unwrap_or(0.0) >= 1.5
+            && total - t >= 1.0
+        {
+            starts.push(t);
         }
     }
     let shots: Vec<(f64, f64)> = starts
@@ -714,7 +715,7 @@ pub(super) fn explainer(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result
             .extend(add_explainer_headings(&mut p, &transcript, copy)?);
     }
     cut_summary(job, &plan.removed, transcript.duration, total);
-    add_captions(job, &mut p, &transcript)?;
+    add_captions(job, &dir, &mut p, &transcript)?;
     music_bed(job, &dir, &mut p, true)?;
     text_sfx(job, &dir, &mut p)?;
     job.finish(&dir, &mut p, progress)

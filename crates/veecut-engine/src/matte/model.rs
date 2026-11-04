@@ -145,7 +145,7 @@ impl Model {
         let values = view
             .as_slice_mut()
             .context("MODNet input tensor is not contiguous")?;
-        for (i, pixel) in self.small.buffer().chunks_exact(3).enumerate() {
+        for (i, pixel) in self.small.buffer().as_chunks::<3>().0.iter().enumerate() {
             for c in 0..3 {
                 values[c * n + i] = pixel[c] as f32 / 127.5 - 1.0;
             }

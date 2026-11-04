@@ -19,11 +19,11 @@ pub fn mix_audio(
 ) -> Result<()> {
     let (start, end) = range_of(project, range)?;
     let dur = end - start;
-    if let Some(parent) = out_wav.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
+    if let Some(parent) = out_wav.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
     let clips = collect(project, project_dir, start, end)?;
     if clips.is_empty() {
@@ -479,12 +479,10 @@ pub(crate) fn fit_true_peak(mp4: &Path, wav: &Path, ceiling_db: f32) -> Result<(
         limit_db -= (tp - ceiling_db) + 0.5;
         remux_limited(mp4, wav, limit_db)?;
     }
-    if let Some(tp) = file_peak(mp4)? {
-        if tp > ceiling_db + 0.1 {
-            bail!(
-                "exported audio true peak is {tp:.1} dBTP, above the {ceiling_db:.1} dBTP ceiling"
-            );
-        }
+    if let Some(tp) = file_peak(mp4)?
+        && tp > ceiling_db + 0.1
+    {
+        bail!("exported audio true peak is {tp:.1} dBTP, above the {ceiling_db:.1} dBTP ceiling");
     }
     Ok(())
 }

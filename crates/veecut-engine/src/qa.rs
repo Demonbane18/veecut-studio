@@ -75,19 +75,19 @@ pub fn check(path: &Path) -> Result<QaReport> {
             .problems
             .push(format!("could not measure loudness or black frames: {e:#}")),
     }
-    if let Some(tp) = report.true_peak_db {
-        if tp > -1.0 {
-            report
-                .problems
-                .push(format!("true peak is {tp:.1} dB, above -1 dBTP"));
-        }
+    if let Some(tp) = report.true_peak_db
+        && tp > -1.0
+    {
+        report
+            .problems
+            .push(format!("true peak is {tp:.1} dB, above -1 dBTP"));
     }
-    if let Some(lufs) = report.integrated_lufs {
-        if (lufs - -14.0).abs() > 1.0 {
-            report.problems.push(format!(
-                "integrated loudness is {lufs:.1} LUFS, more than 1 LU from -14"
-            ));
-        }
+    if let Some(lufs) = report.integrated_lufs
+        && (lufs - -14.0).abs() > 1.0
+    {
+        report.problems.push(format!(
+            "integrated loudness is {lufs:.1} LUFS, more than 1 LU from -14"
+        ));
     }
     for seg in &report.black_segments {
         let d = seg.end - seg.start;

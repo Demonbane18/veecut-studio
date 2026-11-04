@@ -437,7 +437,7 @@ pub(super) fn edit(job: &mut Job, progress: &mut dyn FnMut(&str)) -> Result<()> 
                     job.report.summary.push(format!("{n} timed lyric lines"));
                 }
                 None => match job.transcript(&dir, &p, &music_id, progress) {
-                    Ok(t) if !t.words.is_empty() => add_captions(job, &mut p, &t)?,
+                    Ok(t) if !t.words.is_empty() => add_captions(job, &dir, &mut p, &t)?,
                     Ok(_) | Err(_) => job.report.review.push(
                         "No lyrics: transcription found no clear vocals. Pass timed lyrics as LRC with --copy.".into(),
                     ),
